@@ -7,8 +7,9 @@ const sendBtn = $('send-btn');
 const stopBtn = $('stop-btn');
 const modelSelect = $('model-select');
 const autoApprove = $('auto-approve');
-const chatHistory = $('chat-history');
-const deleteChatBtn = $('delete-chat-btn');
+const chatList = $('chat-list');
+const sidebar = $('sidebar');
+const thinkToggle = $('think-toggle');
 
 let cwd = null;
 let busy = false;
@@ -34,10 +35,16 @@ let currentChatId = null;
 
   const savedCwd = localStorage.getItem('cwd');
   if (savedCwd) setCwd(savedCwd);
-  
+
+  thinkToggle.checked = localStorage.getItem('think') === '1';
+  autoApprove.checked = localStorage.getItem('autoApprove') === '1';
+
   // Load chat history
   loadChatHistory();
 })();
+
+thinkToggle.addEventListener('change', () => localStorage.setItem('think', thinkToggle.checked ? '1' : '0'));
+autoApprove.addEventListener('change', () => localStorage.setItem('autoApprove', autoApprove.checked ? '1' : '0'));
 
 modelSelect.addEventListener('change', () => localStorage.setItem('model', modelSelect.value));
 
@@ -57,13 +64,45 @@ function setCwd(p) {
 // ---------- chat history ----------
 function loadChatHistory() {
   const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
-  chatHistory.innerHTML = '<option value="">Chat History</option>';
-  chats.forEach(chat => {
-    const opt = document.createElement('option');
-    opt.value = chat.id;
-    opt.textContent = chat.title || `Chat ${chat.id.substring(0, 8)}`;
-    chatHistory.appendChild(opt);
-  });
+  chatList.innerHTML = '';
+
+  if (chats.length === 0) {
+    const noChats = document.createElement('div');
+    noChats.className = 'no-chats';
+    noChats.textContent = 'No chats yet';
+    chatList.appendChild(noChats);
+    return;
+  }
+  // newest first
+  for (const c of chats.slice().reverse()) {
+    const item = document.createElement('div');
+    item.className = 'chat-item' + (c.id === currentChatId ? ' active' : '');
+
+    const main = document.createElement('div');
+    main.className = 'chat-item-main';
+    const title = document.createElement('span');
+    title.className = 'chat-title';
+    title.textContent = c.title || `Chat ${c.id.substring(0, 8)}`;
+    const date = document.createElement('span');
+    date.className = 'chat-date';
+    date.textContent = new Date(c.timestamp).toLocaleString();
+    main.appendChild(title);
+    main.appendChild(date);
+
+    const del = document.createElement('button');
+    del.className = 'chat-del';
+    del.textContent = '✕';
+    del.title = 'Delete this chat';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (confirm('Delete this chat?')) deleteChat(c.id);
+    });
+
+    item.addEventListener('click', () => loadChat(c.id));
+    item.appendChild(main);
+    item.appendChild(del);
+    chatList.appendChild(item);
+  }
 }
 
 async function saveChat() {
@@ -94,7 +133,6 @@ async function saveChat() {
 
   localStorage.setItem('chatHistory', JSON.stringify(chats));
   loadChatHistory();
-  chatHistory.value = currentChatId;
 }
 
 async function loadChat(chatId) {
@@ -107,6 +145,7 @@ async function loadChat(chatId) {
   await window.api.loadConversation(saved.conversation);
   renderConversation(saved.conversation);
   currentChatId = chatId;
+  loadChatHistory(); // refresh active highlight
 }
 
 async function deleteChat(chatId) {
@@ -133,8 +172,9 @@ function renderConversation(conversation) {
   for (const msg of conversation) {
     if (msg.role === 'user') {
       addMessage('user', msg.content);
-    } else if (msg.role === 'assistant' && msg.content) {
-      addMessage('assistant', msg.content);
+    } else if (msg.role === 'assistant') {
+      if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
+      if (msg.content) addMessage('assistant', msg.content);
     } else if (msg.role === 'tool') {
       const text = String(msg.content);
       addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text));
@@ -167,6 +207,7 @@ async function send() {
     text,
     cwd,
     autoApprove: autoApprove.checked,
+    think: thinkToggle.checked,
   });
 
   if (!res.ok) addError(res.error);
@@ -193,6 +234,7 @@ function endRun() {
   stopBtn.classList.add('hidden');
   hideApproval();
   hideQuestion();
+  finalizeThinking();
   setState('idle');
   clearInterval(elapsedTimer);
   currentAssistant = null;
@@ -235,14 +277,52 @@ function scrollDown() {
   chat.scrollTop = chat.scrollHeight;
 }
 
+// ---------- thinking display ----------
+let currentThinking = null; // { pre, head, wrap, start }
+
+function addThinkingBlock(text, label) {
+  const wrap = document.createElement('div');
+  wrap.className = 'thinking collapsed';
+  const head = document.createElement('div');
+  head.className = 'thinking-head';
+  head.textContent = label;
+  const pre = document.createElement('pre');
+  pre.textContent = text;
+  head.addEventListener('click', () => wrap.classList.toggle('collapsed'));
+  wrap.appendChild(head);
+  wrap.appendChild(pre);
+  chat.appendChild(wrap);
+  return { wrap, head, pre };
+}
+
+function finalizeThinking() {
+  if (!currentThinking) return;
+  const secs = ((Date.now() - currentThinking.start) / 1000).toFixed(1);
+  currentThinking.head.textContent = `THOUGHT FOR ${secs}S ▸`;
+  currentThinking.wrap.classList.remove('live');
+  currentThinking = null;
+}
+
+window.api.onThinking((t) => {
+  if (!currentThinking) {
+    const block = addThinkingBlock('', 'THINKING… ▸');
+    block.wrap.classList.add('live');
+    currentThinking = { ...block, start: Date.now() };
+  }
+  currentThinking.pre.textContent += t;
+  scrollDown();
+});
+
 // ---------- stream events ----------
 window.api.onToken((t) => {
+  finalizeThinking();
   if (!currentAssistant) currentAssistant = addMessage('assistant', '');
   currentAssistant.textContent += t;
   scrollDown();
 });
 
 window.api.onToolCall(({ name, args }) => {
+  finalizeThinking();
   currentAssistant = null; // next tokens start a fresh assistant bubble
   toolCount++;
   $('tool-count').textContent = String(toolCount);
@@ -255,6 +335,9 @@ window.api.onToolCall(({ name, args }) => {
   head.className = 'tool-head';
   head.innerHTML = `<span>${name}</span><span class="args"></span><span class="status">running…</span>`;
   head.querySelector('.args').textContent = shortArgs(name, args);
+  head.addEventListener('click', () => {
+    if (card.classList.contains('has-result')) card.classList.toggle('collapsed');
+  });
   card.appendChild(head);
   chat.appendChild(card);
   lastToolCard = card;
@@ -266,11 +349,14 @@ let lastToolCard = null;
 window.api.onToolResult(({ result, denied }) => {
   setState('working');
   if (!lastToolCard) return;
-  lastToolCard.classList.add(denied ? 'denied' : 'ok');
+  lastToolCard.classList.add(denied ? 'denied' : 'ok', 'has-result');
   lastToolCard.querySelector('.status').textContent = denied ? 'denied' : 'done';
   const pre = document.createElement('pre');
   pre.textContent = result;
   lastToolCard.appendChild(pre);
+  // collapse successful results; leave failures visible
+  const looksBad = denied || /error|traceback|exception|failed|timed out|not found|denied/i.test(String(result).slice(0, 300));
+  if (!looksBad) lastToolCard.classList.add('collapsed');
   scrollDown();
 });
 
@@ -375,30 +461,19 @@ $('question-input').addEventListener('keydown', (e) => {
 });
 
 // ---------- event listeners ----------
-chatHistory.addEventListener('change', (e) => {
-  const chatId = e.target.value;
-  if (chatId) {
-    loadChat(chatId);
-  }
-});
-
-deleteChatBtn.addEventListener('click', () => {
-  const chatId = chatHistory.value;
-  if (chatId && confirm('Are you sure you want to delete this chat?')) {
-    deleteChat(chatId);
-    chatHistory.value = '';
-  }
+$('history-btn').addEventListener('click', () => {
+  sidebar.classList.toggle('hidden');
 });
 
 $('new-btn').addEventListener('click', async () => {
   if (busy) return;
   await window.api.reset();
   chat.innerHTML = '';
-  chatHistory.value = '';
   toolCount = 0;
   $('tool-count').textContent = '0';
   $('ctx-tokens').textContent = '0';
   $('ctx-fill').style.width = '0%';
   setState('idle');
   currentChatId = null;
+  loadChatHistory(); // clear active highlight
 });

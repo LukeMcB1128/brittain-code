@@ -8,7 +8,7 @@ const { execFile, exec } = require('child_process');
 
 const OLLAMA = 'http://127.0.0.1:11434';
 const MAX_TOOL_OUTPUT = 40_000;   // chars of tool output fed back to the model
-const MAX_AGENT_STEPS = 25;       // safety cap on tool-call loops per user message
+const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 
 let win = null;
 
@@ -62,6 +62,21 @@ async function getContextLength(model) {
     return len;
   } catch {
     return 8192;
+  }
+}
+
+// Only request thinking from models that advertise the capability —
+// sending think:true to others makes Ollama error out.
+const capsCache = new Map();
+async function supportsThinking(model) {
+  if (capsCache.has(model)) return capsCache.get(model);
+  try {
+    const info = await ollamaJson('/api/show', { model });
+    const ok = Array.isArray(info.capabilities) && info.capabilities.includes('thinking');
+    capsCache.set(model, ok);
+    return ok;
+  } catch {
+    return false;
   }
 }
 
@@ -574,11 +589,11 @@ ipcMain.on('question:response', (_e, { id, answer }) => {
 });
 
 // ---------- streaming chat with ollama ----------
-async function streamChat(model, messages, signal) {
+async function streamChat(model, messages, signal, think) {
   const res = await fetch(OLLAMA + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true }),
+    body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true, ...(think ? { think: true } : {}) }),
     signal,
   });
   if (!res.ok) throw new Error(`Ollama chat failed: ${res.status} ${await res.text()}`);
@@ -587,6 +602,7 @@ async function streamChat(model, messages, signal) {
   const decoder = new TextDecoder();
   let buf = '';
   let content = '';
+  let thinking = '';
   const toolCalls = [];
   let stats = null;
 
@@ -602,6 +618,10 @@ async function streamChat(model, messages, signal) {
       const chunk = JSON.parse(line);
       if (chunk.error) throw new Error(chunk.error);
       const msg = chunk.message || {};
+      if (msg.thinking) {
+        thinking += msg.thinking;
+        win.webContents.send('stream:thinking', msg.thinking);
+      }
       if (msg.content) {
         content += msg.content;
         win.webContents.send('stream:token', msg.content);
@@ -615,7 +635,7 @@ async function streamChat(model, messages, signal) {
       }
     }
   }
-  return { content, toolCalls, stats };
+  return { content, thinking, toolCalls, stats };
 }
 
 // ---------- agent loop ----------
@@ -649,17 +669,18 @@ function systemPrompt(cwd) {
   ].join('\n');
 }
 
-ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove }) => {
+ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think }) => {
   conversation.push({ role: 'user', content: text });
   stopRequested = false;
   currentAbort = new AbortController();
 
   const messages = () => [{ role: 'system', content: systemPrompt(cwd) }, ...conversation];
   const contextLength = await getContextLength(model);
+  const useThink = !!think && await supportsThinking(model);
 
   try {
     for (let step = 0; step < MAX_AGENT_STEPS; step++) {
-      const { content, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal);
+      const { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink);
 
       if (stats) {
         win.webContents.send('stream:stats', {
@@ -669,6 +690,7 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove }) => {
       }
 
       const assistantMsg = { role: 'assistant', content };
+      if (thinking) assistantMsg.thinking = thinking;
       if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
       conversation.push(assistantMsg);
 

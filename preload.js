@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   respondQuestion: (id, answer) => ipcRenderer.send('question:response', { id, answer }),
 
   onToken: (cb) => ipcRenderer.on('stream:token', (_e, t) => cb(t)),
+  onThinking: (cb) => ipcRenderer.on('stream:thinking', (_e, t) => cb(t)),
   onToolCall: (cb) => ipcRenderer.on('stream:toolcall', (_e, d) => cb(d)),
   onToolResult: (cb) => ipcRenderer.on('stream:toolresult', (_e, d) => cb(d)),
   onStats: (cb) => ipcRenderer.on('stream:stats', (_e, d) => cb(d)),

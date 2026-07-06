@@ -10,11 +10,12 @@
     <span class="brand">BRITTAIN CODE</span>
     <select id="model-select" title="Model"></select>
     <button id="cwd-btn" title="Choose working directory">DIR: <span id="cwd-label">not set</span></button>
-    <select id="chat-history" title="Chat history">
-      <option value="">Chat History</option>
-    </select>
-    <button id="delete-chat-btn" title="Delete selected chat">DELETE</button>
+    <button id="history-btn" title="Show/hide chat history">HISTORY</button>
     <span class="spacer"></span>
+    <label class="toggle" title="Ask models that support it to reason before answering (slower, shows thinking)">
+      <input type="checkbox" id="think-toggle" />
+      <span>THINK</span>
+    </label>
     <label class="toggle" title="When on, file writes and shell commands run without asking">
       <input type="checkbox" id="auto-approve" />
       <span>AUTO-APPROVE</span>
@@ -22,7 +23,13 @@
     <button id="new-btn" title="Clear conversation">NEW SESSION</button>
   </header>
 
-  <main id="chat"></main>
+  <div id="main-row">
+    <aside id="sidebar" class="hidden">
+      <div id="sidebar-head">CHATS</div>
+      <div id="chat-list"></div>
+    </aside>
+    <main id="chat"></main>
+  </div>
 
   <div id="approval-bar" class="hidden">
     <div class="approval-text">
