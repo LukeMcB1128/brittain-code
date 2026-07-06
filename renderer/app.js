@@ -174,7 +174,7 @@ function renderConversation(conversation) {
       addMessage('user', msg.content);
     } else if (msg.role === 'assistant') {
       if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
-      if (msg.content) addMessage('assistant', msg.content);
+      if (msg.content) renderMarkdown(addMessage('assistant', ''), msg.content);
     } else if (msg.role === 'tool') {
       const text = String(msg.content);
       addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text));
@@ -235,9 +235,9 @@ function endRun() {
   hideApproval();
   hideQuestion();
   finalizeThinking();
+  finalizeAssistant();
   setState('idle');
   clearInterval(elapsedTimer);
-  currentAssistant = null;
 }
 
 function setState(s) {
@@ -248,6 +248,23 @@ function setState(s) {
 
 // ---------- message rendering ----------
 let currentAssistant = null; // the <div> receiving streamed tokens
+
+// Render markdown safely. Falls back to plain text if the libs failed to load.
+function renderMarkdown(el, text) {
+  if (window.marked && window.DOMPurify) {
+    el.innerHTML = DOMPurify.sanitize(marked.parse(text, { async: false }));
+    el.classList.add('md'); // switches white-space handling from pre-wrap to normal
+  } else {
+    el.textContent = text;
+  }
+}
+
+// Convert the streaming assistant bubble from plain text to rendered markdown.
+function finalizeAssistant() {
+  if (!currentAssistant) return;
+  renderMarkdown(currentAssistant, currentAssistant.textContent);
+  currentAssistant = null;
+}
 
 function addMessage(role, text) {
   const div = document.createElement('div');
@@ -323,7 +340,7 @@ window.api.onToken((t) => {
 
 window.api.onToolCall(({ name, args }) => {
   finalizeThinking();
-  currentAssistant = null; // next tokens start a fresh assistant bubble
+  finalizeAssistant(); // markdown-render the finished bubble; next tokens start a fresh one
   toolCount++;
   $('tool-count').textContent = String(toolCount);
   setState('tool: ' + name);
@@ -375,6 +392,11 @@ window.api.onDone(() => {
 });
 
 function shortArgs(name, args) {
+  if (args.questions) {
+    const first = String(args.questions[0]?.question || '');
+    const extra = args.questions.length > 1 ? ` (+${args.questions.length - 1} more)` : '';
+    return (first.length > 50 ? first.slice(0, 50) + '…' : first) + extra;
+  }
   if (args.question) return args.question.length > 60 ? args.question.slice(0, 60) + '…' : args.question;
   if (args.source) return args.source + ' → ' + args.destination;
   if (args.path) return args.path;
@@ -417,48 +439,84 @@ function hideApproval() {
 
 // ---------- questions (ask_user tool) ----------
 let pendingQuestionId = null;
+let questionAnswers = [];
 
-window.api.onQuestionRequest(({ id, question, options }) => {
+window.api.onQuestionRequest(({ id, questions }) => {
   pendingQuestionId = id;
-  $('question-text').textContent = question;
-  const optsDiv = $('question-options');
-  optsDiv.innerHTML = '';
-  for (const o of options || []) {
-    const b = document.createElement('button');
-    b.textContent = o;
-    b.addEventListener('click', () => answerQuestion(o));
-    optsDiv.appendChild(b);
-  }
-  $('question-input').value = '';
+  questionAnswers = new Array(questions.length).fill(null);
+  const single = questions.length === 1;
+
+  const cards = $('question-cards');
+  cards.innerHTML = '';
+
+  questions.forEach((q, i) => {
+    const card = document.createElement('div');
+    card.className = 'q-card';
+
+    const txt = document.createElement('div');
+    txt.className = 'question-text';
+    txt.textContent = q.question;
+    card.appendChild(txt);
+
+    const opts = document.createElement('div');
+    opts.className = 'q-options';
+    const inp = document.createElement('input');
+
+    for (const o of q.options || []) {
+      const b = document.createElement('button');
+      b.textContent = o;
+      b.addEventListener('click', () => {
+        if (single) return submitAnswers([o]); // one question: option click answers immediately
+        questionAnswers[i] = o;
+        opts.querySelectorAll('button').forEach((x) => x.classList.remove('selected'));
+        b.classList.add('selected');
+        inp.value = '';
+        updateSubmit();
+      });
+      opts.appendChild(b);
+    }
+    card.appendChild(opts);
+
+    inp.className = 'q-input';
+    inp.placeholder = 'Or type your own answer...';
+    inp.addEventListener('input', () => {
+      const v = inp.value.trim();
+      questionAnswers[i] = v || null;
+      if (v) opts.querySelectorAll('button').forEach((x) => x.classList.remove('selected'));
+      updateSubmit();
+    });
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && questionAnswers.every((a) => a)) submitAnswers(questionAnswers);
+    });
+    card.appendChild(inp);
+    cards.appendChild(card);
+  });
+
+  updateSubmit();
   $('question-bar').classList.remove('hidden');
   setState('awaiting answer');
-  $('question-input').focus();
 });
 
-function answerQuestion(text) {
+function updateSubmit() {
+  $('question-submit').disabled = !questionAnswers.every((a) => a);
+}
+
+function submitAnswers(answers) {
   if (pendingQuestionId === null) return;
-  window.api.respondQuestion(pendingQuestionId, text);
+  window.api.respondQuestion(pendingQuestionId, answers);
   pendingQuestionId = null;
   hideQuestion();
   setState('working');
 }
 
+$('question-submit').addEventListener('click', () => {
+  if (questionAnswers.every((a) => a)) submitAnswers(questionAnswers);
+});
+
 function hideQuestion() {
   $('question-bar').classList.add('hidden');
   pendingQuestionId = null;
 }
-
-$('question-send').addEventListener('click', () => {
-  const v = $('question-input').value.trim();
-  if (v) answerQuestion(v);
-});
-
-$('question-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    const v = $('question-input').value.trim();
-    if (v) answerQuestion(v);
-  }
-});
 
 // ---------- event listeners ----------
 $('history-btn').addEventListener('click', () => {

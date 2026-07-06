@@ -43,11 +43,9 @@
   </div>
 
   <div id="question-bar" class="hidden">
-    <div class="question-text" id="question-text"></div>
-    <div id="question-options"></div>
-    <div id="question-input-row">
-      <input id="question-input" placeholder="Or type your own answer..." />
-      <button id="question-send">ANSWER</button>
+    <div id="question-cards"></div>
+    <div id="question-submit-row">
+      <button id="question-submit" disabled>SUBMIT ANSWERS</button>
     </div>
   </div>
 
@@ -69,6 +67,8 @@
     </div>
   </footer>
 
+  <script src="vendor/marked.js"></script>
+  <script src="vendor/purify.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -185,14 +185,24 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'ask_user',
-      description: 'Ask the user a question and wait for their answer. Use when you are blocked on a decision only the user can make (ambiguous requirements, destructive choices, multiple valid approaches). Provide 2-4 concrete options when possible.',
+      description: 'Ask the user one or more questions and wait for their answers. Use when you are blocked on decisions only the user can make (ambiguous requirements, destructive choices, multiple valid approaches). Ask each question as its own array entry — never cram several questions into one string. Give each question 2-4 short concrete options when possible.',
       parameters: {
         type: 'object',
         properties: {
-          question: { type: 'string', description: 'The question to ask the user' },
-          options: { type: 'array', items: { type: 'string' }, description: 'Optional list of 2-4 suggested answers shown as buttons' },
+          questions: {
+            type: 'array',
+            description: '1-4 questions to ask the user',
+            items: {
+              type: 'object',
+              properties: {
+                question: { type: 'string', description: 'One single question' },
+                options: { type: 'array', items: { type: 'string' }, description: '2-4 short suggested answers shown as buttons' },
+              },
+              required: ['question'],
+            },
+          },
         },
-        required: ['question'],
+        required: ['questions'],
       },
     },
   },
@@ -642,7 +652,7 @@ async function streamChat(model, messages, signal, think) {
 function systemPrompt(cwd) {
   return [
     "You are Brittain Code, an expert coding agent running fully offline on the user's Mac (macOS, zsh).",
-    'Working directory: /tmp/x — use paths relative to it.',
+    `Working directory: ${cwd} — use paths relative to it.`,
     '',
     'Rules:',
     '- Explore before changing code: list and read the relevant files first. Never guess at file contents or paths.',
@@ -695,13 +705,23 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think })
         if (stopRequested) {
           result = 'Cancelled by user.';
         } else if (name === 'ask_user') {
-          const answer = await requestAnswer({
-            question: String(args.question || ''),
-            options: Array.isArray(args.options) ? args.options.map(String).slice(0, 4) : [],
-          });
-          result = answer != null
-            ? `The user answered: ${answer}`
-            : 'The user cancelled the question. Stop and wait for further instructions.';
+          // accept both the questions array and the legacy single-question shape
+          let qs = Array.isArray(args.questions) ? args.questions
+            : args.question ? [{ question: args.question, options: args.options }]
+            : [];
+          qs = qs.slice(0, 4).map((q) => ({
+            question: String(q.question || q || ''),
+            options: Array.isArray(q.options) ? q.options.map(String).slice(0, 4) : [],
+          })).filter((q) => q.question);
+
+          if (!qs.length) {
+            result = 'Error: ask_user requires a "questions" array of {question, options} objects.';
+          } else {
+            const answers = await requestAnswer({ questions: qs });
+            result = answers
+              ? 'The user answered:\n' + qs.map((q, i) => `Q: ${q.question}\nA: ${answers[i]}`).join('\n')
+              : 'The user cancelled the question. Stop and wait for further instructions.';
+          }
           win.webContents.send('stream:toolresult', { name, result: preview(result) });
         } else if (RISKY_TOOLS.has(name) && !autoApprove) {
           const approved = await requestApproval({ name, args });
