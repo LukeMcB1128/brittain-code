@@ -57,7 +57,7 @@ function setCwd(p) {
 // ---------- chat history ----------
 function loadChatHistory() {
   const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
-  chatHistory.innerHTML = '<option value="">-- Load Chat --</option>';
+  chatHistory.innerHTML = '<option value="">Chat History</option>';
   chats.forEach(chat => {
     const opt = document.createElement('option');
     opt.value = chat.id;
@@ -192,6 +192,7 @@ function endRun() {
   sendBtn.classList.remove('hidden');
   stopBtn.classList.add('hidden');
   hideApproval();
+  hideQuestion();
   setState('idle');
   clearInterval(elapsedTimer);
   currentAssistant = null;
@@ -288,6 +289,7 @@ window.api.onDone(() => {
 });
 
 function shortArgs(name, args) {
+  if (args.question) return args.question.length > 60 ? args.question.slice(0, 60) + '…' : args.question;
   if (args.source) return args.source + ' → ' + args.destination;
   if (args.path) return args.path;
   if (args.command) return args.command.length > 60 ? args.command.slice(0, 60) + '…' : args.command;
@@ -326,6 +328,51 @@ function hideApproval() {
   $('approval-bar').classList.add('hidden');
   pendingApprovalId = null;
 }
+
+// ---------- questions (ask_user tool) ----------
+let pendingQuestionId = null;
+
+window.api.onQuestionRequest(({ id, question, options }) => {
+  pendingQuestionId = id;
+  $('question-text').textContent = question;
+  const optsDiv = $('question-options');
+  optsDiv.innerHTML = '';
+  for (const o of options || []) {
+    const b = document.createElement('button');
+    b.textContent = o;
+    b.addEventListener('click', () => answerQuestion(o));
+    optsDiv.appendChild(b);
+  }
+  $('question-input').value = '';
+  $('question-bar').classList.remove('hidden');
+  setState('awaiting answer');
+  $('question-input').focus();
+});
+
+function answerQuestion(text) {
+  if (pendingQuestionId === null) return;
+  window.api.respondQuestion(pendingQuestionId, text);
+  pendingQuestionId = null;
+  hideQuestion();
+  setState('working');
+}
+
+function hideQuestion() {
+  $('question-bar').classList.add('hidden');
+  pendingQuestionId = null;
+}
+
+$('question-send').addEventListener('click', () => {
+  const v = $('question-input').value.trim();
+  if (v) answerQuestion(v);
+});
+
+$('question-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const v = $('question-input').value.trim();
+    if (v) answerQuestion(v);
+  }
+});
 
 // ---------- event listeners ----------
 chatHistory.addEventListener('change', (e) => {

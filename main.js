@@ -169,6 +169,21 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'ask_user',
+      description: 'Ask the user a question and wait for their answer. Use when you are blocked on a decision only the user can make (ambiguous requirements, destructive choices, multiple valid approaches). Provide 2-4 concrete options when possible.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: 'The question to ask the user' },
+          options: { type: 'array', items: { type: 'string' }, description: 'Optional list of 2-4 suggested answers shown as buttons' },
+        },
+        required: ['question'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'append_file',
       description: 'Append content to a text file. Creates the file if it does not exist.',
       parameters: {
@@ -539,6 +554,25 @@ ipcMain.on('approval:response', (_e, { id, approved }) => {
   }
 });
 
+// ---------- question flow (ask_user tool) ----------
+const pendingQuestions = new Map();
+
+function requestAnswer(info) {
+  return new Promise((resolve) => {
+    const id = Math.random().toString(36).slice(2);
+    pendingQuestions.set(id, resolve);
+    win.webContents.send('question:request', { id, ...info });
+  });
+}
+
+ipcMain.on('question:response', (_e, { id, answer }) => {
+  const resolve = pendingQuestions.get(id);
+  if (resolve) {
+    pendingQuestions.delete(id);
+    resolve(answer);
+  }
+});
+
 // ---------- streaming chat with ollama ----------
 async function streamChat(model, messages, signal) {
   const res = await fetch(OLLAMA + '/api/chat', {
@@ -587,11 +621,31 @@ async function streamChat(model, messages, signal) {
 // ---------- agent loop ----------
 function systemPrompt(cwd) {
   return [
-    'You are Brittain Code, a coding agent running fully offline on the user\'s machine.',
-    `Working directory: ${cwd}`,
-    'You have tools to read/write files, list directories, search, and run shell commands.',
-    'Use tools when needed to complete the task; do not guess file contents — read them.',
-    'Prefer relative paths inside the working directory. Be concise in your replies.',
+    'You are Brittain Code, an expert coding agent running fully offline on the user\'s Mac (macOS, zsh).',
+    `Working directory: ${cwd} — use paths relative to it.`,
+    '',
+    '# Workflow',
+    '1. UNDERSTAND: If the task involves existing code, explore first — list_directory to see structure, search_files/find_files to locate relevant code, read_file before modifying anything. Never guess at file contents or paths.',
+    '2. ACT: Make the changes with tools. One logical step at a time.',
+    '3. VERIFY: Confirm your work — read the file back after an edit, or use run_command to run the code, a test, or a syntax check. Do not declare success without evidence from a tool result.',
+    '',
+    '# Tool rules',
+    '- Whenever you need to ask a question, use the ask_user tool. Record its response and use it.',
+    '- Small change to an existing file: use replace_in_file (precise, keeps the rest intact). Full rewrite or new file: write_file. Never write_file to "edit" a large file you have not fully read — you will destroy content.',
+    '- To find where something is defined or used, use search_files (by content) or find_files (by name/glob) instead of reading files one by one.',
+    '- read_file large files in slices with get_file_lines when you only need part.',
+    '- run_command runs zsh in the working directory with a 60s timeout — no interactive commands (editors, watch modes, servers that never exit).',
+    '- If a tool returns an error, read the error, fix the cause, and try a different approach — do not repeat the identical call.',
+    '- If a tool call fails, do not just tweak syntax or trivial arguments to retry. If you cannot solve the error after two attempts, stop and ask the user for guidance.',
+    '- If the user denies a tool call, do not retry it — explain what you wanted to do and ask how to proceed.',
+    '- Never use placeholders, comments like // ... existing code... or abbreviations when writing or replacing code. Output the full functional code required for the task.',
+    '',
+    '# Answers',
+    '- Be direct and concise. Answer questions in plain text without tools when no file work is needed.',
+    '- When you finish a task, summarize what changed in 1-3 sentences: which files, what behavior. Report failures honestly, including error output.',
+    '- If the request is ambiguous, state your assumption in one line and proceed — unless the action is destructive (deleting files, overwriting critical data) or there are multiple genuinely different approaches, in which case use the ask_user tool with 2-4 concrete options.',
+    '',
+    'Everything runs locally; you cannot access the internet.',
   ].join('\n');
 }
 
@@ -630,6 +684,15 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove }) => {
         let result;
         if (stopRequested) {
           result = 'Cancelled by user.';
+        } else if (name === 'ask_user') {
+          const answer = await requestAnswer({
+            question: String(args.question || ''),
+            options: Array.isArray(args.options) ? args.options.map(String).slice(0, 4) : [],
+          });
+          result = answer != null
+            ? `The user answered: ${answer}`
+            : 'The user cancelled the question. Stop and wait for further instructions.';
+          win.webContents.send('stream:toolresult', { name, result: preview(result) });
         } else if (RISKY_TOOLS.has(name) && !autoApprove) {
           const approved = await requestApproval({ name, args });
           result = approved
@@ -673,8 +736,9 @@ function preview(s) {
 ipcMain.on('chat:stop', () => {
   stopRequested = true;
   if (currentAbort) currentAbort.abort();
-  // release any pending approval as denied
+  // release any pending approval as denied, any pending question as cancelled
   for (const [id, resolve] of pendingApprovals) { resolve(false); pendingApprovals.delete(id); }
+  for (const [id, resolve] of pendingQuestions) { resolve(null); pendingQuestions.delete(id); }
 });
 
 ipcMain.handle('chat:reset', () => {

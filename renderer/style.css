@@ -189,6 +189,45 @@ button:active { background: var(--border); }
 button.approve { border-color: var(--green); color: var(--green); }
 button.deny { border-color: var(--red); color: var(--red); }
 
+/* ---------- question bar (ask_user tool) ---------- */
+#question-bar {
+  padding: 10px 14px;
+  background: #16222e;
+  border-top: 2px solid var(--accent);
+}
+
+#question-bar.hidden { display: none; }
+
+.question-text {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+#question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+#question-options button { border-color: var(--accent); color: var(--accent); }
+
+#question-input-row { display: flex; gap: 8px; }
+
+#question-input {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  outline: none;
+}
+
+#question-input:focus { border-color: var(--accent); }
+
 /* ---------- footer ---------- */
 footer {
   border-top: 1px solid var(--border);

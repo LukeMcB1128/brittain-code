@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   getConversation: () => ipcRenderer.invoke('chat:get'),
   loadConversation: (msgs) => ipcRenderer.invoke('chat:load', msgs),
   respondApproval: (id, approved) => ipcRenderer.send('approval:response', { id, approved }),
+  respondQuestion: (id, answer) => ipcRenderer.send('question:response', { id, answer }),
 
   onToken: (cb) => ipcRenderer.on('stream:token', (_e, t) => cb(t)),
   onToolCall: (cb) => ipcRenderer.on('stream:toolcall', (_e, d) => cb(d)),
@@ -17,4 +18,5 @@ contextBridge.exposeInMainWorld('api', {
   onStats: (cb) => ipcRenderer.on('stream:stats', (_e, d) => cb(d)),
   onDone: (cb) => ipcRenderer.on('stream:done', () => cb()),
   onApprovalRequest: (cb) => ipcRenderer.on('approval:request', (_e, d) => cb(d)),
+  onQuestionRequest: (cb) => ipcRenderer.on('question:request', (_e, d) => cb(d)),
 });
