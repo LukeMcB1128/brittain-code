@@ -107,6 +107,15 @@ button:active { background: var(--border); }
 
 .msg.assistant { padding: 0 2px; }
 
+/* replayed tool messages when loading an old chat */
+.msg.tool {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  border-left: 2px solid var(--border);
+  padding: 4px 12px;
+}
+
 .msg.error {
   border-left: 2px solid var(--red);
   background: var(--bg-panel);
@@ -239,3 +248,20 @@ footer {
 
 #ctx-fill.warn { background: var(--yellow); }
 #ctx-fill.danger { background: var(--red); }
+/* ---------- chat history dropdown ---------- */
+#chat-history {
+  min-width: 200px;
+}
+
+#delete-chat-btn {
+  padding: 5px 10px;
+  font-size: 11px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+}
+
+#delete-chat-btn:hover {
+  border-color: var(--red);
+}

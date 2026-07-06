@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('api', {
   send: (payload) => ipcRenderer.invoke('chat:send', payload),
   stop: () => ipcRenderer.send('chat:stop'),
   reset: () => ipcRenderer.invoke('chat:reset'),
+  getConversation: () => ipcRenderer.invoke('chat:get'),
+  loadConversation: (msgs) => ipcRenderer.invoke('chat:load', msgs),
   respondApproval: (id, approved) => ipcRenderer.send('approval:response', { id, approved }),
 
   onToken: (cb) => ipcRenderer.on('stream:token', (_e, t) => cb(t)),

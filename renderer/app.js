@@ -7,11 +7,14 @@ const sendBtn = $('send-btn');
 const stopBtn = $('stop-btn');
 const modelSelect = $('model-select');
 const autoApprove = $('auto-approve');
+const chatHistory = $('chat-history');
+const deleteChatBtn = $('delete-chat-btn');
 
 let cwd = null;
 let busy = false;
 let elapsedTimer = null;
 let toolCount = 0;
+let currentChatId = null;
 
 // ---------- boot ----------
 (async function boot() {
@@ -31,6 +34,9 @@ let toolCount = 0;
 
   const savedCwd = localStorage.getItem('cwd');
   if (savedCwd) setCwd(savedCwd);
+  
+  // Load chat history
+  loadChatHistory();
 })();
 
 modelSelect.addEventListener('change', () => localStorage.setItem('model', modelSelect.value));
@@ -48,16 +54,93 @@ function setCwd(p) {
   $('cwd-btn').title = p;
 }
 
-$('new-btn').addEventListener('click', async () => {
+// ---------- chat history ----------
+function loadChatHistory() {
+  const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+  chatHistory.innerHTML = '<option value="">-- Load Chat --</option>';
+  chats.forEach(chat => {
+    const opt = document.createElement('option');
+    opt.value = chat.id;
+    opt.textContent = chat.title || `Chat ${chat.id.substring(0, 8)}`;
+    chatHistory.appendChild(opt);
+  });
+}
+
+async function saveChat() {
+  // The live conversation lives in the main process — pull it over IPC.
+  const conversation = await window.api.getConversation();
+  if (!conversation.length) return;
+
+  const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+  const firstUser = conversation.find((m) => m.role === 'user');
+  const title = firstUser
+    ? firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
+    : 'Chat';
+
+  // Update the current chat in place; only create a new entry for a new session.
+  if (!currentChatId) currentChatId = Date.now().toString();
+  const existing = chats.find((c) => c.id === currentChatId);
+  if (existing) {
+    existing.conversation = conversation;
+    existing.timestamp = new Date().toISOString();
+  } else {
+    chats.push({
+      id: currentChatId,
+      title,
+      timestamp: new Date().toISOString(),
+      conversation,
+    });
+  }
+
+  localStorage.setItem('chatHistory', JSON.stringify(chats));
+  loadChatHistory();
+  chatHistory.value = currentChatId;
+}
+
+async function loadChat(chatId) {
   if (busy) return;
-  await window.api.reset();
+  const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+  const saved = chats.find((c) => c.id === chatId);
+  if (!saved) return;
+
+  // Push the stored conversation into the main process so the model continues from it.
+  await window.api.loadConversation(saved.conversation);
+  renderConversation(saved.conversation);
+  currentChatId = chatId;
+}
+
+async function deleteChat(chatId) {
+  const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+  const updatedChats = chats.filter(c => c.id !== chatId);
+  localStorage.setItem('chatHistory', JSON.stringify(updatedChats));
+  loadChatHistory();
+
+  // If we deleted the currently loaded chat, clear the conversation everywhere
+  if (currentChatId === chatId) {
+    await window.api.reset();
+    currentChatId = null;
+    chat.innerHTML = '';
+    toolCount = 0;
+    $('tool-count').textContent = '0';
+    $('ctx-tokens').textContent = '0';
+    $('ctx-fill').style.width = '0%';
+    setState('idle');
+  }
+}
+
+function renderConversation(conversation) {
   chat.innerHTML = '';
-  toolCount = 0;
-  $('tool-count').textContent = '0';
-  $('ctx-tokens').textContent = '0';
-  $('ctx-fill').style.width = '0%';
-  setState('idle');
-});
+  for (const msg of conversation) {
+    if (msg.role === 'user') {
+      addMessage('user', msg.content);
+    } else if (msg.role === 'assistant' && msg.content) {
+      addMessage('assistant', msg.content);
+    } else if (msg.role === 'tool') {
+      const text = String(msg.content);
+      addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text));
+    }
+  }
+}
 
 // ---------- sending ----------
 input.addEventListener('keydown', (e) => {
@@ -88,6 +171,9 @@ async function send() {
 
   if (!res.ok) addError(res.error);
   endRun();
+  
+  // Save the chat after each message
+  saveChat();
 }
 
 function startRun() {
@@ -125,7 +211,7 @@ function addMessage(role, text) {
   div.className = 'msg ' + role;
   const label = document.createElement('span');
   label.className = 'label';
-  label.textContent = role === 'user' ? 'YOU' : 'MODEL';
+  label.textContent = role === 'user' ? 'YOU' : role === 'assistant' ? 'MODEL' : 'TOOL';
   const body = document.createElement('span');
   body.className = 'body';
   body.textContent = text;
@@ -240,3 +326,32 @@ function hideApproval() {
   $('approval-bar').classList.add('hidden');
   pendingApprovalId = null;
 }
+
+// ---------- event listeners ----------
+chatHistory.addEventListener('change', (e) => {
+  const chatId = e.target.value;
+  if (chatId) {
+    loadChat(chatId);
+  }
+});
+
+deleteChatBtn.addEventListener('click', () => {
+  const chatId = chatHistory.value;
+  if (chatId && confirm('Are you sure you want to delete this chat?')) {
+    deleteChat(chatId);
+    chatHistory.value = '';
+  }
+});
+
+$('new-btn').addEventListener('click', async () => {
+  if (busy) return;
+  await window.api.reset();
+  chat.innerHTML = '';
+  chatHistory.value = '';
+  toolCount = 0;
+  $('tool-count').textContent = '0';
+  $('ctx-tokens').textContent = '0';
+  $('ctx-fill').style.width = '0%';
+  setState('idle');
+  currentChatId = null;
+});

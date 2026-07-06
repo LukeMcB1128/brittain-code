@@ -682,6 +682,15 @@ ipcMain.handle('chat:reset', () => {
   return { ok: true };
 });
 
+// chat history support: the renderer saves/loads conversations, but the live
+// array lives here — these let it read the current one and swap in a stored one.
+ipcMain.handle('chat:get', () => conversation);
+
+ipcMain.handle('chat:load', (_e, msgs) => {
+  conversation = Array.isArray(msgs) ? msgs : [];
+  return { ok: true };
+});
+
 ipcMain.handle('models:list', async () => {
   try {
     const data = await ollamaJson('/api/tags');
