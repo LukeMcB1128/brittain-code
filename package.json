@@ -1,0 +1,28 @@
+{
+  "name": "brittain-code",
+  "productName": "Brittain Code",
+  "version": "1.0.0",
+  "description": "Offline coding agent for local Ollama models",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --mac dir"
+  },
+  "build": {
+    "appId": "com.brittain.code",
+    "productName": "Brittain Code",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**"
+    ],
+    "mac": {
+      "identity": null,
+      "target": "dir"
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}

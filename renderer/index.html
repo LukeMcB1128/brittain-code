@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Brittain Code</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <span class="brand">BRITTAIN CODE</span>
+    <select id="model-select" title="Model"></select>
+    <button id="cwd-btn" title="Choose working directory">DIR: <span id="cwd-label">not set</span></button>
+    <span class="spacer"></span>
+    <label class="toggle" title="When on, file writes and shell commands run without asking">
+      <input type="checkbox" id="auto-approve" />
+      <span>AUTO-APPROVE</span>
+    </label>
+    <button id="new-btn" title="Clear conversation">NEW SESSION</button>
+  </header>
+
+  <main id="chat"></main>
+
+  <div id="approval-bar" class="hidden">
+    <div class="approval-text">
+      <span class="approval-tool" id="approval-tool"></span>
+      <pre id="approval-detail"></pre>
+    </div>
+    <div class="approval-actions">
+      <button id="approve-btn" class="approve">APPROVE</button>
+      <button id="deny-btn" class="deny">DENY</button>
+    </div>
+  </div>
+
+  <footer>
+    <div id="input-row">
+      <textarea id="input" rows="3" placeholder="Describe a task... (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="send-btn">SEND</button>
+      <button id="stop-btn" class="hidden">STOP</button>
+    </div>
+    <div id="statusbar">
+      <span id="status-state">idle</span>
+      <span class="sep">|</span>
+      <span>context: <span id="ctx-tokens">0</span> / <span id="ctx-limit">?</span> tok</span>
+      <span class="ctx-bar"><span id="ctx-fill"></span></span>
+      <span class="sep">|</span>
+      <span>elapsed: <span id="elapsed">0.0s</span></span>
+      <span class="sep">|</span>
+      <span>tools used: <span id="tool-count">0</span></span>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
