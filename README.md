@@ -18,10 +18,10 @@ The standalone app lives at `dist/mac-arm64/Brittain Code.app`. Drag it into App
 The `.app` is a snapshot of the code at build time — editing `main.js` or the `renderer/` files does **not** change it. After making changes, rebuild it:
 
 ```
-npm run dist
+npm run deploy
 ```
 
-Then replace the old copy in Applications with the fresh one from `dist/mac-arm64/`. (During development, `npm start` always runs the live code — only rebuild when you want the packaged app updated.)
+This rebuilds and copies the app straight into /Applications — no dragging. (`npm run dist` builds without deploying; during development, `npm start` always runs the live code.)
 
 To give it a custom icon: put an `icon.icns` in a `build/` folder, add `"icon": "build/icon.icns"` under the `"mac"` section of `package.json`, and rebuild.
 

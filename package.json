@@ -6,7 +6,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --mac dir"
+    "dist": "electron-builder --mac dir",
+    "deploy": "electron-builder --mac dir && rm -rf '/Applications/Brittain Code.app' && cp -R 'dist/mac-arm64/Brittain Code.app' /Applications/ && echo 'Deployed to /Applications'"
   },
   "build": {
     "appId": "com.brittain.code",
@@ -18,7 +19,8 @@
     ],
     "mac": {
       "identity": null,
-      "target": "dir"
+      "target": "dir",
+      "icon": "build/icon.icns"
     }
   },
   "devDependencies": {

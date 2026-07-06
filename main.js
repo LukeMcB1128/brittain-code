@@ -76,6 +76,30 @@ function truncate(s) {
   return s.slice(0, MAX_TOOL_OUTPUT) + `\n...[truncated, ${s.length} chars total]`;
 }
 
+// Recursively visit files, skipping .git and node_modules; unreadable dirs are skipped.
+function walkDir(dir, onFile) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.name === '.git' || e.name === 'node_modules') continue;
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) walkDir(p, onFile);
+    else if (e.isFile()) onFile(p);
+  }
+}
+
+// Convert a glob like "src/**/*.js" to a RegExp (no external deps).
+function globToRegex(glob) {
+  const esc = glob
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '\x01')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .replace(/\x01\//g, '(?:.*/)?')   // "**/" matches zero or more directories
+    .replace(/\x01/g, '.*');
+  return new RegExp('^' + esc + '$');
+}
+
 const TOOL_DEFS = [
   {
     type: 'function',
@@ -142,9 +166,200 @@ const TOOL_DEFS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'append_file',
+      description: 'Append content to a text file. Creates the file if it does not exist.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path to append to' },
+          content: { type: 'string', description: 'Content to append' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_directory',
+      description: 'Create a new directory. Creates parent directories as needed.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'Directory path to create' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_file',
+      description: 'Delete a file. Returns success message or error.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'File path to delete' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_in_file',
+      description: 'Search for a text pattern in a specific file and return matching lines with line numbers.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path to search in' },
+          pattern: { type: 'string', description: 'Text or regex to search for' },
+        },
+        required: ['path', 'pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_info',
+      description: 'Get information about a file including size, modification time, and permissions.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'File path to get info for' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'copy_file',
+      description: 'Copy a file from source to destination.',
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: 'Source file path' },
+          destination: { type: 'string', description: 'Destination file path' },
+        },
+        required: ['source', 'destination'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'move_file',
+      description: 'Move/rename a file from source to destination.',
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: 'Source file path' },
+          destination: { type: 'string', description: 'Destination file path' },
+        },
+        required: ['source', 'destination'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_files',
+      description: 'Find files matching a glob pattern in the working directory (e.g. "*.js", "src/**/*.css").',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Glob pattern to match files (e.g., "*.js", "src/**/*")' },
+          path: { type: 'string', description: 'Directory to search in (default: working directory)' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_file_lines',
+      description: 'Get specific lines from a file (1-based, inclusive). Defaults to 10 lines if end is omitted.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path' },
+          start: { type: 'number', description: 'Starting line number (1-based)' },
+          end: { type: 'number', description: 'Ending line number (1-based, inclusive)' },
+        },
+        required: ['path', 'start'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'replace_in_file',
+      description: 'Replace text in a file using regex or literal replacement. Reports how many occurrences were replaced.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path to modify' },
+          pattern: { type: 'string', description: 'Text or regex to find' },
+          replacement: { type: 'string', description: 'Replacement text' },
+          flags: { type: 'string', description: 'Regex flags (e.g., "g", "i", "m"). Default "g".' },
+        },
+        required: ['path', 'pattern', 'replacement'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'count_lines',
+      description: 'Count lines in a file.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'File path' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_file_type',
+      description: 'Determine the file type based on its extension.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'File path' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_largest_files',
+      description: 'Find the largest files in a directory (skips .git and node_modules).',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Directory path to search in' },
+          count: { type: 'number', description: 'Number of largest files to return (default: 10)' },
+        },
+      },
+    },
+  },
 ];
 
-const RISKY_TOOLS = new Set(['write_file', 'run_command']);
+const RISKY_TOOLS = new Set([
+  'write_file',
+  'run_command',
+  'append_file',
+  'create_directory',
+  'delete_file',
+  'copy_file',
+  'move_file',
+  'replace_in_file',
+]);
 
 async function executeTool(name, args, cwd) {
   switch (name) {
@@ -193,6 +408,112 @@ async function executeTool(name, args, cwd) {
           }
         );
       });
+    }
+    case 'append_file': {
+      const p = resolveInside(cwd, args.path);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.appendFileSync(p, args.content ?? '', 'utf8');
+      return `Appended ${(args.content ?? '').length} chars to ${p}`;
+    }
+    case 'create_directory': {
+      const p = resolveInside(cwd, args.path);
+      fs.mkdirSync(p, { recursive: true });
+      return `Created directory ${p}`;
+    }
+    case 'delete_file': {
+      const p = resolveInside(cwd, args.path);
+      if (!fs.existsSync(p)) return `File not found: ${p}`;
+      fs.unlinkSync(p);
+      return `Deleted file ${p}`;
+    }
+    case 'search_in_file': {
+      const p = resolveInside(cwd, args.path);
+      const lines = fs.readFileSync(p, 'utf8').split('\n');
+      const regex = new RegExp(args.pattern);
+      const results = [];
+      for (let i = 0; i < lines.length && results.length < 200; i++) {
+        if (regex.test(lines[i])) results.push(`${i + 1}: ${lines[i]}`);
+      }
+      return results.length ? truncate(results.join('\n')) : 'No matches found.';
+    }
+    case 'file_info': {
+      const p = resolveInside(cwd, args.path);
+      const stat = fs.statSync(p);
+      return JSON.stringify({
+        size: stat.size,
+        modified: stat.mtime.toISOString(),
+        isDirectory: stat.isDirectory(),
+        isFile: stat.isFile(),
+        permissions: stat.mode.toString(8),
+      });
+    }
+    case 'copy_file': {
+      const source = resolveInside(cwd, args.source);
+      const dest = resolveInside(cwd, args.destination);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(source, dest);
+      return `Copied ${source} to ${dest}`;
+    }
+    case 'move_file': {
+      const source = resolveInside(cwd, args.source);
+      const dest = resolveInside(cwd, args.destination);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.renameSync(source, dest);
+      return `Moved ${source} to ${dest}`;
+    }
+    case 'find_files': {
+      const dir = resolveInside(cwd, args.path);
+      const re = globToRegex(args.pattern);
+      const out = [];
+      walkDir(dir, (f) => {
+        const rel = path.relative(dir, f);
+        if (re.test(rel) || re.test(path.basename(f))) out.push(path.relative(cwd, f));
+      });
+      return truncate(out.slice(0, 500).join('\n')) || '(no files found)';
+    }
+    case 'get_file_lines': {
+      const p = resolveInside(cwd, args.path);
+      const lines = fs.readFileSync(p, 'utf8').split('\n');
+      const start = Math.max(0, (args.start || 1) - 1);
+      const end = args.end ? Math.min(lines.length, args.end) : Math.min(lines.length, start + 10);
+      return truncate(lines.slice(start, end).join('\n')) || '(no lines found)';
+    }
+    case 'replace_in_file': {
+      const p = resolveInside(cwd, args.path);
+      const content = fs.readFileSync(p, 'utf8');
+      const regex = new RegExp(args.pattern, args.flags || 'g');
+      const matches = content.match(regex);
+      const count = matches ? matches.length : 0;
+      if (!count) return `No matches for pattern in ${p} — file unchanged.`;
+      fs.writeFileSync(p, content.replace(regex, args.replacement), 'utf8');
+      return `Replaced ${count} occurrence(s) in ${p}`;
+    }
+    case 'count_lines': {
+      const p = resolveInside(cwd, args.path);
+      const content = fs.readFileSync(p, 'utf8');
+      return `Total lines: ${content.split('\n').length}`;
+    }
+    case 'get_file_type': {
+      const p = resolveInside(cwd, args.path);
+      if (fs.statSync(p).isDirectory()) return 'directory';
+      const typeMap = {
+        '.js': 'javascript', '.ts': 'typescript', '.jsx': 'javascript-react', '.tsx': 'typescript-react',
+        '.html': 'html', '.css': 'css', '.json': 'json', '.md': 'markdown', '.txt': 'text',
+        '.py': 'python', '.java': 'java', '.cpp': 'cpp', '.c': 'c', '.go': 'go', '.rs': 'rust',
+        '.rb': 'ruby', '.sh': 'shell', '.sql': 'sql', '.yaml': 'yaml', '.yml': 'yaml', '.xml': 'xml',
+      };
+      return typeMap[path.extname(p).toLowerCase()] || 'unknown';
+    }
+    case 'find_largest_files': {
+      const dir = resolveInside(cwd, args.path);
+      const count = args.count || 10;
+      const files = [];
+      walkDir(dir, (f) => {
+        try { files.push({ path: f, size: fs.statSync(f).size }); } catch {}
+      });
+      files.sort((a, b) => b.size - a.size);
+      const result = files.slice(0, count).map((f) => `${path.relative(cwd, f.path)}: ${f.size} bytes`);
+      return result.join('\n') || '(no files found)';
     }
     default:
       return `Error: unknown tool "${name}"`;

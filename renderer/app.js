@@ -202,6 +202,7 @@ window.api.onDone(() => {
 });
 
 function shortArgs(name, args) {
+  if (args.source) return args.source + ' → ' + args.destination;
   if (args.path) return args.path;
   if (args.command) return args.command.length > 60 ? args.command.slice(0, 60) + '…' : args.command;
   if (args.pattern) return '"' + args.pattern + '"';
@@ -215,7 +216,11 @@ window.api.onApprovalRequest(({ id, name, args }) => {
   pendingApprovalId = id;
   $('approval-tool').textContent = 'APPROVE ' + name.toUpperCase() + '?';
   $('approval-detail').textContent =
-    name === 'run_command' ? args.command : `${args.path}\n\n${(args.content || '').slice(0, 600)}`;
+    name === 'run_command' ? args.command
+    : name === 'write_file' || name === 'append_file' ? `${args.path}\n\n${(args.content || '').slice(0, 600)}`
+    : name === 'replace_in_file' ? `${args.path}\n\nfind: ${args.pattern}\nreplace: ${args.replacement}`
+    : args.source ? `${args.source} → ${args.destination}`
+    : String(args.path || JSON.stringify(args));
   $('approval-bar').classList.remove('hidden');
   setState('awaiting approval');
 });
