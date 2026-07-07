@@ -65,19 +65,32 @@ async function getContextLength(model) {
   }
 }
 
-// Only request thinking from models that advertise the capability —
-// sending think:true to others makes Ollama error out.
+// Model capability checks (thinking, vision) — sending think:true or images
+// to a model that lacks the capability makes Ollama error out.
 const capsCache = new Map();
-async function supportsThinking(model) {
+async function getCapabilities(model) {
   if (capsCache.has(model)) return capsCache.get(model);
   try {
     const info = await ollamaJson('/api/show', { model });
-    const ok = Array.isArray(info.capabilities) && info.capabilities.includes('thinking');
-    capsCache.set(model, ok);
-    return ok;
+    const caps = Array.isArray(info.capabilities) ? info.capabilities : [];
+    capsCache.set(model, caps);
+    return caps;
   } catch {
-    return false;
+    return [];
   }
+}
+const supportsThinking = async (model) => (await getCapabilities(model)).includes('thinking');
+const supportsVision = async (model) => (await getCapabilities(model)).includes('vision');
+
+// ---------- persistent memory ----------
+// Plain-text lessons the agent saves with the `remember` tool; injected into
+// the system prompt of every chat. Lives at userData/memory.md — user-editable.
+function memoryPath() {
+  return path.join(app.getPath('userData'), 'memory.md');
+}
+
+function readMemory() {
+  try { return fs.readFileSync(memoryPath(), 'utf8'); } catch { return ''; }
 }
 
 // ---------- tools ----------
@@ -220,6 +233,20 @@ const TOOL_DEFS = [
           },
         },
         required: ['questions'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remember',
+      description: 'Save a short reusable lesson to persistent memory that will be available in all future chats. Use when the user corrects you, when you discover a project convention, or when you make a mistake worth avoiding next time. One concise sentence per fact.',
+      parameters: {
+        type: 'object',
+        properties: {
+          fact: { type: 'string', description: 'The lesson to remember, as one concise sentence' },
+        },
+        required: ['fact'],
       },
     },
   },
@@ -467,6 +494,13 @@ async function executeTool(name, args, cwd) {
           }
         );
       });
+    }
+    case 'remember': {
+      const fact = String(args.fact || '').trim().replace(/\s*\n+\s*/g, ' ');
+      if (!fact) return 'Error: fact must not be empty.';
+      if (readMemory().includes(fact)) return 'Already remembered.';
+      fs.appendFileSync(memoryPath(), '- ' + fact + '\n', 'utf8');
+      return 'Remembered. This will be available in future chats.';
     }
     case 'append_file': {
       const p = resolveInside(cwd, args.path);
@@ -737,7 +771,7 @@ function parseRawToolCalls(content) {
 
 // ---------- agent loop ----------
 function systemPrompt(cwd) {
-  return [
+  const lines = [
     "You are Brittain Code, an expert coding agent running fully offline on the user's Mac (macOS, zsh).",
     `Working directory: ${cwd} — use paths relative to it.`,
     '',
@@ -748,14 +782,26 @@ function systemPrompt(cwd) {
     '- Commands run in zsh with a 60 second timeout; do not start interactive programs or servers that never exit.',
     '- If a tool call errors twice, stop and ask the user for guidance with ask_user. If the user denies a tool call, do not retry it.',
     '- For ambiguous or destructive decisions, ask with ask_user and give 2-4 concrete options. Otherwise state your assumption in one line and proceed.',
+    '- Save reusable lessons (user corrections, project conventions, mistakes to avoid) with the remember tool — they persist across chats.',
     '- Be concise. End each task with a 1-3 sentence summary of what changed. Report failures honestly.',
     '',
     'Everything runs locally; you cannot access the internet.',
-  ].join('\n');
+  ];
+  const memory = readMemory().trim();
+  if (memory) {
+    // cap so a huge memory file cannot blow up the prompt (keep the newest lines)
+    lines.push('', 'Lessons remembered from previous sessions:', memory.slice(-2500));
+  }
+  return lines.join('\n');
 }
 
-ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think }) => {
-  conversation.push({ role: 'user', content: text });
+ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images }) => {
+  if (images?.length && !(await supportsVision(model))) {
+    return { ok: false, error: `${model} cannot see images — pick a vision-capable model or remove the attachment.` };
+  }
+  const userMsg = { role: 'user', content: text };
+  if (images?.length) userMsg.images = images;
+  conversation.push(userMsg);
   stopRequested = false;
   currentAbort = new AbortController();
 
@@ -915,7 +961,15 @@ ipcMain.handle('history:save', (_e, meta, convo) => {
   try {
     const id = safeChatId(meta.id);
     if (!id) return { ok: false, error: 'invalid chat id' };
-    const entry = { id, title: meta.title || 'Chat', model: meta.model || '', cwd: meta.cwd || '', timestamp: meta.timestamp || new Date().toISOString() };
+    const entry = {
+      id,
+      title: meta.title || 'Chat',
+      model: meta.model || '',
+      cwd: meta.cwd || '',
+      think: !!meta.think,
+      autoApprove: !!meta.autoApprove,
+      timestamp: meta.timestamp || new Date().toISOString(),
+    };
     fs.mkdirSync(chatsDir(), { recursive: true });
     fs.writeFileSync(path.join(chatsDir(), id + '.json'), JSON.stringify({ ...entry, conversation: convo || [] }), 'utf8');
     const index = readChatIndex().filter((c) => c.id !== id);

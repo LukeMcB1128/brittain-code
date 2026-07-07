@@ -411,6 +411,49 @@ button.deny { border-color: var(--red); color: var(--red); }
 
 .q-input:focus { border-color: var(--accent); }
 
+/* ---------- image attachments ---------- */
+#img-preview {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px 0;
+  flex-wrap: wrap;
+}
+
+#img-preview.hidden { display: none; }
+
+.img-thumb { position: relative; }
+
+.img-thumb img {
+  height: 52px;
+  border: 1px solid var(--border);
+  display: block;
+}
+
+.img-thumb button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 14px;
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--bg);
+}
+
+.msg-images {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.msg-images img {
+  max-height: 160px;
+  max-width: 300px;
+  border: 1px solid var(--border);
+}
+
 /* ---------- footer ---------- */
 footer {
   border-top: 1px solid var(--border);

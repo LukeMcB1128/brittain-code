@@ -140,7 +140,15 @@ async function saveChat() {
 
   if (!currentChatId) currentChatId = Date.now().toString();
   const res = await window.api.historySave(
-    { id: currentChatId, title, model: modelSelect.value, cwd: cwd || '', timestamp: new Date().toISOString() },
+    {
+      id: currentChatId,
+      title,
+      model: modelSelect.value,
+      cwd: cwd || '',
+      think: thinkToggle.checked,
+      autoApprove: autoApprove.checked,
+      timestamp: new Date().toISOString(),
+    },
     conversation
   );
   if (!res.ok) addError('Failed to save chat: ' + res.error);
@@ -174,6 +182,16 @@ async function loadChat(chatId) {
     }
   }
 
+  // Restore this chat's toggle states (older chats without them are left as-is).
+  if ('think' in saved) {
+    thinkToggle.checked = !!saved.think;
+    localStorage.setItem('think', saved.think ? '1' : '0');
+  }
+  if ('autoApprove' in saved) {
+    autoApprove.checked = !!saved.autoApprove;
+    localStorage.setItem('autoApprove', saved.autoApprove ? '1' : '0');
+  }
+
   loadChatHistory(); // refresh active highlight
 }
 
@@ -198,7 +216,8 @@ function renderConversation(conversation) {
   chat.innerHTML = '';
   for (const msg of conversation) {
     if (msg.role === 'user') {
-      addMessage('user', msg.content);
+      const imgs = (msg.images || []).map((b) => 'data:image/png;base64,' + b);
+      addMessage('user', msg.content || (imgs.length ? '(image)' : ''), imgs);
     } else if (msg.role === 'assistant') {
       if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
       if (msg.content) renderMarkdown(addMessage('assistant', ''), msg.content);
@@ -207,6 +226,57 @@ function renderConversation(conversation) {
       addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text));
     }
   }
+}
+
+// ---------- image attachments ----------
+let pendingImages = []; // data URLs awaiting send
+
+$('img-btn').addEventListener('click', () => $('img-file').click());
+
+$('img-file').addEventListener('change', (e) => {
+  for (const f of e.target.files) addImage(f);
+  e.target.value = '';
+});
+
+input.addEventListener('paste', (e) => {
+  for (const item of e.clipboardData.items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      addImage(item.getAsFile());
+    }
+  }
+});
+
+function addImage(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    pendingImages.push(reader.result);
+    renderImagePreview();
+  };
+  reader.readAsDataURL(file);
+}
+
+function renderImagePreview() {
+  const strip = $('img-preview');
+  strip.innerHTML = '';
+  strip.classList.toggle('hidden', !pendingImages.length);
+  pendingImages.forEach((src, i) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'img-thumb';
+    const img = document.createElement('img');
+    img.src = src;
+    const x = document.createElement('button');
+    x.textContent = '✕';
+    x.title = 'Remove image';
+    x.addEventListener('click', () => {
+      pendingImages.splice(i, 1);
+      renderImagePreview();
+    });
+    wrap.appendChild(img);
+    wrap.appendChild(x);
+    strip.appendChild(wrap);
+  });
 }
 
 // ---------- sending ----------
@@ -221,13 +291,19 @@ stopBtn.addEventListener('click', () => window.api.stop());
 
 async function send() {
   const text = input.value.trim();
-  if (!text || busy) return;
+  if ((!text && !pendingImages.length) || busy) return;
   if (!modelSelect.value) return addError('No model selected — is Ollama running?');
   if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
 
+  // Ollama wants raw base64 without the data-URL prefix
+  const images = pendingImages.map((d) => d.split(',')[1]);
+  const shownImages = pendingImages;
+  pendingImages = [];
+  renderImagePreview();
+
   input.value = '';
   hideStartupMessage();
-  addMessage('user', text);
+  addMessage('user', text || '(image)', shownImages);
   startRun();
 
   const res = await window.api.send({
@@ -236,6 +312,7 @@ async function send() {
     cwd,
     autoApprove: autoApprove.checked,
     think: thinkToggle.checked,
+    images,
   });
 
   if (!res.ok) addError(res.error);
@@ -294,7 +371,7 @@ function finalizeAssistant() {
   currentAssistant = null;
 }
 
-function addMessage(role, text) {
+function addMessage(role, text, images) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   const label = document.createElement('span');
@@ -305,6 +382,16 @@ function addMessage(role, text) {
   body.textContent = text;
   div.appendChild(label);
   div.appendChild(body);
+  if (images && images.length) {
+    const strip = document.createElement('div');
+    strip.className = 'msg-images';
+    for (const src of images) {
+      const img = document.createElement('img');
+      img.src = src;
+      strip.appendChild(img);
+    }
+    div.appendChild(strip);
+  }
   chat.appendChild(div);
   scrollDown();
   return body;
