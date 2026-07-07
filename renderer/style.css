@@ -103,6 +103,22 @@ button:active { background: var(--border); }
 
 #chat-list { flex: 1; overflow-y: auto; }
 
+/* project-folder group headers in the sidebar */
+.chat-group {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--accent);
+  padding: 10px 12px 4px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .chat-item {
   display: flex;
   align-items: center;
@@ -240,6 +256,16 @@ button:active { background: var(--border); }
   background: var(--bg-panel);
   padding: 8px 12px;
   color: var(--red);
+}
+
+/* local info notices (slash command results etc.) */
+.msg.info {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  border-left: 2px solid var(--green);
+  padding: 6px 12px;
+  white-space: pre-wrap;
 }
 
 /* thinking blocks */
@@ -494,6 +520,72 @@ footer {
 #status-state { color: var(--accent); min-width: 70px; }
 #status-state.working { color: var(--yellow); }
 .sep { color: var(--border); }
+
+#git-info { display: inline-flex; align-items: center; gap: 8px; }
+#git-info.hidden { display: none; }
+#git-branch { color: var(--green); }
+
+button.mini {
+  padding: 1px 6px;
+  font-size: 10px;
+}
+
+/* ---------- overlay (diff viewer, memory, etc.) ---------- */
+#overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#overlay.hidden { display: none; }
+
+#overlay-box {
+  width: min(900px, 90vw);
+  height: min(600px, 85vh);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+#overlay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+#overlay-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#overlay-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#overlay-body .diff-add { color: var(--green); }
+#overlay-body .diff-del { color: var(--red); }
+#overlay-body .diff-hunk { color: var(--accent); }
+#overlay-body .diff-file { color: var(--yellow); font-weight: 700; }
 
 .ctx-bar {
   display: inline-block;

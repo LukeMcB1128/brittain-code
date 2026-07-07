@@ -71,8 +71,26 @@
       <span>elapsed: <span id="elapsed">0.0s</span></span>
       <span class="sep">|</span>
       <span>tools used: <span id="tool-count">0</span></span>
+      <span class="sep">|</span>
+      <span>speed: <span id="tok-speed">–</span></span>
+      <span id="git-info" class="hidden">
+        <span class="sep">|</span>
+        <span id="git-branch" title="Current git branch (± = changed files)"></span>
+        <button id="diff-btn" class="mini" title="Show git diff of the working directory">DIFF</button>
+        <button id="commit-btn" class="mini" title="Commit all changes (prefills /commit)">COMMIT</button>
+      </span>
     </div>
   </footer>
+
+  <div id="overlay" class="hidden">
+    <div id="overlay-box">
+      <div id="overlay-head">
+        <span id="overlay-title"></span>
+        <button id="overlay-close">CLOSE</button>
+      </div>
+      <pre id="overlay-body"></pre>
+    </div>
+  </div>
 
   <script src="vendor/marked.js"></script>
   <script src="vendor/purify.js"></script>

@@ -76,6 +76,7 @@ function setCwd(p) {
   const parts = p.split('/');
   $('cwd-label').textContent = parts.slice(-2).join('/') || p;
   $('cwd-btn').title = p;
+  refreshGit();
 }
 
 // ---------- chat history ----------
@@ -91,7 +92,26 @@ async function loadChatHistory() {
     chatList.appendChild(noChats);
     return;
   }
+  // group chats by project folder (newest group first; chats are already newest-first)
+  const groups = new Map();
   for (const c of chats) {
+    const key = c.cwd || '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+
+  for (const [dir, items] of groups) {
+    const head = document.createElement('div');
+    head.className = 'chat-group';
+    head.textContent = dir ? dir.split('/').filter(Boolean).pop().toUpperCase() : 'NO FOLDER';
+    head.title = dir || 'Chats saved before folders were tracked';
+    chatList.appendChild(head);
+    for (const c of items) renderChatItem(c);
+  }
+}
+
+function renderChatItem(c) {
+  {
     const item = document.createElement('div');
     item.className = 'chat-item' + (c.id === currentChatId ? ' active' : '');
 
@@ -292,6 +312,10 @@ stopBtn.addEventListener('click', () => window.api.stop());
 async function send() {
   const text = input.value.trim();
   if ((!text && !pendingImages.length) || busy) return;
+  if (text.startsWith('/')) {
+    input.value = '';
+    return handleSlash(text);
+  }
   if (!modelSelect.value) return addError('No model selected — is Ollama running?');
   if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
 
@@ -343,6 +367,7 @@ function endRun() {
   finalizeAssistant();
   setState('idle');
   clearInterval(elapsedTimer);
+  refreshGit(); // the run may have changed files
 }
 
 function setState(s) {
@@ -400,6 +425,14 @@ function addMessage(role, text, images) {
 function addError(text) {
   const div = document.createElement('div');
   div.className = 'msg error';
+  div.textContent = text;
+  chat.appendChild(div);
+  scrollDown();
+}
+
+function addInfo(text) {
+  const div = document.createElement('div');
+  div.className = 'msg info';
   div.textContent = text;
   chat.appendChild(div);
   scrollDown();
@@ -504,9 +537,10 @@ window.api.onToolResult(({ result, denied }) => {
   scrollDown();
 });
 
-window.api.onStats(({ contextTokens, contextLength }) => {
+window.api.onStats(({ contextTokens, contextLength, tokPerSec }) => {
   $('ctx-tokens').textContent = contextTokens.toLocaleString();
   $('ctx-limit').textContent = contextLength.toLocaleString();
+  if (tokPerSec) $('tok-speed').textContent = tokPerSec.toFixed(1) + ' t/s';
   const pct = Math.min(100, (contextTokens / contextLength) * 100);
   const fill = $('ctx-fill');
   fill.style.width = pct + '%';
@@ -687,7 +721,7 @@ $('history-btn').addEventListener('click', () => {
   sidebar.classList.toggle('hidden');
 });
 
-$('new-btn').addEventListener('click', async () => {
+async function newSession() {
   if (busy) return;
   await window.api.reset();
   chat.innerHTML = '';
@@ -699,4 +733,140 @@ $('new-btn').addEventListener('click', async () => {
   currentChatId = null;
   loadChatHistory(); // clear active highlight
   showStartupMessage();
+}
+
+$('new-btn').addEventListener('click', newSession);
+
+// ---------- slash commands ----------
+const SLASH_HELP = [
+  '/help — show this list',
+  '/clear — start a new session',
+  '/compact — summarize the conversation to free up context',
+  '/diff — show the git diff for the working directory',
+  '/commit <message> — stage all changes and commit',
+  '/model <name> — switch model (partial match ok)',
+  '/memory — view what the agent has remembered',
+  '/export — save this chat as a markdown file',
+].join('\n');
+
+async function handleSlash(raw) {
+  const [cmd, ...rest] = raw.slice(1).split(' ');
+  const arg = rest.join(' ').trim();
+
+  switch (cmd.toLowerCase()) {
+    case 'help':
+      return addInfo(SLASH_HELP);
+
+    case 'clear':
+      return newSession();
+
+    case 'compact': {
+      if (busy) return;
+      if (!modelSelect.value) return addError('No model selected.');
+      busy = true;
+      setState('compacting…');
+      const res = await window.api.compact({ model: modelSelect.value });
+      busy = false;
+      setState('idle');
+      if (!res.ok) return addError('Compact failed: ' + res.error);
+      renderConversation(await window.api.getConversation());
+      addInfo('Conversation compacted — context freed. The model will continue from the summary above.');
+      return saveChat();
+    }
+
+    case 'diff':
+      return showDiff();
+
+    case 'commit': {
+      if (!cwd) return addError('No directory set.');
+      if (!arg) return addError('Usage: /commit <message>');
+      const res = await window.api.gitCommit(cwd, arg);
+      res.ok ? addInfo(res.out) : addError(res.error);
+      return refreshGit();
+    }
+
+    case 'model': {
+      if (!arg) return addError('Usage: /model <name>');
+      const match = [...modelSelect.options].map((o) => o.value).find((v) => v.includes(arg));
+      if (!match) return addError(`No installed model matching "${arg}".`);
+      modelSelect.value = match;
+      localStorage.setItem('model', match);
+      return addInfo('Model set to ' + match);
+    }
+
+    case 'memory': {
+      const res = await window.api.memoryGet();
+      return showOverlay('MEMORY — ' + res.path, res.content.trim() || '(nothing remembered yet — the agent saves lessons here with the remember tool)');
+    }
+
+    case 'export': {
+      const res = await window.api.exportChat();
+      if (res.ok) return addInfo('Exported to ' + res.path);
+      if (res.error !== 'cancelled') return addError(res.error);
+      return;
+    }
+
+    default:
+      return addError('Unknown command: /' + cmd + ' — try /help');
+  }
+}
+
+// ---------- git ----------
+async function refreshGit() {
+  const info = $('git-info');
+  if (!cwd) return info.classList.add('hidden');
+  const res = await window.api.gitStatus(cwd);
+  if (!res.ok) return info.classList.add('hidden');
+  $('git-branch').textContent = res.branch + (res.changed ? ' ±' + res.changed : ' ✓');
+  info.classList.remove('hidden');
+}
+
+async function showDiff() {
+  if (!cwd) return addError('No directory set.');
+  const res = await window.api.gitDiff(cwd);
+  showOverlay('GIT DIFF — ' + cwd, res.diff, { diff: true });
+}
+
+$('diff-btn').addEventListener('click', showDiff);
+$('commit-btn').addEventListener('click', () => {
+  input.value = '/commit ';
+  input.focus();
+});
+
+// ---------- overlay ----------
+function showOverlay(title, text, opts = {}) {
+  $('overlay-title').textContent = title;
+  const body = $('overlay-body');
+  if (opts.diff) {
+    body.innerHTML = '';
+    for (const line of text.split('\n')) {
+      const div = document.createElement('div');
+      div.textContent = line || ' ';
+      if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git')) div.className = 'diff-file';
+      else if (line.startsWith('+')) div.className = 'diff-add';
+      else if (line.startsWith('-')) div.className = 'diff-del';
+      else if (line.startsWith('@@')) div.className = 'diff-hunk';
+      body.appendChild(div);
+    }
+  } else {
+    body.textContent = text;
+  }
+  $('overlay').classList.remove('hidden');
+}
+
+function hideOverlay() {
+  $('overlay').classList.add('hidden');
+}
+
+$('overlay-close').addEventListener('click', hideOverlay);
+$('overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'overlay') hideOverlay();
+});
+
+// ---------- keyboard shortcuts ----------
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (!$('overlay').classList.contains('hidden')) hideOverlay();
+    else if (busy) window.api.stop();
+  }
 });

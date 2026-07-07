@@ -37,7 +37,30 @@ The status bar shows: current state, context usage (tokens used vs the model's c
 
 **NEW SESSION** clears the conversation (context resets to zero).
 
-Chats are saved automatically as individual JSON files in `~/Library/Application Support/Brittain Code/chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app.
+Chats are saved automatically as individual JSON files in `~/Library/Application Support/Brittain Code/chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar groups chats by the project folder they were worked in, and loading a chat restores its model, directory, and toggle states.
+
+## Slash commands
+
+Type these in the message box:
+
+| Command | What it does |
+|---|---|
+| `/help` | List all commands |
+| `/clear` | New session |
+| `/compact` | Summarize the conversation to free up context (great for long agent sessions on small-context models) |
+| `/diff` | Show the git diff of the working directory in an overlay |
+| `/commit <message>` | Stage everything and commit |
+| `/model <name>` | Switch model (partial match) |
+| `/memory` | View what the agent has remembered across chats |
+| `/export` | Save the chat as a markdown file |
+
+## Git, project instructions, memory, images
+
+- When DIR is a git repo, the status bar shows the branch and changed-file count, with **DIFF** and **COMMIT** buttons. The diff refreshes after every agent run — review what it changed before committing.
+- Put a **`BRITTAIN.md`** in any project folder and its contents are added to the system prompt for chats in that folder (like Claude Code's CLAUDE.md) — conventions, build commands, things the agent should know.
+- The agent saves cross-chat lessons with its `remember` tool to `~/Library/Application Support/Brittain Code/memory.md` (view with `/memory`, edit the file directly to prune).
+- Attach images with the **IMG** button or paste them into the text box (vision-capable models only).
+- **Esc** stops a running generation. Speed (tokens/sec) shows in the status bar after each response.
 
 ## Code layout — where to modify things
 

@@ -722,6 +722,7 @@ async function streamChat(model, messages, signal, think) {
         stats = {
           promptTokens: chunk.prompt_eval_count || 0,
           evalTokens: chunk.eval_count || 0,
+          tokPerSec: chunk.eval_duration ? (chunk.eval_count || 0) / (chunk.eval_duration / 1e9) : 0,
         };
       }
     }
@@ -792,6 +793,11 @@ function systemPrompt(cwd) {
     // cap so a huge memory file cannot blow up the prompt (keep the newest lines)
     lines.push('', 'Lessons remembered from previous sessions:', memory.slice(-2500));
   }
+  // per-project instructions, like Claude Code's CLAUDE.md
+  try {
+    const proj = fs.readFileSync(path.join(cwd, 'BRITTAIN.md'), 'utf8').trim();
+    if (proj) lines.push('', 'Project instructions (from BRITTAIN.md in the working directory):', proj.slice(0, 3000));
+  } catch {}
   return lines.join('\n');
 }
 
@@ -830,6 +836,7 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
         win.webContents.send('stream:stats', {
           contextTokens: stats.promptTokens + stats.evalTokens,
           contextLength,
+          tokPerSec: stats.tokPerSec,
         });
       }
 
@@ -1003,6 +1010,102 @@ ipcMain.handle('models:list', async () => {
   } catch (err) {
     return { ok: false, error: 'Cannot reach Ollama at ' + OLLAMA + ' — is it running?' };
   }
+});
+
+// ---------- git integration ----------
+function gitRun(args, cwd) {
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd, timeout: 15_000, maxBuffer: 4_000_000 }, (err, stdout, stderr) => {
+      resolve({ ok: !err, out: stdout || '', err: (stderr || '').trim() });
+    });
+  });
+}
+
+ipcMain.handle('git:status', async (_e, cwd) => {
+  const branch = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+  if (!branch.ok) return { ok: false }; // not a git repo
+  const status = await gitRun(['status', '--porcelain'], cwd);
+  return {
+    ok: true,
+    branch: branch.out.trim(),
+    changed: status.out.split('\n').filter(Boolean).length,
+  };
+});
+
+ipcMain.handle('git:diff', async (_e, cwd) => {
+  const staged = await gitRun(['diff', '--cached'], cwd);
+  const unstaged = await gitRun(['diff'], cwd);
+  const untracked = await gitRun(['ls-files', '--others', '--exclude-standard'], cwd);
+  const parts = [];
+  if (staged.out.trim()) parts.push('═══ STAGED ═══\n' + staged.out);
+  if (unstaged.out.trim()) parts.push(unstaged.out);
+  if (untracked.out.trim()) parts.push('═══ UNTRACKED FILES ═══\n' + untracked.out);
+  return { ok: true, diff: parts.join('\n') || '(working tree clean)' };
+});
+
+ipcMain.handle('git:commit', async (_e, cwd, message) => {
+  const add = await gitRun(['add', '-A'], cwd);
+  if (!add.ok) return { ok: false, error: add.err || 'git add failed' };
+  const commit = await gitRun(['commit', '-m', message], cwd);
+  return commit.ok
+    ? { ok: true, out: commit.out.trim().split('\n')[0] }
+    : { ok: false, error: commit.err || commit.out.trim() || 'commit failed' };
+});
+
+// ---------- memory viewer ----------
+ipcMain.handle('memory:get', () => ({ content: readMemory(), path: memoryPath() }));
+
+// ---------- conversation compaction ----------
+ipcMain.handle('chat:compact', async (_e, { model }) => {
+  if (conversation.length < 2) return { ok: false, error: 'Nothing to compact yet.' };
+  try {
+    // drop bulky tool outputs from what the summarizer sees
+    const msgs = conversation.map((m) =>
+      m.role === 'tool' && String(m.content).length > 1500
+        ? { ...m, content: String(m.content).slice(0, 1500) + '…[truncated]' }
+        : m
+    );
+    msgs.push({
+      role: 'user',
+      content: 'Summarize this entire conversation so work can continue seamlessly in a fresh session: the goal, key decisions, files created or modified and their current state, and unresolved tasks. Output only the summary.',
+    });
+    const data = await ollamaJson('/api/chat', { model, messages: msgs, stream: false });
+    const summary = (data.message?.content || '').trim();
+    if (!summary) return { ok: false, error: 'Model returned an empty summary.' };
+    conversation = [
+      { role: 'user', content: 'This conversation was compacted to save context. Continue from the summary below.' },
+      { role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary },
+    ];
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+// ---------- chat export ----------
+ipcMain.handle('chat:export', async () => {
+  if (!conversation.length) return { ok: false, error: 'Nothing to export.' };
+  const parts = [];
+  for (const m of conversation) {
+    if (m.role === 'user') {
+      parts.push('## You\n\n' + m.content);
+    } else if (m.role === 'assistant') {
+      if (m.thinking) parts.push('<details><summary>Thinking</summary>\n\n' + m.thinking + '\n\n</details>');
+      if (m.content) parts.push('## Model\n\n' + m.content);
+      for (const tc of m.tool_calls || []) {
+        parts.push('**Tool call:** `' + (tc.function?.name || '?') + '` — `' + JSON.stringify(tc.function?.arguments || {}).slice(0, 300) + '`');
+      }
+    } else if (m.role === 'tool') {
+      parts.push('<details><summary>Tool result: ' + (m.tool_name || '') + '</summary>\n\n```\n' + String(m.content).slice(0, 4000) + '\n```\n\n</details>');
+    }
+  }
+  const result = await dialog.showSaveDialog(win, {
+    defaultPath: 'chat-' + new Date().toISOString().slice(0, 10) + '.md',
+    filters: [{ name: 'Markdown', extensions: ['md'] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, error: 'cancelled' };
+  fs.writeFileSync(result.filePath, parts.join('\n\n') + '\n', 'utf8');
+  return { ok: true, path: result.filePath };
 });
 
 ipcMain.handle('dir:exists', (_e, p) => {
