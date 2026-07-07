@@ -915,7 +915,7 @@ ipcMain.handle('history:save', (_e, meta, convo) => {
   try {
     const id = safeChatId(meta.id);
     if (!id) return { ok: false, error: 'invalid chat id' };
-    const entry = { id, title: meta.title || 'Chat', model: meta.model || '', timestamp: meta.timestamp || new Date().toISOString() };
+    const entry = { id, title: meta.title || 'Chat', model: meta.model || '', cwd: meta.cwd || '', timestamp: meta.timestamp || new Date().toISOString() };
     fs.mkdirSync(chatsDir(), { recursive: true });
     fs.writeFileSync(path.join(chatsDir(), id + '.json'), JSON.stringify({ ...entry, conversation: convo || [] }), 'utf8');
     const index = readChatIndex().filter((c) => c.id !== id);
@@ -949,6 +949,10 @@ ipcMain.handle('models:list', async () => {
   } catch (err) {
     return { ok: false, error: 'Cannot reach Ollama at ' + OLLAMA + ' — is it running?' };
   }
+});
+
+ipcMain.handle('dir:exists', (_e, p) => {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
 });
 
 ipcMain.handle('cwd:pick', async () => {

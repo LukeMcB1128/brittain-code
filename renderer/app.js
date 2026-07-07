@@ -140,7 +140,7 @@ async function saveChat() {
 
   if (!currentChatId) currentChatId = Date.now().toString();
   const res = await window.api.historySave(
-    { id: currentChatId, title, model: modelSelect.value, timestamp: new Date().toISOString() },
+    { id: currentChatId, title, model: modelSelect.value, cwd: cwd || '', timestamp: new Date().toISOString() },
     conversation
   );
   if (!res.ok) addError('Failed to save chat: ' + res.error);
@@ -163,6 +163,15 @@ async function loadChat(chatId) {
   if (saved.model && [...modelSelect.options].some((o) => o.value === saved.model)) {
     modelSelect.value = saved.model;
     localStorage.setItem('model', saved.model);
+  }
+
+  // Restore the working directory this chat was using, if it still exists.
+  if (saved.cwd && saved.cwd !== cwd) {
+    if (await window.api.dirExists(saved.cwd)) {
+      setCwd(saved.cwd);
+    } else {
+      addError(`This chat used ${saved.cwd}, which no longer exists — DIR left unchanged.`);
+    }
   }
 
   loadChatHistory(); // refresh active highlight
