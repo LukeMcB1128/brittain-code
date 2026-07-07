@@ -27,7 +27,7 @@ To give it a custom icon: put an `icon.icns` in a `build/` folder, add `"icon": 
 
 ## Using it
 
-1. Pick a model from the dropdown (top left). Models that support tool calling work best — **qwen3-coder:30b** is your strongest, **qwen3:8b** is a fast fallback. Gemma models don't support tool calls and will chat only.
+1. Pick a model from the dropdown (top left). Models that support tool calling work best — **qwen3.6:27b** and **gemma4:26b** are the strongest for agent tasks, **qwen3:8b** and **gemma4:latest** are fast fallbacks. qwen3-coder:30b sometimes emits malformed tool calls; tiny models (qwen2.5-coder:1.5b) are chat-only.
 2. Click **DIR** and choose the project folder the agent should work in.
 3. Type a task and hit Enter.
 

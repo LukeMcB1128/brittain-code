@@ -88,6 +88,12 @@ function loadChatHistory() {
     date.textContent = new Date(c.timestamp).toLocaleString();
     main.appendChild(title);
     main.appendChild(date);
+    if (c.model) {
+      const model = document.createElement('span');
+      model.className = 'chat-model';
+      model.textContent = c.model;
+      main.appendChild(model);
+    }
 
     const del = document.createElement('button');
     del.className = 'chat-del';
@@ -122,11 +128,13 @@ async function saveChat() {
   if (existing) {
     existing.conversation = conversation;
     existing.timestamp = new Date().toISOString();
+    existing.model = modelSelect.value;
   } else {
     chats.push({
       id: currentChatId,
       title,
       timestamp: new Date().toISOString(),
+      model: modelSelect.value,
       conversation,
     });
   }
@@ -145,6 +153,13 @@ async function loadChat(chatId) {
   await window.api.loadConversation(saved.conversation);
   renderConversation(saved.conversation);
   currentChatId = chatId;
+
+  // Auto-select the model this chat was using; if it's gone from Ollama, keep the current one.
+  if (saved.model && [...modelSelect.options].some((o) => o.value === saved.model)) {
+    modelSelect.value = saved.model;
+    localStorage.setItem('model', saved.model);
+  }
+
   loadChatHistory(); // refresh active highlight
 }
 
@@ -330,6 +345,18 @@ window.api.onThinking((t) => {
   scrollDown();
 });
 
+// The fallback tool-call parser recovered calls from raw markup that already
+// streamed into the current bubble — swap in the cleaned text (or drop the bubble).
+window.api.onCleanContent((text) => {
+  if (!currentAssistant) return;
+  if (text) {
+    currentAssistant.textContent = text;
+  } else {
+    currentAssistant.closest('.msg')?.remove();
+    currentAssistant = null;
+  }
+});
+
 // ---------- stream events ----------
 window.api.onToken((t) => {
   finalizeThinking();
@@ -415,6 +442,7 @@ window.api.onApprovalRequest(({ id, name, args }) => {
     name === 'run_command' ? args.command
     : name === 'write_file' || name === 'append_file' ? `${args.path}\n\n${(args.content || '').slice(0, 600)}`
     : name === 'replace_in_file' ? `${args.path}\n\nfind: ${args.pattern}\nreplace: ${args.replacement}`
+    : name === 'edit_file' ? `${args.path}\n\n- ${String(args.old_string || '').slice(0, 300)}\n+ ${String(args.new_string || '').slice(0, 300)}`
     : args.source ? `${args.source} → ${args.destination}`
     : String(args.path || JSON.stringify(args));
   $('approval-bar').classList.remove('hidden');

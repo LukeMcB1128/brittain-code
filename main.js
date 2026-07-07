@@ -146,6 +146,23 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'edit_file',
+      description: 'Replace one exact snippet of text in a file with new text. old_string must match the file exactly (including whitespace and indentation) and must appear exactly once, unless replace_all is true. This is the preferred tool for editing existing code.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path to edit' },
+          old_string: { type: 'string', description: 'The exact existing text to replace — copy it verbatim from the file' },
+          new_string: { type: 'string', description: 'The replacement text' },
+          replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false)' },
+        },
+        required: ['path', 'old_string', 'new_string'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'list_directory',
       description: 'List files and folders in a directory. Directories end with /.',
       parameters: {
@@ -337,14 +354,15 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'replace_in_file',
-      description: 'Replace text in a file using regex or literal replacement. Reports how many occurrences were replaced.',
+      description: 'Find-and-replace literal text everywhere in a file. The pattern is treated as plain text, not regex, unless is_regex is true. For precise single edits to code, prefer edit_file.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'File path to modify' },
-          pattern: { type: 'string', description: 'Text or regex to find' },
+          pattern: { type: 'string', description: 'Literal text to find (or a JavaScript regex if is_regex is true)' },
           replacement: { type: 'string', description: 'Replacement text' },
-          flags: { type: 'string', description: 'Regex flags (e.g., "g", "i", "m"). Default "g".' },
+          is_regex: { type: 'boolean', description: 'Treat pattern as a regular expression (default false)' },
+          flags: { type: 'string', description: 'Regex flags when is_regex is true (default "g")' },
         },
         required: ['path', 'pattern', 'replacement'],
       },
@@ -399,6 +417,7 @@ const RISKY_TOOLS = new Set([
   'copy_file',
   'move_file',
   'replace_in_file',
+  'edit_file',
 ]);
 
 async function executeTool(name, args, cwd) {
@@ -518,14 +537,42 @@ async function executeTool(name, args, cwd) {
       const end = args.end ? Math.min(lines.length, args.end) : Math.min(lines.length, start + 10);
       return truncate(lines.slice(start, end).join('\n')) || '(no lines found)';
     }
+    case 'edit_file': {
+      const p = resolveInside(cwd, args.path);
+      const content = fs.readFileSync(p, 'utf8');
+      const oldS = String(args.old_string ?? '');
+      const newS = String(args.new_string ?? '');
+      if (!oldS) return 'Error: old_string must not be empty.';
+      if (oldS === newS) return 'Error: old_string and new_string are identical.';
+      const count = content.split(oldS).length - 1;
+      if (count === 0) return `Error: old_string not found in ${p}. Read the file and copy the exact text, including whitespace and indentation.`;
+      if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
+      fs.writeFileSync(p, content.split(oldS).join(newS), 'utf8');
+      return `Edited ${p}: replaced ${count} occurrence(s).`;
+    }
     case 'replace_in_file': {
       const p = resolveInside(cwd, args.path);
       const content = fs.readFileSync(p, 'utf8');
-      const regex = new RegExp(args.pattern, args.flags || 'g');
-      const matches = content.match(regex);
-      const count = matches ? matches.length : 0;
-      if (!count) return `No matches for pattern in ${p} — file unchanged.`;
-      fs.writeFileSync(p, content.replace(regex, args.replacement), 'utf8');
+      const pat = String(args.pattern ?? '');
+      const rep = String(args.replacement ?? '');
+      if (!pat) return 'Error: pattern must not be empty.';
+      let updated, count;
+      if (args.is_regex) {
+        const regex = new RegExp(pat, args.flags || 'g');
+        const matches = content.match(regex);
+        count = matches ? matches.length : 0;
+        if (!count) return `No matches for pattern in ${p} — file unchanged.`;
+        updated = content.replace(regex, rep);
+      } else {
+        count = content.split(pat).length - 1;
+        if (!count) return `No matches for text in ${p} — file unchanged.`;
+        updated = content.split(pat).join(rep);
+      }
+      // sanity guard: a bad pattern can explode the file (seen: 837k-line blowup)
+      if (updated.length > content.length * 3 + 100_000) {
+        return `Error: this replacement would grow the file from ${content.length} to ${updated.length} chars — refusing. The pattern is matching far more than intended.`;
+      }
+      fs.writeFileSync(p, updated, 'utf8');
       return `Replaced ${count} occurrence(s) in ${p}`;
     }
     case 'count_lines': {
@@ -603,7 +650,7 @@ async function streamChat(model, messages, signal, think) {
   const res = await fetch(OLLAMA + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true, ...(think ? { think: true } : {}) }),
+    body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true, ...(think === undefined ? {} : { think }) }),
     signal,
   });
   if (!res.ok) throw new Error(`Ollama chat failed: ${res.status} ${await res.text()}`);
@@ -648,6 +695,46 @@ async function streamChat(model, messages, signal, think) {
   return { content, thinking, toolCalls, stats };
 }
 
+// ---------- fallback tool-call parser ----------
+// Some models (seen with qwen3-coder) occasionally emit their native tool-call
+// markup as plain text instead of a structured call, e.g.:
+//   <tool_call>\n<function=read_file>\n<parameter=path>\nsrc/a.js\n</parameter>\n</function>\n</tool_call>
+// often truncated or missing wrapper tags. When Ollama parses nothing, this
+// recovers those calls from the raw text so the agent loop can still run them.
+function coerceParamValue(v) {
+  return /^(true|false|null|-?\d+(\.\d+)?)$/.test(v) ? JSON.parse(v) : v;
+}
+
+function parseRawToolCalls(content) {
+  if (!content.includes('<function=')) return null;
+  const calls = [];
+  const fnRe = /<function=([\w.-]+)>([\s\S]*?)(?:<\/function>|$)/g;
+  let m;
+  while ((m = fnRe.exec(content)) !== null) {
+    const name = m[1];
+    const args = {};
+    // closed parameters
+    const rest = m[2].replace(/<parameter=([\w.-]+)>\r?\n?([\s\S]*?)\r?\n?<\/parameter>/g, (_all, k, v) => {
+      args[k] = coerceParamValue(v);
+      return '';
+    });
+    // a trailing unclosed parameter (truncated output)
+    const open = rest.match(/<parameter=([\w.-]+)>\r?\n?([\s\S]*)/);
+    if (open) {
+      const v = open[2].replace(/<[^>]*$/, '').trim();
+      if (v) args[open[1]] = coerceParamValue(v);
+    }
+    calls.push({ function: { name, arguments: args } });
+  }
+  if (!calls.length) return null;
+  const cleaned = content
+    .replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/g, '')
+    .replace(/<function=[\s\S]*?(?:<\/function>|$)/g, '')
+    .replace(/<\/?(tool_call|function|parameter)[^>]*>/g, '')
+    .trim();
+  return { calls, cleaned };
+}
+
 // ---------- agent loop ----------
 function systemPrompt(cwd) {
   return [
@@ -657,7 +744,7 @@ function systemPrompt(cwd) {
     'Rules:',
     '- Explore before changing code: list and read the relevant files first. Never guess at file contents or paths.',
     '- Verify your work: read a file back after editing it, or run a command that proves the change works. Do not claim success without evidence from a tool result.',
-    '- Prefer replace_in_file for small edits. Use write_file only for new files or full rewrites of files you have read completely. Never write placeholders like "... existing code ...".',
+    '- Edit existing code with edit_file: copy the exact old text from the file and give the new text. Use write_file only for new files or full rewrites of files you have read completely. Never write placeholders like "... existing code ...".',
     '- Commands run in zsh with a 60 second timeout; do not start interactive programs or servers that never exit.',
     '- If a tool call errors twice, stop and ask the user for guidance with ask_user. If the user denies a tool call, do not retry it.',
     '- For ambiguous or destructive decisions, ask with ask_user and give 2-4 concrete options. Otherwise state your assumption in one line and proceed.',
@@ -674,11 +761,24 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think })
 
   const messages = () => [{ role: 'system', content: systemPrompt(cwd) }, ...conversation];
   const contextLength = await getContextLength(model);
-  const useThink = !!think && await supportsThinking(model);
+  // For models that support thinking, always send an explicit true/false —
+  // omitting the param makes Ollama think by default, ignoring the toggle.
+  const useThink = (await supportsThinking(model)) ? !!think : undefined;
 
   try {
     for (let step = 0; step < MAX_AGENT_STEPS; step++) {
-      const { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink);
+      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink);
+
+      // rescue tool calls the model emitted as raw text (qwen3-coder quirk)
+      if (!toolCalls.length) {
+        const recovered = parseRawToolCalls(content);
+        if (recovered) {
+          toolCalls = recovered.calls;
+          content = recovered.cleaned;
+          // the raw markup already streamed to the UI — replace it with the cleaned text
+          win.webContents.send('stream:cleancontent', content);
+        }
+      }
 
       if (stats) {
         win.webContents.send('stream:stats', {
