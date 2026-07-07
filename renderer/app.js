@@ -693,8 +693,6 @@ const startupMessages = [
 ];
 
 // Show a random startup message
-let startupHideTimer = null;
-
 function showStartupMessage() {
   const contentElement = $('startup-message-content');
   contentElement.innerHTML = '';
@@ -705,14 +703,9 @@ function showStartupMessage() {
   contentElement.appendChild(p);
 
   $('startup-message').classList.remove('hidden');
-
-  // Auto-hide after 10 seconds; reset the timer if a new message replaced this one
-  clearTimeout(startupHideTimer);
-  startupHideTimer = setTimeout(hideStartupMessage, 10000);
 }
 
 function hideStartupMessage() {
-  clearTimeout(startupHideTimer);
   $('startup-message').classList.add('hidden');
 }
 
