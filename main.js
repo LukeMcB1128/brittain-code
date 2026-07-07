@@ -680,7 +680,7 @@ ipcMain.on('question:response', (_e, { id, answer }) => {
 });
 
 // ---------- streaming chat with ollama ----------
-async function streamChat(model, messages, signal, think) {
+async function streamChat(model, messages, signal, think, silent = false) {
   const res = await fetch(OLLAMA + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -711,11 +711,11 @@ async function streamChat(model, messages, signal, think) {
       const msg = chunk.message || {};
       if (msg.thinking) {
         thinking += msg.thinking;
-        win.webContents.send('stream:thinking', msg.thinking);
+        if (!silent) win.webContents.send('stream:thinking', msg.thinking);
       }
       if (msg.content) {
         content += msg.content;
-        win.webContents.send('stream:token', msg.content);
+        if (!silent) win.webContents.send('stream:token', msg.content);
       }
       if (msg.tool_calls) toolCalls.push(...msg.tool_calls);
       if (chunk.done) {
@@ -1116,4 +1116,36 @@ ipcMain.handle('cwd:pick', async () => {
   const result = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
   if (result.canceled || !result.filePaths.length) return { ok: false };
   return { ok: true, path: result.filePaths[0] };
+});
+
+// ---------- generate chat title ----------
+ipcMain.handle('chat:generateTitle', async (_e, conversationContent) => {
+  try {
+    // If conversation is empty or invalid, return a default title
+    if (!conversationContent || !Array.isArray(conversationContent)) {
+      return { ok: false, error: 'Invalid conversation content' };
+    }
+    
+    // Create a system prompt that strictly asks for a descriptive, concise title
+    const systemPrompt = "You are a helpful chat summarizer. Given the following transcript of a programming chat, generate a single, descriptive, and concise title (maximum 7 words). Do not include any pre-text, explanation, or markdown formatting. Only output the title. Do not output any hashtags, markdown, or formatting. Just the plain text title. This is for generating a chat title only - do not output anything to the chat stream or UI. The only output should be the plain text title string.";
+    
+    // Get the last few messages to provide context for title generation
+    const lastMessages = conversationContent.slice(-5); // Get last 5 messages for context
+    
+    // Generate the title using the LLM
+    const response = await streamChat('qwen2.5-coder:1.5b', [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: JSON.stringify(lastMessages) }
+    ], null, false, true);
+    
+    // Return only the title without any extra formatting
+    let title = response.content.trim();
+    
+    // Clean up any markdown or formatting that might have slipped through
+    title = title.replace(/[#*`]/g, '').trim();
+    
+    return { ok: true, title };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });

@@ -153,10 +153,39 @@ async function saveChat() {
   const conversation = await window.api.getConversation();
   if (!conversation.length) return;
 
+  // Only generate a new title if this is a new chat (no existing title or title is generic)
+  let title = 'Chat';
   const firstUser = conversation.find((m) => m.role === 'user');
-  const title = firstUser
-    ? firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
-    : 'Chat';
+  
+  // Check if we should generate a title using the LLM
+  if (!currentChatId || !firstUser) {
+    // Use the new LLM-based title generation
+    try {
+      const titleRes = await window.api.generateChatTitle(conversation);
+      if (titleRes.ok && titleRes.title) {
+        title = titleRes.title;
+      } else {
+        // Fallback to old behavior if LLM fails
+        title = firstUser
+          ? firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
+          : 'Chat';
+      }
+    } catch (err) {
+      // Fallback to old behavior if API call fails
+      title = firstUser
+        ? firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
+        : 'Chat';
+    }
+  } else {
+    // For existing chats, keep the existing title
+    const existingChat = await window.api.historyList();
+    const chatEntry = existingChat.find(c => c.id === currentChatId);
+    if (chatEntry && chatEntry.title) {
+      title = chatEntry.title;
+    } else if (firstUser) {
+      title = firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '');
+    }
+  }
 
   if (!currentChatId) currentChatId = Date.now().toString();
   const res = await window.api.historySave(
