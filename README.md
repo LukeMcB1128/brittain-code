@@ -37,6 +37,8 @@ The status bar shows: current state, context usage (tokens used vs the model's c
 
 **NEW SESSION** clears the conversation (context resets to zero).
 
+Chats are saved automatically as individual JSON files in `~/Library/Application Support/Brittain Code/chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app.
+
 ## Code layout — where to modify things
 
 | File | What it does |

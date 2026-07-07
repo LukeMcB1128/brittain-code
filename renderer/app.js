@@ -1,4 +1,4 @@
-// Local Code — UI logic.
+// Brittain Code — UI logic.
 
 const $ = (id) => document.getElementById(id);
 const chat = $('chat');
@@ -39,8 +39,25 @@ let currentChatId = null;
   thinkToggle.checked = localStorage.getItem('think') === '1';
   autoApprove.checked = localStorage.getItem('autoApprove') === '1';
 
+  // One-time migration: chats used to live in localStorage; move them to disk.
+  try {
+    const legacy = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+    if (legacy.length) {
+      for (const c of legacy) {
+        await window.api.historySave(
+          { id: String(c.id), title: c.title, model: c.model || '', timestamp: c.timestamp || new Date().toISOString() },
+          c.conversation || []
+        );
+      }
+    }
+    localStorage.removeItem('chatHistory');
+  } catch {}
+
   // Load chat history
   loadChatHistory();
+  
+  // Show startup message on boot
+  showStartupMessage();
 })();
 
 thinkToggle.addEventListener('change', () => localStorage.setItem('think', thinkToggle.checked ? '1' : '0'));
@@ -62,8 +79,9 @@ function setCwd(p) {
 }
 
 // ---------- chat history ----------
-function loadChatHistory() {
-  const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+async function loadChatHistory() {
+  const chats = await window.api.historyList();
+  chats.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)); // newest first
   chatList.innerHTML = '';
 
   if (chats.length === 0) {
@@ -73,8 +91,7 @@ function loadChatHistory() {
     chatList.appendChild(noChats);
     return;
   }
-  // newest first
-  for (const c of chats.slice().reverse()) {
+  for (const c of chats) {
     const item = document.createElement('div');
     item.className = 'chat-item' + (c.id === currentChatId ? ' active' : '');
 
@@ -116,42 +133,30 @@ async function saveChat() {
   const conversation = await window.api.getConversation();
   if (!conversation.length) return;
 
-  const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
   const firstUser = conversation.find((m) => m.role === 'user');
   const title = firstUser
     ? firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
     : 'Chat';
 
-  // Update the current chat in place; only create a new entry for a new session.
   if (!currentChatId) currentChatId = Date.now().toString();
-  const existing = chats.find((c) => c.id === currentChatId);
-  if (existing) {
-    existing.conversation = conversation;
-    existing.timestamp = new Date().toISOString();
-    existing.model = modelSelect.value;
-  } else {
-    chats.push({
-      id: currentChatId,
-      title,
-      timestamp: new Date().toISOString(),
-      model: modelSelect.value,
-      conversation,
-    });
-  }
-
-  localStorage.setItem('chatHistory', JSON.stringify(chats));
+  const res = await window.api.historySave(
+    { id: currentChatId, title, model: modelSelect.value, timestamp: new Date().toISOString() },
+    conversation
+  );
+  if (!res.ok) addError('Failed to save chat: ' + res.error);
   loadChatHistory();
 }
 
 async function loadChat(chatId) {
   if (busy) return;
-  const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
-  const saved = chats.find((c) => c.id === chatId);
-  if (!saved) return;
+  const res = await window.api.historyLoad(chatId);
+  if (!res.ok) return addError('Could not load chat: ' + res.error);
+  const saved = res.chat;
 
   // Push the stored conversation into the main process so the model continues from it.
   await window.api.loadConversation(saved.conversation);
   renderConversation(saved.conversation);
+  hideStartupMessage();
   currentChatId = chatId;
 
   // Auto-select the model this chat was using; if it's gone from Ollama, keep the current one.
@@ -164,9 +169,7 @@ async function loadChat(chatId) {
 }
 
 async function deleteChat(chatId) {
-  const chats = JSON.parse(localStorage.getItem('chatHistory') || '[]');
-  const updatedChats = chats.filter(c => c.id !== chatId);
-  localStorage.setItem('chatHistory', JSON.stringify(updatedChats));
+  await window.api.historyDelete(chatId);
   loadChatHistory();
 
   // If we deleted the currently loaded chat, clear the conversation everywhere
@@ -214,6 +217,7 @@ async function send() {
   if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
 
   input.value = '';
+  hideStartupMessage();
   addMessage('user', text);
   startRun();
 
@@ -546,6 +550,42 @@ function hideQuestion() {
   pendingQuestionId = null;
 }
 
+// Array of startup messages
+const startupMessages = [
+  "Welcome to Brittain Code!",
+  "Ready to help with your coding tasks",
+  "Start by describing what you'd like to build",
+  "Ask me anything about programming",
+  "Happy to assist with your development",
+  "Let's get coding!",
+  "Your AI coding assistant is here",
+  "Ask questions, get answers, build amazing things"
+];
+
+// Show a random startup message
+let startupHideTimer = null;
+
+function showStartupMessage() {
+  const contentElement = $('startup-message-content');
+  contentElement.innerHTML = '';
+
+  const randomMessage = startupMessages[Math.floor(Math.random() * startupMessages.length)];
+  const p = document.createElement('p');
+  p.textContent = randomMessage;
+  contentElement.appendChild(p);
+
+  $('startup-message').classList.remove('hidden');
+
+  // Auto-hide after 10 seconds; reset the timer if a new message replaced this one
+  clearTimeout(startupHideTimer);
+  startupHideTimer = setTimeout(hideStartupMessage, 10000);
+}
+
+function hideStartupMessage() {
+  clearTimeout(startupHideTimer);
+  $('startup-message').classList.add('hidden');
+}
+
 // ---------- event listeners ----------
 $('history-btn').addEventListener('click', () => {
   sidebar.classList.toggle('hidden');
@@ -562,4 +602,5 @@ $('new-btn').addEventListener('click', async () => {
   setState('idle');
   currentChatId = null;
   loadChatHistory(); // clear active highlight
+  showStartupMessage();
 });

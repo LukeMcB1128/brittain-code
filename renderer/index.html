@@ -29,6 +29,10 @@
       <div id="chat-list"></div>
     </aside>
     <main id="chat"></main>
+    <!-- Startup message overlay — lives outside #chat so chat.innerHTML wipes can't destroy it -->
+    <div id="startup-message" class="hidden">
+      <div id="startup-message-content"></div>
+    </div>
   </div>
 
   <div id="approval-bar" class="hidden">

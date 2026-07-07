@@ -885,6 +885,63 @@ ipcMain.handle('chat:load', (_e, msgs) => {
   return { ok: true };
 });
 
+// ---------- durable chat storage ----------
+// One JSON file per chat in userData/chats/ plus a light index.json holding
+// only sidebar metadata. Saves rewrite one chat's file, never the whole history.
+function chatsDir() {
+  return path.join(app.getPath('userData'), 'chats');
+}
+
+function safeChatId(id) {
+  return String(id).replace(/[^\w.-]/g, '');
+}
+
+function readChatIndex() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(chatsDir(), 'index.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+function writeChatIndex(list) {
+  fs.mkdirSync(chatsDir(), { recursive: true });
+  fs.writeFileSync(path.join(chatsDir(), 'index.json'), JSON.stringify(list, null, 2), 'utf8');
+}
+
+ipcMain.handle('history:list', () => readChatIndex());
+
+ipcMain.handle('history:save', (_e, meta, convo) => {
+  try {
+    const id = safeChatId(meta.id);
+    if (!id) return { ok: false, error: 'invalid chat id' };
+    const entry = { id, title: meta.title || 'Chat', model: meta.model || '', timestamp: meta.timestamp || new Date().toISOString() };
+    fs.mkdirSync(chatsDir(), { recursive: true });
+    fs.writeFileSync(path.join(chatsDir(), id + '.json'), JSON.stringify({ ...entry, conversation: convo || [] }), 'utf8');
+    const index = readChatIndex().filter((c) => c.id !== id);
+    index.push(entry);
+    writeChatIndex(index);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('history:load', (_e, id) => {
+  try {
+    const chat = JSON.parse(fs.readFileSync(path.join(chatsDir(), safeChatId(id) + '.json'), 'utf8'));
+    return { ok: true, chat };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('history:delete', (_e, id) => {
+  try { fs.unlinkSync(path.join(chatsDir(), safeChatId(id) + '.json')); } catch {}
+  writeChatIndex(readChatIndex().filter((c) => c.id !== safeChatId(id)));
+  return { ok: true };
+});
+
 ipcMain.handle('models:list', async () => {
   try {
     const data = await ollamaJson('/api/tags');

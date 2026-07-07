@@ -78,6 +78,7 @@ button:active { background: var(--border); }
   flex: 1;
   display: flex;
   min-height: 0;
+  position: relative; /* anchors the startup-message overlay */
 }
 
 #sidebar {
@@ -497,4 +498,48 @@ footer {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ---------- startup message ---------- */
+#startup-message {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  z-index: 10;
+  pointer-events: none;
+  padding: 10px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+#startup-message-content {
+  font-family: var(--mono);
+  font-size: 16px;
+  color: var(--text);
+  pointer-events: all;
+  opacity: 0.6;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0 auto;
+  max-width: 80%;
+  display: inline-block;
+  text-align: center;
+}
+
+#startup-message-content p {
+  margin: 0 0 10px 0;
+  line-height: 1.4;
+  padding: 0;
+  background: transparent;
+}
+
+#startup-message-content p:last-child {
+  margin-bottom: 0;
+}
+
+#startup-message.hidden {
+  display: none;
 }

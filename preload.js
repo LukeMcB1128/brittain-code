@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld('api', {
   reset: () => ipcRenderer.invoke('chat:reset'),
   getConversation: () => ipcRenderer.invoke('chat:get'),
   loadConversation: (msgs) => ipcRenderer.invoke('chat:load', msgs),
+  historyList: () => ipcRenderer.invoke('history:list'),
+  historySave: (meta, conversation) => ipcRenderer.invoke('history:save', meta, conversation),
+  historyLoad: (id) => ipcRenderer.invoke('history:load', id),
+  historyDelete: (id) => ipcRenderer.invoke('history:delete', id),
   respondApproval: (id, approved) => ipcRenderer.send('approval:response', { id, approved }),
   respondQuestion: (id, answer) => ipcRenderer.send('question:response', { id, answer }),
 
