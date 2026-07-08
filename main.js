@@ -711,16 +711,20 @@ async function executeTool(name, args, cwd) {
       return JSON.stringify(process.env, null, 2);
     }
     case 'check_port_usage': {
+      const port = parseInt(args.port, 10);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return `Error: invalid port "${args.port}"`;
       return new Promise((resolve) => {
-        exec(`lsof -i :${args.port} -sTCP:LISTEN`, { cwd, timeout: 10_000 }, (err, stdout, stderr) => {
+        execFile('lsof', ['-i', ':' + port, '-sTCP:LISTEN'], { cwd, timeout: 10_000 }, (err, stdout, stderr) => {
           if (err && !stdout && !stderr) return resolve('Port is not in use.');
           resolve(truncate(stdout || stderr || '(no output)'));
         });
       });
     }
     case 'get_git_log': {
-      const limit = args.limit ? `-n ${args.limit}` : '';
-      return gitRun(['log', limit], cwd).then(res => res.ok ? res.out : `Error: ${res.err}`);
+      const gitArgs = ['log', '--oneline', '--no-color'];
+      const limit = parseInt(args.limit, 10);
+      gitArgs.push('-n', String(Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 20));
+      return gitRun(gitArgs, cwd).then((res) => (res.ok ? truncate(res.out) : `Error: ${res.err}`));
     }
     case 'calculate_file_hash': {
       const p = resolveInside(cwd, args.path);
