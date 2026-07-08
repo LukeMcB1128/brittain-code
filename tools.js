@@ -440,6 +440,47 @@ const TOOL_DEFS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'initiate_research_session',
+      description: 'Starts a new research session by creating a RESEARCH_LOG.md file with the given or objective.',
+      parameters: {
+        type: 'object',
+        properties: { objective: { type: 'string', description: 'The objective of the research session' } },
+        required: ['objective'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'record_observation',
+      description: 'Records a finding or observation into the active RESEARCH_LOG.md file.',
+      parameters: {
+        type: 'object',
+        properties: {
+          observation: { type: 'string', description: 'The observation to record' },
+          evidence_path: { type: 'string', description: 'Path to the file or evidence supporting this observation' },
+        },
+        required: ['observation'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'finalize_research',
+      description: 'Finalizes the current research session, creating a RESEARCH_REPORT.md from the log and adding a summary.',
+      parameters: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string', description: 'A summary of the research findings' },
+        },
+        required: ['summary'],
+      },
+    },
+  },
 ];
 
 const RISKY_TOOLS = new Set([
@@ -452,6 +493,9 @@ const RISKY_TOOLS = new Set([
   'move_file',
   'replace_in_file',
   'edit_file',
+  'initiate_research_session',
+  'record_observation',
+  'finalize_research',
 ]);
 
 async function executeTool(name, args, cwd) {
@@ -674,6 +718,28 @@ async function executeTool(name, args, cwd) {
       } catch (err) {
         return `Error: ${err.message}`;
       }
+    }
+    case 'initiate_research_session': {
+      const p = resolveInside(cwd, 'RESEARCH_LOG.md');
+      const content = `# Research Session: ${args.objective}\n\n## Observations\n`;
+      fs.writeFileSync(p, content, 'utf8');
+      return `Started research session for: ${args.objective}. Log: ${p}`;
+    }
+    case 'record_observation': {
+      const p = resolveInside(cwd, 'RESEARCH_LOG.md');
+      if (!fs.existsSync(p)) return `Error: No active research session. Run 'initiate_research_session' first.`;
+      const entry = `- **Observation**: ${args.observation} (Evidence: ${args.evidence_path || 'N/A'})\n`;
+      fs.appendFileSync(p, entry, 'utf8');
+      return `Recorded observation.`;
+    }
+    case 'finalize_research': {
+      const logP = resolveInside(cwd, 'RESEARCH_LOG.md');
+      const reportP = resolveInside(cwd, 'RESEARCH_REPORT.md');
+      if (!fs.existsSync(logP)) return `Error: No active research session found to finalize.`;
+      const logContent = fs.readFileSync(logP, 'utf8');
+      const reportContent = `${logContent}\n## Summary\n${args.summary}\n`;
+      fs.writeFileSync(reportP, reportContent, 'utf8');
+      return `Research session finalized. Report created at ${reportP}`;
     }
     case 'list_processes': {
       const pattern = args.pattern ? new RegExp(args.pattern, 'i') : null;
