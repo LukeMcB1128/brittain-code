@@ -8,6 +8,18 @@ const { initTools, TOOL_DEFS, RISKY_TOOLS, executeTool, gitRun, memoryPath, read
 
 const OLLAMA = 'http://127.0.0.1:11434';
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
+// The context window we actually request from Ollama. Without an explicit
+// num_ctx, Ollama uses its own (much smaller) default and SILENTLY TRUNCATES
+// the oldest messages — the model loses the system prompt and the task, then
+// hallucinates ("the user hasn't asked anything yet"). Capped below the model
+// maximum because KV-cache RAM grows with the window. 64k sized for gemma4:26b
+// on a 36GB Mac WITH Ollama's q8_0 KV cache enabled (OLLAMA_FLASH_ATTENTION=1,
+// OLLAMA_KV_CACHE_TYPE=q8_0 via launchctl setenv); drop to 32_768 without it.
+const NUM_CTX_CAP = 65_536;
+
+async function effectiveContext(model) {
+  return Math.min(await getContextLength(model), NUM_CTX_CAP);
+}
 
 let win = null;
 
@@ -123,11 +135,18 @@ ipcMain.on('question:response', (_e, { id, answer }) => {
 });
 
 // ---------- streaming chat with ollama ----------
-async function streamChat(model, messages, signal, think, silent = false) {
+async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192) {
   const res = await fetch(OLLAMA + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true, ...(think === undefined ? {} : { think }) }),
+    body: JSON.stringify({
+      model,
+      messages,
+      tools: TOOL_DEFS,
+      stream: true,
+      options: { num_ctx: numCtx },
+      ...(think === undefined ? {} : { think }),
+    }),
     signal,
   });
   if (!res.ok) throw new Error(`Ollama chat failed: ${res.status} ${await res.text()}`);
@@ -263,14 +282,15 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
   currentAbort = new AbortController();
 
   const messages = () => [{ role: 'system', content: systemPrompt(cwd) }, ...conversation];
-  const contextLength = await getContextLength(model);
+  // report the window we actually run with, not the model's theoretical max
+  const contextLength = await effectiveContext(model);
   // For models that support thinking, always send an explicit true/false —
   // omitting the param makes Ollama think by default, ignoring the toggle.
   const useThink = (await supportsThinking(model)) ? !!think : undefined;
 
   try {
     for (let step = 0; step < MAX_AGENT_STEPS; step++) {
-      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink);
+      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink, false, contextLength);
 
       // rescue tool calls the model emitted as raw text (qwen3-coder quirk)
       if (!toolCalls.length) {
@@ -512,7 +532,12 @@ ipcMain.handle('chat:compact', async (_e, { model }) => {
       role: 'user',
       content: 'Summarize this entire conversation so work can continue seamlessly in a fresh session: the goal, key decisions, files created or modified and their current state, and unresolved tasks. Output only the summary.',
     });
-    const data = await ollamaJson('/api/chat', { model, messages: msgs, stream: false });
+    const data = await ollamaJson('/api/chat', {
+      model,
+      messages: msgs,
+      stream: false,
+      options: { num_ctx: await effectiveContext(model) },
+    });
     const summary = (data.message?.content || '').trim();
     if (!summary) return { ok: false, error: 'Model returned an empty summary.' };
     conversation = [

@@ -569,10 +569,16 @@ window.api.onToolResult(({ result, denied }) => {
   scrollDown();
 });
 
+let compactWarned = false;
+
 window.api.onStats(({ contextTokens, contextLength, tokPerSec }) => {
   $('ctx-tokens').textContent = contextTokens.toLocaleString();
   $('ctx-limit').textContent = contextLength.toLocaleString();
   if (tokPerSec) $('tok-speed').textContent = tokPerSec.toFixed(1) + ' t/s';
+  if (!compactWarned && contextTokens / contextLength > 0.8) {
+    compactWarned = true;
+    addInfo('Context is over 80% full — run /compact soon or the model will start losing the oldest messages (including its instructions).');
+  }
   const pct = Math.min(100, (contextTokens / contextLength) * 100);
   const fill = $('ctx-fill');
   fill.style.width = pct + '%';
@@ -749,6 +755,7 @@ $('history-btn').addEventListener('click', () => {
 async function newSession() {
   if (busy) return;
   await window.api.reset();
+  compactWarned = false;
   chat.innerHTML = '';
   toolCount = 0;
   $('tool-count').textContent = '0';
