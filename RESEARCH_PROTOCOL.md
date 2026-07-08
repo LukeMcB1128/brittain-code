@@ -1,6 +1,6 @@
 # Research Protocol: Deep Research Capability
 
-This document defines the standard operating procedure for conducting autonomous, deep-dive investigations within the Brittain Code environment.
+This document defines the standard operating procedure for conducting autonomous, deep-dive investigations within the environment.
 
 ## 1. The Research Loop
 Every research session must follow a structured iterative cycle:

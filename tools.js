@@ -439,6 +439,40 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'analyze_file_structure',
+      description: 'Generate a tree view of a directory structure. Skips .git and node_modules. Useful for understanding project layout before deeper exploration.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Directory to analyze (default: working directory)' },
+          depth: { type: 'number', description: 'Maximum depth to recurse (default: 3, max: 8)' },
+          include_files: { type: 'boolean', description: 'Include individual files in the tree, not just directories (default: true)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pattern_search_deep',
+      description: 'Search for a pattern in files with filtering by file type, context lines, and result limits. More targeted than search_files.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Text or regex pattern to search for' },
+          path: { type: 'string', description: 'Directory to search in (default: working directory)' },
+          file_pattern: { type: 'string', description: 'Glob pattern to filter which files to search (e.g. "*.js", "src/**/*.ts")' },
+          context_lines: { type: 'number', description: 'Number of lines of context to include before and after each match (default: 2)' },
+          max_results: { type: 'number', description: 'Maximum number of matching lines to return (default: 50)' },
+          is_regex: { type: 'boolean', description: 'Treat pattern as a regular expression (default: false)' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'find_largest_files',
       description: 'Find the largest files in a directory (skips .git and node_modules).',
       parameters: {
@@ -503,11 +537,7 @@ const RISKY_TOOLS = new Set([
   'move_file',
   'replace_in_file',
   'edit_file',
-  'initiate_research_session',
-  'record_observation',
-  'finalize_research',
   'create_git_branch',
-  'read_git_diff',
 ]);
 
 async function executeTool(name, args, cwd) {
@@ -741,7 +771,12 @@ async function executeTool(name, args, cwd) {
       const p = resolveInside(cwd, 'RESEARCH_LOG.md');
       const content = `# Research Session: ${args.objective}\n\n## Observations\n`;
       fs.writeFileSync(p, content, 'utf8');
-      return `Started research session for: ${args.objective}. Log: ${p}`;
+      let result = `Started research session for: ${args.objective}. Log: ${p}`;
+      try {
+        const protocol = fs.readFileSync(resolveInside(cwd, 'RESEARCH_PROTOCOL.md'), 'utf8').trim();
+        if (protocol) result += `\n\nResearch Protocol:\n${protocol}`;
+      } catch {}
+      return result;
     }
     case 'record_observation': {
       const p = resolveInside(cwd, 'RESEARCH_LOG.md');
@@ -758,6 +793,71 @@ async function executeTool(name, args, cwd) {
       const reportContent = `${logContent}\n## Summary\n${args.summary}\n`;
       fs.writeFileSync(reportP, reportContent, 'utf8');
       return `Research session finalized. Report created at ${reportP}`;
+    }
+    case 'analyze_file_structure': {
+      const dir = resolveInside(cwd, args.path);
+      const maxDepth = Math.min(args.depth ?? 3, 8);
+      const includeFiles = args.include_files !== false;
+      const lines = [path.basename(dir) + '/'];
+      function buildTree(d, prefix, depth) {
+        if (depth > maxDepth) return;
+        let entries;
+        try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+        entries = entries.filter(e => e.name !== '.git' && e.name !== 'node_modules').sort((a, b) => {
+          if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        for (let i = 0; i < entries.length; i++) {
+          const e = entries[i];
+          const last = i === entries.length - 1;
+          const connector = last ? '└── ' : '├── ';
+          const childPrefix = last ? '    ' : '│   ';
+          if (e.isDirectory()) {
+            lines.push(prefix + connector + e.name + '/');
+            buildTree(path.join(d, e.name), prefix + childPrefix, depth + 1);
+          } else if (includeFiles) {
+            lines.push(prefix + connector + e.name);
+          }
+        }
+      }
+      buildTree(dir, '', 1);
+      return truncate(lines.join('\n'));
+    }
+    case 'pattern_search_deep': {
+      const dir = resolveInside(cwd, args.path);
+      const ctxLines = Math.min(args.context_lines ?? 2, 10);
+      const maxResults = Math.min(args.max_results ?? 50, 300);
+      const fileRe = args.file_pattern ? globToRegex(args.file_pattern) : null;
+      let searchRe;
+      try {
+        searchRe = args.is_regex ? new RegExp(args.pattern) : new RegExp(args.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      } catch (e) {
+        return `Error: invalid regex pattern: ${e.message}`;
+      }
+      const allMatches = [];
+      walkDir(dir, (filePath) => {
+        if (allMatches.length >= maxResults) return;
+        if (fileRe) {
+          const rel = path.relative(dir, filePath);
+          if (!fileRe.test(rel) && !fileRe.test(path.basename(filePath))) return;
+        }
+        let content;
+        try { content = fs.readFileSync(filePath, 'utf8'); } catch { return; }
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length && allMatches.length < maxResults; i++) {
+          if (searchRe.test(lines[i])) {
+            const start = Math.max(0, i - ctxLines);
+            const end = Math.min(lines.length - 1, i + ctxLines);
+            const ctx = lines.slice(start, end + 1).map((l, idx) => {
+              const lineNum = start + idx + 1;
+              const marker = (start + idx === i) ? '>' : ' ';
+              return `${marker} ${lineNum}: ${l}`;
+            }).join('\n');
+            allMatches.push(`--- ${path.relative(cwd, filePath)} ---\n${ctx}`);
+          }
+        }
+      });
+      return allMatches.length ? truncate(allMatches.join('\n\n')) : 'No matches found.';
     }
     case 'list_processes': {
       const pattern = args.pattern ? new RegExp(args.pattern, 'i') : null;
