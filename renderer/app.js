@@ -223,9 +223,11 @@ async function loadChat(chatId) {
   }
 
   // Restore the working directory this chat was using, if it still exists.
+  let cwdChanged = false;
   if (saved.cwd && saved.cwd !== cwd) {
     if (await window.api.dirExists(saved.cwd)) {
       setCwd(saved.cwd);
+      cwdChanged = true;
     } else {
       addError(`This chat used ${saved.cwd}, which no longer exists — DIR left unchanged.`);
     }
@@ -242,6 +244,7 @@ async function loadChat(chatId) {
   }
 
   loadChatHistory(); // refresh active highlight
+  if (!cwdChanged) refreshGit();
 }
 
 async function deleteChat(chatId) {

@@ -1,30 +1,46 @@
-# Agent Instructions: brittain-code
+# Repository Instructions: brittain-code
 
-Follow these instructions when performing tasks within this repository.
+You are maintaining and developing the Brittain Code application itself. Follow these strict architectural and tool protocols to ensure code safety, prevent hanging processes, and maintain repository health.
 
-## Core Development Patterns
+## Core Architecture Rules
 
-### 1. Tool Implementation (Main Process)
-When tasked with adding or modifying tools in `main.js`:
-- **Atomicity**: You must update both the `TOOL_DEFS` array (the schema) and the `executeTool` switch statement (the logic) in a single coherent workflow.
-- **Risk Assessment**: If the new tool performs any filesystem or shell operations, you **must** add its name to the `RISKY_TOOLS` Set to ensure the user is prompted for approval.
-- **Verification**: After implementing a tool, immediately verify it by using the tool itself (e.g., if you added `check_version`, run it).
+### 1. Tool Lifecycle (Modifying main.js)
+When adding, removing, or updating tools in the application:
+- **Atomicity**: You must update the schema in `TOOL_DEFS` and the execution logic inside the `executeTool` switch statement within a single task loop.
+- **Security Tracking**: If a new tool performs file modifications, network requests, or system executions, you **must** append its name to the `RISKY_TOOLS` Set so the runtime prompts the user for authorization.
+- **Schema Validation**: Ensure any new tool definition strictly follows the OpenAI function-calling JSON schema format matching the existing tools.
 
-### 2. IPC & UI Updates
-When modifying the interface or adding new capabilities:
-- **Bridge Integrity**: Any new `ipcMain` handler in `main.js` **must** be accompanied by a corresponding `contextBridge` exposure in `preload.js`.
-- **UI Feedback**: When adding new UI elements in `renderer/`, ensure they utilize the existing `setState` and `status-bar` patterns to provide feedback to the user during long-running operations.
+### 2. Desktop IPC Bridge Integrity
+- **The Three-Layer Rule**: Any feature crossing the process boundary must be updated across all three layers simultaneously:
+  1. Main Process (`main.js`): Expose the `ipcMain.handle` or `ipcMain.on` listener.
+  2. Preload Script (`preload.js`): Expose the safe wrapper via `contextBridge.exposeInMainWorld`.
+  3. UI Layer (`renderer/app.js`): Invoke the exposed window method and handle the Promise resolving/rejecting states gracefully.
+- **UI State**: Always update the user interface state indicators during long-running async IPC calls so the user doesn't assume the app has frozen.
 
-### 3. File Editing Convention
-- **Preference**: Use `edit_file` for all modifications to existing code in `main.js`, `preload.js`, and `renderer/app.js`. 
-- **Accuracy**: Always `read_file` immediately before `edit_file` to ensure the `old_string` matches the current state of the file exactly, including whitespace.
-- **Avoid Overwrites**: Do not use `write_file` for existing files unless the change is a complete rewrite.
+---
 
-### 4. Testing & Verification
-- **Development Loop**: Use `npm start` for all testing. Do not rely on the built `.app` version for debugging.
-- **Regression Testing**: After any change to `main.js`, run `npm start` and verify that existing tools (like `read_file` or `list_directory`) still function correctly.
-- **Deployment**: Only use `npm run deploy` when a feature is fully verified and ready for the permanent installation.
+## Tool Execution Protocols
 
-## Constraints
-- **No External Dependencies**: Do not attempt to install new npm packages unless explicitly instructed.
-- **Offline Protocol**: All testing and verification must assume no internet access is available.
+### 1. Code Modification Safety
+- **Uniqueness Check**: Before executing `edit_file`, you must ensure your `old_string` is completely unique within the target file. If the snippet (e.g., `return true;`) appears multiple times, pad your `old_string` with 2–3 lines of surrounding context code to guarantee a precise, single match.
+- **Bulk Changes**: Use `replace_in_file` only for global variable renames or project-wide structural updates. For fine-grained refactoring, default to `edit_file`.
+
+### 2. Process & Testing Safeguards (Anti-Hang Protocol)
+Because your shell environment terminates commands after 60 seconds and forbids blocking interactive interfaces:
+- **No Direct App Launching**: Never run `npm start` or raw GUI execution commands directly inside `run_command`, as they will hang the agent shell.
+- **Verification Workaround**: To verify changes without launching the full GUI app, use non-blocking testing methods via `run_command`:
+  - Run a syntax/linter check: `npm run lint` or `npx eslint main.js`
+  - Run specialized headless test suites if available.
+- **Port & Process Management**: If a testing tool reports an `EADDRINUSE` error or an environmental conflict, proactively use `check_port_usage` and `list_processes` to locate and terminate conflicting background tasks.
+
+### 3. Knowledge Management (`remember`)
+You must use the `remember` tool to log persistent context when:
+- A specific zsh environment quirk or shell path issue on the host Mac is encountered.
+- The user corrects your interpretation of an architectural pattern in this codebase.
+- You uncover a unique code style preference used within the `renderer/` folder.
+
+---
+
+## Critical Constraints
+- **Zero Blind Rewrites**: Do not use `write_file` on any core file (`main.js`, `preload.js`, `renderer/app.js`) unless you have read the entire file first using `read_file` or mapped it using `get_file_lines`.
+- **Dependency Freeze**: Do not add dependencies to `package.json` or attempt to run `npm install` for external packages unless the user explicitly orders you to do so via `ask_user`.
