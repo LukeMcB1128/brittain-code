@@ -513,7 +513,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'initiate_research_session',
-      description: 'Starts a new research session by creating a RESEARCH_LOG.md file with the given or objective.',
+      description: 'Starts a new research session by creating a RESEARCH_LOG.md file with the given objective. IMPORTANT: Follow RESEARCH_PROTOCOL.md (use record_observation and finalize_research).',
       parameters: {
         type: 'object',
         properties: { objective: { type: 'string', description: 'The objective of the research session' } },
@@ -796,10 +796,10 @@ async function executeTool(name, args, cwd) {
       const p = resolveInside(cwd, 'RESEARCH_LOG.md');
       const content = `# Research Session: ${args.objective}\n\n## Observations\n`;
       fs.writeFileSync(p, content, 'utf8');
-      let result = `Started research session for: ${args.objective}. Log: ${p}`;
+      let result = `[!] MISSION DIRECTIVE: You have initiated a research session for: ${args.objective}. YOU MUST use 'record_observation' for every finding and 'finalize_research' to conclude. Log: ${p}`;
       try {
         const protocol = fs.readFileSync(resolveInside(cwd, 'RESEARCH_PROTOCOL.md'), 'utf8').trim();
-        if (protocol) result += `\n\nResearch Protocol:\n${protocol}`;
+        if (protocol) result += `\n\n(Protocol Reference Below)\n${protocol}`;
       } catch {}
       return result;
     }

@@ -264,7 +264,7 @@ function systemPrompt(cwd) {
     '- Commands run in zsh with a 60 second timeout; do not start interactive programs or servers that never exit.',
     '- If a tool call errors twice, stop and ask the user for guidance with ask_user. If the user denies a tool call, do not retry it.',
     '- For ambiguous or destructive decisions, ask with ask_user and give 2-4 concrete options. Otherwise state your assumption in one line and proceed.',
-    '- Delegate self-contained exploration or research to run_subagent (a faster read-only model). Give it complete instructions — it cannot see this conversation. Prefer it over reading many files yourself.',
+    '- Delegate self-contained exploration or research to run_subagent (a faster read-only model). Give it complete instructions — it cannot see this conversation. You should ALMOST ALWAYS prefer it over reading many files yourself.',
     '- Save reusable lessons (user corrections, project conventions, mistakes to avoid) with the remember tool — they persist across chats.',
     '- Be concise. End each task with a 1-3 sentence summary of what changed. Report failures honestly.',
     '',
