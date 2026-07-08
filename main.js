@@ -544,7 +544,10 @@ ipcMain.handle('chat:compact', async (_e, { model }) => {
       { role: 'user', content: 'This conversation was compacted to save context. Continue from the summary below.' },
       { role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary },
     ];
-    return { ok: true };
+    // rough size of the compacted conversation so the UI can update its bar
+    // (exact count comes from Ollama on the next real message)
+    const approxTokens = Math.round(JSON.stringify(conversation).length / 4);
+    return { ok: true, approxTokens, contextLength: await effectiveContext(model) };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }

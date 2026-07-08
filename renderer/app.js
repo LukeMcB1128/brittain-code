@@ -571,19 +571,24 @@ window.api.onToolResult(({ result, denied }) => {
 
 let compactWarned = false;
 
-window.api.onStats(({ contextTokens, contextLength, tokPerSec }) => {
+function updateContextBar(contextTokens, contextLength) {
+  if (!contextLength) return;
   $('ctx-tokens').textContent = contextTokens.toLocaleString();
   $('ctx-limit').textContent = contextLength.toLocaleString();
-  if (tokPerSec) $('tok-speed').textContent = tokPerSec.toFixed(1) + ' t/s';
-  if (!compactWarned && contextTokens / contextLength > 0.8) {
-    compactWarned = true;
-    addInfo('Context is over 80% full — run /compact soon or the model will start losing the oldest messages (including its instructions).');
-  }
   const pct = Math.min(100, (contextTokens / contextLength) * 100);
   const fill = $('ctx-fill');
   fill.style.width = pct + '%';
   fill.className = pct > 90 ? 'danger' : pct > 70 ? 'warn' : '';
   fill.id = 'ctx-fill';
+}
+
+window.api.onStats(({ contextTokens, contextLength, tokPerSec }) => {
+  updateContextBar(contextTokens, contextLength);
+  if (tokPerSec) $('tok-speed').textContent = tokPerSec.toFixed(1) + ' t/s';
+  if (!compactWarned && contextTokens / contextLength > 0.8) {
+    compactWarned = true;
+    addInfo('Context is over 80% full — run /compact soon or the model will start losing the oldest messages (including its instructions).');
+  }
 });
 
 window.api.onDone(() => {
@@ -802,6 +807,8 @@ async function handleSlash(raw) {
       setState('idle');
       if (!res.ok) return addError('Compact failed: ' + res.error);
       renderConversation(await window.api.getConversation());
+      updateContextBar(res.approxTokens, res.contextLength);
+      compactWarned = false; // re-arm the 80% warning for the fresh window
       addInfo('Conversation compacted — context freed. The model will continue from the summary above.');
       return saveChat();
     }
