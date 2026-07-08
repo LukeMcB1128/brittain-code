@@ -892,7 +892,7 @@ async function handleSlash(raw) {
       renderConversation(await window.api.getConversation());
       updateContextBar(res.approxTokens, res.contextLength);
       compactWarned = false; // re-arm the 80% warning for the fresh window
-      addInfo('Conversation compacted — context freed. The model will continue from the summary above.');
+      addInfo('Conversation compacted. The model will continue from the summary above.');
       return saveChat();
     }
 

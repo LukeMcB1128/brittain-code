@@ -1,4 +1,4 @@
-// Local Code — Electron main process.
+// Brittain Code — Electron main process.
 // Owns the agent loop: talks to Ollama, executes tools, streams results to the UI.
 
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
@@ -802,14 +802,26 @@ async function compactConversation(model) {
     });
     const summary = (data.message?.content || '').trim();
     if (!summary) return { ok: false, error: 'Model returned an empty summary.' };
+
+    // Record usage for the summarization step
+    if (data.message?.prompt_eval_count || data.message?.eval_count) {
+      recordUsage('main', {
+        promptTokens: data.message.prompt_eval_count,
+        evalTokens: data.message.eval_count
+      });
+    }
+
     conversation = [
       { role: 'user', content: 'This conversation was compacted to save context. Continue from the summary below.' },
       { role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary },
     ];
-    // rough size of the compacted conversation so the UI can update its bar
-    // (exact count comes from Ollama on the next real message)
+
+    // Update the central usage object in main process
     const approxTokens = Math.round(JSON.stringify(conversation).length / 4);
-    return { ok: true, approxTokens, contextLength: await effectiveContext(model) };
+    const contextLength = await effectiveContext(model);
+    usage.context = { tokens: approxTokens, limit: contextLength };
+
+    return { ok: true, approxTokens, contextLength };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
