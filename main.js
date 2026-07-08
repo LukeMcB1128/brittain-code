@@ -4,6 +4,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { execFile, exec } = require('child_process');
 
 const OLLAMA = 'http://127.0.0.1:11434';
@@ -422,6 +423,75 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'get_environment_variables',
+      description: 'Retrieve environment variables. Optionally filter by name.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Name of the variable to retrieve. If omitted, returns all variables.' }
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function:
+      {
+        name: 'check_port_usage',
+        description: 'Check if a specific port is currently in use by another process.',
+        parameters: {
+          type: 'object',
+          properties: {
+            port: { type: 'number', description: 'The port number to check.' },
+          },
+          required: ['port'],
+        },
+      },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_git_log',
+      description: 'Retrieve the git commit history for the current repository.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'The maximum number of commits to show.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'calculate_file_hash',
+      description: 'Calculate the hash of a file using the specified algorithm.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path to the file.' },
+          algorithm: { type: 'string', description: 'Hashing algorithm (e.g., sha256, md5, sha1). Defaults to sha256.' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_processes',
+      description: 'List running processes, optionally filtered by a pattern.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Pattern to filter processes by name.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'find_largest_files',
       description: 'Find the largest files in a directory (skips .git and node_modules).',
       parameters: {
@@ -635,6 +705,48 @@ async function executeTool(name, args, cwd) {
       files.sort((a, b) => b.size - a.size);
       const result = files.slice(0, count).map((f) => `${path.relative(cwd, f.path)}: ${f.size} bytes`);
       return result.join('\n') || '(no files found)';
+    }
+    case 'get_environment_variables': {
+      if (args.name) return process.env[args.name] || `Error: Environment variable '${args.name}' not found.`;
+      return JSON.stringify(process.env, null, 2);
+    }
+    case 'check_port_usage': {
+      return new Promise((resolve) => {
+        exec(`lsof -i :${args.port} -sTCP:LISTEN`, { cwd, timeout: 10_000 }, (err, stdout, stderr) => {
+          if (err && !stdout && !stderr) return resolve('Port is not in use.');
+          resolve(truncate(stdout || stderr || '(no output)'));
+        });
+      });
+    }
+    case 'get_git_log': {
+      const limit = args.limit ? `-n ${args.limit}` : '';
+      return gitRun(['log', limit], cwd).then(res => res.ok ? res.out : `Error: ${res.err}`);
+    }
+    case 'calculate_file_hash': {
+      const p = resolveInside(cwd, args.path);
+      const algorithm = args.algorithm || 'sha256';
+      try {
+        const fileBuffer = fs.readFileSync(p);
+        const hashSum = crypto.createHash(algorithm);
+        hashSum.update(fileBuffer);
+        return `${algorithm.toUpperCase()}: ${hashSum.digest('hex')}`;
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
+    }
+    case 'list_processes': {
+      const pattern = args.pattern ? new RegExp(args.pattern, 'i') : null;
+      return new Promise((resolve) => {
+        exec('ps aux', { cwd, timeout: 10_000 }, (err, stdout, stderr) => {
+          if (err) return resolve(`Error: ${err.message}`);
+          const lines = stdout.split('\n');
+          if (pattern) {
+            const filtered = lines.filter(line => pattern.test(line));
+            return resolve(truncate(filtered.join('\n')));
+          }
+          resolve(truncate(stdout));
+        });
+      });
     }
     default:
       return `Error: unknown tool "${name}"`;
