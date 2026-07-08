@@ -4,7 +4,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { initTools, TOOL_DEFS, RISKY_TOOLS, executeTool, gitRun, memoryPath, readMemory } = require('./tools');
+const { initTools, TOOL_DEFS, RISKY_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory } = require('./tools');
 
 const OLLAMA = 'http://127.0.0.1:11434';
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
@@ -27,6 +27,24 @@ let win = null;
 let conversation = [];            // ollama-format messages, excluding system
 let currentAbort = null;          // AbortController for the in-flight run
 let stopRequested = false;
+
+// ---------- usage accounting (per chat; reset on new session / chat load) ----------
+function freshUsage() {
+  return {
+    main: { calls: 0, prompt: 0, gen: 0 },
+    subagent: { calls: 0, prompt: 0, gen: 0, runs: 0 },
+    verifier: { calls: 0, prompt: 0, gen: 0 },
+    context: { tokens: 0, limit: 0 },
+  };
+}
+let usage = freshUsage();
+
+function recordUsage(bucket, stats) {
+  if (!stats) return;
+  usage[bucket].calls += 1;
+  usage[bucket].prompt += stats.promptTokens || 0;
+  usage[bucket].gen += stats.evalTokens || 0;
+}
 
 // ---------- window ----------
 function createWindow() {
@@ -135,14 +153,14 @@ ipcMain.on('question:response', (_e, { id, answer }) => {
 });
 
 // ---------- streaming chat with ollama ----------
-async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192) {
+async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS) {
   const res = await fetch(OLLAMA + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model,
       messages,
-      tools: TOOL_DEFS,
+      ...(toolset ? { tools: toolset } : {}), // null = no tools (forces a text answer)
       stream: true,
       options: { num_ctx: numCtx },
       ...(think === undefined ? {} : { think }),
@@ -245,6 +263,7 @@ function systemPrompt(cwd) {
     '- Commands run in zsh with a 60 second timeout; do not start interactive programs or servers that never exit.',
     '- If a tool call errors twice, stop and ask the user for guidance with ask_user. If the user denies a tool call, do not retry it.',
     '- For ambiguous or destructive decisions, ask with ask_user and give 2-4 concrete options. Otherwise state your assumption in one line and proceed.',
+    '- Delegate self-contained exploration or research to run_subagent (a faster read-only model). Give it complete instructions — it cannot see this conversation. Prefer it over reading many files yourself.',
     '- Save reusable lessons (user corrections, project conventions, mistakes to avoid) with the remember tool — they persist across chats.',
     '- Be concise. End each task with a 1-3 sentence summary of what changed. Report failures honestly.',
     '',
@@ -271,24 +290,19 @@ function systemPrompt(cwd) {
   return lines.join('\n');
 }
 
-ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images }) => {
-  if (images?.length && !(await supportsVision(model))) {
-    return { ok: false, error: `${model} cannot see images — pick a vision-capable model or remove the attachment.` };
-  }
-  const userMsg = { role: 'user', content: text };
-  if (images?.length) userMsg.images = images;
-  conversation.push(userMsg);
-  stopRequested = false;
-  currentAbort = new AbortController();
-
+// One full agent turn: stream → tools → repeat until the model stops calling
+// tools or a cap is hit. Shared by chat:send and chat:loop.
+async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
   const messages = () => [{ role: 'system', content: systemPrompt(cwd) }, ...conversation];
   // report the window we actually run with, not the model's theoretical max
   const contextLength = await effectiveContext(model);
   // For models that support thinking, always send an explicit true/false —
   // omitting the param makes Ollama think by default, ignoring the toggle.
   const useThink = (await supportsThinking(model)) ? !!think : undefined;
+  let lastContent = '';
+  let lastStats = null;
 
-  try {
+  {
     for (let step = 0; step < MAX_AGENT_STEPS; step++) {
       let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink, false, contextLength);
 
@@ -304,6 +318,8 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
       }
 
       if (stats) {
+        recordUsage('main', stats);
+        usage.context = { tokens: stats.promptTokens + stats.evalTokens, limit: contextLength };
         win.webContents.send('stream:stats', {
           contextTokens: stats.promptTokens + stats.evalTokens,
           contextLength,
@@ -315,6 +331,8 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
       if (thinking) assistantMsg.thinking = thinking;
       if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
       conversation.push(assistantMsg);
+      if (content) lastContent = content;
+      if (stats) lastStats = stats;
 
       if (!toolCalls.length || stopRequested) break;
 
@@ -347,6 +365,14 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
               : 'The user cancelled the question. Stop and wait for further instructions.';
           }
           win.webContents.send('stream:toolresult', { name, result: preview(result) });
+        } else if (name === 'run_subagent') {
+          const task = String(args.task || '').trim();
+          if (!task) {
+            result = 'Error: run_subagent requires a task with complete, self-contained instructions.';
+          } else {
+            result = await runSubagent(task, String(args.model || subModel || 'qwen3:8b'), cwd);
+          }
+          win.webContents.send('stream:toolresult', { name, result: preview(result) });
         } else if (RISKY_TOOLS.has(name) && !autoApprove) {
           const approved = await requestApproval({ name, args });
           result = approved
@@ -362,6 +388,219 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
         conversation.push({ role: 'tool', tool_name: name, content: String(result) });
       }
       if (stopRequested) break;
+    }
+  }
+  return { lastContent, lastStats, contextLength };
+}
+
+ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images, subModel }) => {
+  if (images?.length && !(await supportsVision(model))) {
+    return { ok: false, error: `${model} cannot see images — pick a vision-capable model or remove the attachment.` };
+  }
+  const userMsg = { role: 'user', content: text };
+  if (images?.length) userMsg.images = images;
+  conversation.push(userMsg);
+  stopRequested = false;
+  currentAbort = new AbortController();
+
+  try {
+    await runAgentTurn(model, cwd, autoApprove, think, subModel);
+    return { ok: true };
+  } catch (err) {
+    if (err.name === 'AbortError') return { ok: true, stopped: true };
+    return { ok: false, error: String(err.message || err) };
+  } finally {
+    currentAbort = null;
+    win.webContents.send('stream:done');
+  }
+});
+
+// ---------- subagents ----------
+const SUBAGENT_MAX_STEPS = 12;
+const SUBAGENT_CTX_CAP = 24_576;    // smaller window: subagents are short-lived scouts
+const SUBAGENT_REPORT_CAP = 6000;   // chars of findings returned to the main agent
+const SUBAGENT_TIMEOUT_MS = 240_000; // wall-clock cap — model swapping makes steps slow, but not infinite
+
+function subagentSystemPrompt(cwd) {
+  return [
+    'You are a fast research subagent inside Brittain Code, working for a lead agent.',
+    `Working directory: ${cwd} — use paths relative to it.`,
+    'You have read-only exploration tools plus research-logging tools. You cannot edit code, run shell commands, or ask the user questions.',
+    '',
+    'Strategy — follow this order:',
+    '1. list_directory (or analyze_file_structure) first to see what files exist.',
+    '2. search_files with SHORT single-word patterns: search "history", never "chat history persistence logic". Multi-word phrases almost never match code.',
+    '3. read_file the promising files and base your answer on what you actually read.',
+    'If a search finds nothing, do not retry it with similar words — switch tactics (list the directory, read the most likely file).',
+    'You have a budget of roughly 12 tool calls. Spend a few exploring, then STOP calling tools and write your report.',
+    '',
+    'Your FINAL message is the only thing returned to the lead agent, so make it a complete findings report: cite file paths and line numbers, quote the relevant code, and answer every part of the task. If you cannot find something, say so explicitly rather than guessing.',
+  ].join('\n');
+}
+
+async function runSubagent(task, subModel, cwd) {
+  const msgs = [
+    { role: 'system', content: subagentSystemPrompt(cwd) },
+    { role: 'user', content: task },
+  ];
+  const numCtx = Math.min(await getContextLength(subModel), SUBAGENT_CTX_CAP);
+  // scouts should be fast: disable thinking where the model supports the flag
+  const useThink = (await supportsThinking(subModel)) ? false : undefined;
+  let finalContent = '';
+  let steps = 0;
+  // deadline for the whole subagent: aborts on user STOP or on timeout
+  const signal = currentAbort
+    ? AbortSignal.any([currentAbort.signal, AbortSignal.timeout(SUBAGENT_TIMEOUT_MS)])
+    : AbortSignal.timeout(SUBAGENT_TIMEOUT_MS);
+  const timedOut = () => signal.aborted && !stopRequested;
+
+  win.webContents.send('stream:subagent', { phase: 'start', task, model: subModel });
+  try {
+    usage.subagent.runs += 1;
+    for (let step = 0; step < SUBAGENT_MAX_STEPS; step++) {
+      if (stopRequested || signal.aborted) break;
+      let { content, toolCalls, stats } = await streamChat(subModel, msgs, signal, useThink, true, numCtx, SUBAGENT_TOOLS);
+      recordUsage('subagent', stats);
+
+      if (!toolCalls.length) {
+        const recovered = parseRawToolCalls(content);
+        if (recovered) {
+          toolCalls = recovered.calls;
+          content = recovered.cleaned;
+        }
+      }
+      if (content) finalContent = content;
+
+      const assistantMsg = { role: 'assistant', content };
+      if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
+      msgs.push(assistantMsg);
+      if (!toolCalls.length) break;
+
+      for (const tc of toolCalls) {
+        const name = tc.function?.name;
+        let args = tc.function?.arguments || {};
+        if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
+        steps++;
+        win.webContents.send('stream:subagent', { phase: 'tool', name, args });
+        const result = SUBAGENT_TOOL_NAMES.has(name)
+          ? await safeExecute(name, args, cwd)
+          : `Error: tool "${name}" is not available to subagents. Use your read-only exploration tools.`;
+        msgs.push({ role: 'tool', tool_name: name, content: String(result) });
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+      if (stopRequested) throw err; // user hit STOP — unwind the whole run
+      // timeout: fall through and salvage a report from what it saw
+    } else {
+      finalContent = finalContent || `Subagent failed: ${err.message}`;
+    }
+  }
+
+  // scout ran out of steps/time while still exploring — force a report from what it saw
+  if (!finalContent && !stopRequested) {
+    try {
+      msgs.push({
+        role: 'user',
+        content: 'Your tool budget is exhausted. Write your complete findings report NOW, using only what you have already seen. Cite file paths and line numbers. If parts of the task are unanswered, say which.',
+      });
+      // fresh 60s signal for the wrap-up: the main deadline may already be spent
+      const wrapSignal = currentAbort
+        ? AbortSignal.any([currentAbort.signal, AbortSignal.timeout(60_000)])
+        : AbortSignal.timeout(60_000);
+      const wrap = await streamChat(subModel, msgs, wrapSignal, useThink, true, numCtx, null);
+      finalContent = wrap.content || '';
+    } catch (err) {
+      if (err.name === 'AbortError' && stopRequested) throw err;
+      finalContent = finalContent || '(subagent timed out before writing a report)';
+    }
+  }
+
+  const report = (finalContent || '(subagent finished without producing findings)').slice(0, SUBAGENT_REPORT_CAP);
+  win.webContents.send('stream:subagent', { phase: 'done', report, steps });
+  return `Subagent report (${subModel}, ${steps} tool calls):\n${report}`;
+}
+
+// ---------- goal loop (/loop) ----------
+async function runVerifier(subModel, goal, summary, gitEvidence) {
+  try {
+    const think = (await supportsThinking(subModel)) ? false : undefined;
+    const data = await ollamaJson('/api/chat', {
+      model: subModel,
+      stream: false,
+      options: { num_ctx: 8192 },
+      ...(think === undefined ? {} : { think }),
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a strict completion verifier for a coding agent. Judge only from the evidence given. If the goal is FULLY achieved, reply with exactly: GOAL_COMPLETE. Otherwise reply with a short numbered list of the concrete steps that remain — no praise, no restating what was done. Never reply GOAL_COMPLETE if any part of the goal is unfinished or unverified.',
+        },
+        {
+          role: 'user',
+          content: `GOAL:\n${goal}\n\nAGENT'S FINAL MESSAGE THIS ITERATION:\n${(summary || '(none)').slice(0, 3000)}\n\nGIT CHANGES SO FAR (diff stat + status):\n${(gitEvidence || '(none)').slice(0, 2000)}`,
+        },
+      ],
+    });
+    recordUsage('verifier', { promptTokens: data.prompt_eval_count || 0, evalTokens: data.eval_count || 0 });
+    return (data.message?.content || '').trim() || 'No verdict returned — continue working toward the goal.';
+  } catch (err) {
+    return `Verifier unavailable (${err.message}) — continue working toward the goal.`;
+  }
+}
+
+ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, maxIterations }) => {
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
+  const info = (t) => win.webContents.send('stream:info', t);
+  const state = (t) => win.webContents.send('stream:state', t);
+
+  try {
+    let feedback = '';
+    for (let i = 1; i <= max; i++) {
+      if (stopRequested) break;
+      info(`━ Loop iteration ${i}/${max} ━`);
+      state(`loop ${i}/${max}`);
+
+      conversation.push({
+        role: 'user',
+        content: i === 1
+          ? `GOAL: ${goal}\n\nWork toward this goal. Use your tools, verify your work, and summarize what you accomplished when you stop.`
+          : `GOAL: ${goal}\n\nVerifier feedback on your previous iteration:\n${feedback}\n\nAddress the feedback and continue toward the goal. Summarize what you accomplished when you stop.`,
+      });
+
+      const { lastContent, lastStats, contextLength } = await runAgentTurn(model, cwd, autoApprove, think, subModel);
+      if (stopRequested) break;
+
+      state(`verifying ${i}/${max} (${subModel || 'qwen3:8b'})…`);
+      const diff = await gitRun(['diff', '--stat'], cwd);
+      const status = await gitRun(['status', '--porcelain'], cwd);
+      const verdict = await runVerifier(subModel || 'qwen3:8b', goal, lastContent, `${diff.out || ''}\n${status.out || ''}`.trim());
+      if (stopRequested) break;
+
+      if (/GOAL_COMPLETE/i.test(verdict)) {
+        info(`✔ Verifier: goal complete after ${i} iteration${i > 1 ? 's' : ''}.`);
+        break;
+      }
+      feedback = verdict.slice(0, 2000);
+      info(`Verifier: not done yet —\n${feedback}`);
+      if (i === max) {
+        info(`Loop ended: reached the ${max}-iteration cap without GOAL_COMPLETE.`);
+        break;
+      }
+
+      // auto-compact between iterations so long loops never hit silent truncation
+      const used = lastStats ? lastStats.promptTokens + lastStats.evalTokens : 0;
+      if (contextLength && used > 0.7 * contextLength) {
+        info('Context past 70% — auto-compacting before the next iteration…');
+        state('auto-compacting…');
+        const c = await compactConversation(model);
+        if (c.ok) {
+          win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+        } else {
+          info('Auto-compact failed (' + c.error + ') — continuing without it.');
+        }
+      }
     }
     return { ok: true };
   } catch (err) {
@@ -397,16 +636,25 @@ ipcMain.on('chat:stop', () => {
 
 ipcMain.handle('chat:reset', () => {
   conversation = [];
+  usage = freshUsage();
   return { ok: true };
 });
+
+ipcMain.handle('usage:get', () => usage);
 
 // chat history support: the renderer saves/loads conversations, but the live
 // array lives here — these let it read the current one and swap in a stored one.
 ipcMain.handle('chat:get', () => conversation);
 
-ipcMain.handle('chat:load', (_e, msgs) => {
+ipcMain.handle('chat:load', async (_e, msgs, model) => {
   conversation = Array.isArray(msgs) ? msgs : [];
-  return { ok: true };
+  usage = freshUsage();
+  // estimate the loaded context so the bar and /usage aren't blank until the
+  // next message (Ollama reports the exact count on the next request)
+  const approxTokens = Math.round(JSON.stringify(conversation).length / 4);
+  const contextLength = model ? await effectiveContext(model) : 0;
+  usage.context = { tokens: approxTokens, limit: contextLength };
+  return { ok: true, approxTokens, contextLength };
 });
 
 // ---------- durable chat storage ----------
@@ -485,7 +733,10 @@ ipcMain.handle('models:list', async () => {
 
 // ---------- git integration (gitRun lives in tools.js) ----------
 ipcMain.handle('git:status', async (_e, cwd) => {
-  const branch = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+  // rev-parse fails on a freshly-initialized repo (no commits yet) —
+  // symbolic-ref reports the unborn branch name, so try it as a fallback.
+  let branch = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+  if (!branch.ok) branch = await gitRun(['symbolic-ref', '--short', 'HEAD'], cwd);
   if (!branch.ok) return { ok: false }; // not a git repo
   const status = await gitRun(['status', '--porcelain'], cwd);
   return {
@@ -519,7 +770,7 @@ ipcMain.handle('git:commit', async (_e, cwd, message) => {
 ipcMain.handle('memory:get', () => ({ content: readMemory(), path: memoryPath() }));
 
 // ---------- conversation compaction ----------
-ipcMain.handle('chat:compact', async (_e, { model }) => {
+async function compactConversation(model) {
   if (conversation.length < 2) return { ok: false, error: 'Nothing to compact yet.' };
   try {
     // drop bulky tool outputs from what the summarizer sees
@@ -551,7 +802,9 @@ ipcMain.handle('chat:compact', async (_e, { model }) => {
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
-});
+}
+
+ipcMain.handle('chat:compact', (_e, { model }) => compactConversation(model));
 
 // ---------- chat export ----------
 ipcMain.handle('chat:export', async () => {

@@ -177,6 +177,21 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'run_subagent',
+      description: 'Delegate a self-contained exploration or research task to a smaller, faster model. The subagent has read-only tools (read, search, analyze files, git history) plus research logging — it cannot edit files, run commands, or ask the user anything. It CANNOT see this conversation, so the task must contain every detail it needs. Returns the subagent\'s findings. Use it to explore unfamiliar code, locate definitions and usages, or gather evidence across many files without spending your own context.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'Complete, self-contained instructions: what to find, where to look, and what the findings report must include' },
+          model: { type: 'string', description: 'Optional model override; defaults to the SUB model selected in the UI' },
+        },
+        required: ['task'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'remember',
       description: 'Save a short reusable lesson to persistent memory that will be available in all future chats. Use when the user corrects you, when you discover a project convention, or when you make a mistake worth avoiding next time. One concise sentence per fact.',
       parameters: {
@@ -887,10 +902,24 @@ function gitRun(args, cwd) {
   });
 }
 
+// The restricted toolset available to subagents (run_subagent): read/search/
+// analyze plus the research-logging tools (which only write RESEARCH_LOG.md /
+// RESEARCH_REPORT.md). No code edits, no shell, no ask_user, no nesting.
+const SUBAGENT_TOOL_NAMES = new Set([
+  'read_file', 'list_directory', 'search_files', 'search_in_file', 'find_files',
+  'get_file_lines', 'file_info', 'count_lines', 'get_file_type',
+  'analyze_file_structure', 'pattern_search_deep', 'find_largest_files',
+  'get_git_log', 'read_git_diff', 'calculate_file_hash',
+  'initiate_research_session', 'record_observation', 'finalize_research',
+]);
+const SUBAGENT_TOOLS = TOOL_DEFS.filter((d) => SUBAGENT_TOOL_NAMES.has(d.function.name));
+
 module.exports = {
   initTools,
   TOOL_DEFS,
   RISKY_TOOLS,
+  SUBAGENT_TOOLS,
+  SUBAGENT_TOOL_NAMES,
   executeTool,
   gitRun,
   memoryPath,

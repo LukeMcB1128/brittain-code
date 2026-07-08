@@ -13,6 +13,7 @@ const thinkToggle = $('think-toggle');
 
 let cwd = null;
 let busy = false;
+let subModel = localStorage.getItem('subModel') || 'qwen3:8b'; // set via /subagent
 let elapsedTimer = null;
 let toolCount = 0;
 let currentChatId = null;
@@ -32,6 +33,11 @@ let currentChatId = null;
   }
   const saved = localStorage.getItem('model');
   if (saved && res.models.includes(saved)) modelSelect.value = saved;
+
+  // subagent model: validate the saved choice against what's installed
+  if (!res.models.includes(subModel)) {
+    subModel = res.models.includes('qwen3:8b') ? 'qwen3:8b' : res.models[0] || '';
+  }
 
   const savedCwd = localStorage.getItem('cwd');
   if (savedCwd) setCwd(savedCwd);
@@ -211,8 +217,10 @@ async function loadChat(chatId) {
   const saved = res.chat;
 
   // Push the stored conversation into the main process so the model continues from it.
-  await window.api.loadConversation(saved.conversation);
+  const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value);
   renderConversation(saved.conversation);
+  updateContextBar(lc.approxTokens, lc.contextLength);
+  compactWarned = false; // fresh warning budget for this chat
   hideStartupMessage();
   currentChatId = chatId;
 
@@ -275,7 +283,24 @@ function renderConversation(conversation) {
       if (msg.content) renderMarkdown(addMessage('assistant', ''), msg.content);
     } else if (msg.role === 'tool') {
       const text = String(msg.content);
-      addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text));
+      if (msg.tool_name === 'run_subagent') {
+        // replay saved subagent reports as collapsed cards, like the live view
+        const m = text.match(/^Subagent report \(([^,]+), (\d+) tool calls?\):\n?/);
+        const card = document.createElement('div');
+        card.className = 'subagent done collapsed';
+        const head = document.createElement('div');
+        head.className = 'sub-head';
+        head.innerHTML = '<span class="sub-title"></span><span class="sub-status">saved · click to expand</span>';
+        head.querySelector('.sub-title').textContent = 'SUBAGENT · ' + (m ? m[1] : 'report');
+        head.addEventListener('click', () => card.classList.toggle('collapsed'));
+        const pre = document.createElement('pre');
+        pre.textContent = m ? text.slice(m[0].length) : text;
+        card.appendChild(head);
+        card.appendChild(pre);
+        chat.appendChild(card);
+      } else {
+        addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text));
+      }
     }
   }
 }
@@ -364,6 +389,7 @@ async function send() {
 
   const res = await window.api.send({
     model: modelSelect.value,
+    subModel,
     text,
     cwd,
     autoApprove: autoApprove.checked,
@@ -380,6 +406,7 @@ async function send() {
 
 function startRun() {
   busy = true;
+  hideStartupMessage(); // slash commands (/loop etc.) start runs without a normal send
   sendBtn.classList.add('hidden');
   stopBtn.classList.remove('hidden');
   setState('working');
@@ -508,6 +535,58 @@ window.api.onThinking((t) => {
   }
   currentThinking.pre.textContent += t;
   scrollDown();
+});
+
+// info notices pushed from main (loop progress, verifier verdicts, auto-compact)
+window.api.onInfo((text) => addInfo(text));
+
+// status-bar state pushed from main (loop iteration, verifying, compacting)
+window.api.onState((text) => setState(text));
+
+// ---------- subagent cards ----------
+let currentSubCard = null;
+
+window.api.onSubagent((d) => {
+  if (d.phase === 'start') {
+    finalizeThinking();
+    finalizeAssistant();
+    const card = document.createElement('div');
+    card.className = 'subagent';
+    const head = document.createElement('div');
+    head.className = 'sub-head';
+    head.innerHTML = '<span class="sub-title"></span><span class="sub-status">exploring…</span>';
+    head.querySelector('.sub-title').textContent = 'SUBAGENT · ' + d.model;
+    const task = document.createElement('div');
+    task.className = 'sub-task';
+    task.textContent = d.task.length > 160 ? d.task.slice(0, 160) + '…' : d.task;
+    task.title = d.task;
+    const log = document.createElement('div');
+    log.className = 'sub-log';
+    card.appendChild(head);
+    card.appendChild(task);
+    card.appendChild(log);
+    head.addEventListener('click', () => {
+      if (card.classList.contains('done')) card.classList.toggle('collapsed');
+    });
+    chat.appendChild(card);
+    currentSubCard = card;
+    setState('subagent working');
+    scrollDown();
+  } else if (d.phase === 'tool' && currentSubCard) {
+    const line = document.createElement('div');
+    line.textContent = '· ' + d.name + '  ' + shortArgs(d.name, d.args || {});
+    currentSubCard.querySelector('.sub-log').appendChild(line);
+    scrollDown();
+  } else if (d.phase === 'done' && currentSubCard) {
+    currentSubCard.classList.add('done', 'collapsed');
+    currentSubCard.querySelector('.sub-status').textContent = `done · ${d.steps} tool${d.steps === 1 ? '' : 's'} · click to expand`;
+    const pre = document.createElement('pre');
+    pre.textContent = d.report;
+    currentSubCard.appendChild(pre);
+    currentSubCard = null;
+    setState('working');
+    scrollDown();
+  }
 });
 
 // The fallback tool-call parser recovered calls from raw markup that already
@@ -781,7 +860,10 @@ const SLASH_HELP = [
   '/compact — summarize the conversation to free up context',
   '/diff — show the git diff for the working directory',
   '/commit <message> — stage all changes and commit',
+  '/loop [n] <goal> — work toward a goal for up to n iterations (default 8); a verifier subagent judges completion after each pass',
   '/model <name> — switch model (partial match ok)',
+  '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
+  '/usage — show how context and tokens have been spent across all agents',
   '/memory — view what the agent has remembered',
   '/export — save this chat as a markdown file',
 ].join('\n');
@@ -816,6 +898,33 @@ async function handleSlash(raw) {
     case 'diff':
       return showDiff();
 
+    case 'loop': {
+      if (busy) return;
+      if (!modelSelect.value) return addError('No model selected.');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      let iterations = 8;
+      let goal = arg;
+      const m = arg.match(/^(\d+)\s+([\s\S]+)/);
+      if (m) { iterations = parseInt(m[1], 10); goal = m[2].trim(); }
+      if (!goal) return addError('Usage: /loop [iterations] <goal> — e.g. /loop 10 make all tests pass');
+      if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the loop will pause for every risky tool call. Turn it on for unattended runs.');
+
+      addMessage('user', `LOOP (max ${iterations}): ${goal}`);
+      startRun();
+      const res = await window.api.loop({
+        model: modelSelect.value,
+        subModel,
+        goal,
+        cwd,
+        autoApprove: autoApprove.checked,
+        think: thinkToggle.checked,
+        maxIterations: iterations,
+      });
+      if (!res.ok) addError(res.error);
+      endRun();
+      return saveChat();
+    }
+
     case 'commit': {
       if (!cwd) return addError('No directory set.');
       if (!arg) return addError('Usage: /commit <message>');
@@ -831,6 +940,43 @@ async function handleSlash(raw) {
       modelSelect.value = match;
       localStorage.setItem('model', match);
       return addInfo('Model set to ' + match);
+    }
+
+    case 'subagent': {
+      const models = [...modelSelect.options].map((o) => o.value);
+      if (!arg) return addInfo(`Subagent model: ${subModel}\nAvailable: ${models.join(', ')}\nUse /subagent <name> to change.`);
+      const match = models.find((v) => v.includes(arg));
+      if (!match) return addError(`No installed model matching "${arg}".`);
+      subModel = match;
+      localStorage.setItem('subModel', match);
+      return addInfo('Subagent model set to ' + match);
+    }
+
+    case 'usage': {
+      const u = await window.api.usageGet();
+      const fmt = (n) => (n || 0).toLocaleString();
+      const row = (label, b) => `${label.padEnd(11)} ${String(b.calls).padStart(4)} calls   ${fmt(b.prompt).padStart(10)} processed   ${fmt(b.gen).padStart(9)} generated`;
+      const totalGen = u.main.gen + u.subagent.gen + u.verifier.gen;
+      const totalProc = u.main.prompt + u.subagent.prompt + u.verifier.prompt;
+      const ctx = u.context.limit
+        ? `${fmt(u.context.tokens)} / ${fmt(u.context.limit)} (${Math.round((u.context.tokens / u.context.limit) * 100)}% used, ${fmt(u.context.limit - u.context.tokens)} left)`
+        : '(no requests yet this chat)';
+      return showOverlay('USAGE — this chat', [
+        'CONTEXT (main agent conversation)',
+        '  ' + ctx,
+        '',
+        'INFERENCE (tokens, since this chat was opened)',
+        '  ' + row('main agent', u.main),
+        '  ' + row('subagents', u.subagent) + `   (${u.subagent.runs} run${u.subagent.runs === 1 ? '' : 's'})`,
+        '  ' + row('verifier', u.verifier),
+        '  ' + '─'.repeat(60),
+        `  total       ${fmt(totalProc)} processed, ${fmt(totalGen)} generated`,
+        '',
+        'Note: "processed" counts every token the models read, including the',
+        'same conversation re-read on each agent step — it measures compute',
+        'spent, not context size. Subagent/verifier tokens never touch the',
+        'main context; that is the point of delegating.',
+      ].join('\n'));
     }
 
     case 'memory': {
