@@ -11,6 +11,7 @@
   --green: #4dab6d;
   --red: #d05c5c;
   --yellow: #c9a24a;
+  --purple: #a583d9;
   --mono: "SF Mono", Menlo, Consolas, monospace;
 }
 
@@ -300,6 +301,54 @@ button:active { background: var(--border); }
 }
 
 .thinking.collapsed pre { display: none; }
+
+
+/* subagent cards */
+.subagent {
+  font-family: var(--mono);
+  font-size: 12px;
+  border: 1px solid var(--purple);
+  background: var(--bg-panel);
+}
+
+.subagent .sub-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.subagent .sub-title { color: var(--purple); font-weight: 700; }
+.subagent .sub-status { margin-left: auto; font-size: 10px; color: var(--text-dim); }
+.subagent.done .sub-status { color: var(--green); }
+.subagent.done .sub-head { cursor: pointer; user-select: none; }
+
+.subagent .sub-task {
+  padding: 4px 10px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.subagent .sub-log {
+  padding: 4px 10px;
+  color: var(--text-dim);
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.subagent pre {
+  padding: 6px 10px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+.subagent.collapsed pre { display: none; }
+.subagent.collapsed .sub-log { display: none; }
 
 /* tool call cards */
 .tool {

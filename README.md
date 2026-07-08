@@ -51,6 +51,9 @@ Type these in the message box:
 | `/diff` | Show the git diff of the working directory in an overlay |
 | `/commit <message>` | Stage everything and commit |
 | `/model <name>` | Switch model (partial match) |
+| `/subagent [name]` | Show or set the subagent/verifier model (default qwen3:8b) |
+| `/loop [n] <goal>` | Work toward a goal for up to n iterations (default 8); a verifier subagent judges completion, and context auto-compacts between iterations. Turn AUTO-APPROVE on for unattended runs |
+| `/usage` | Show context remaining and token spend across main agent, subagents, and verifier |
 | `/memory` | View what the agent has remembered across chats |
 | `/export` | Save the chat as a markdown file |
 

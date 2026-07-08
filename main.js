@@ -1,14 +1,26 @@
-// Local Code — Electron main process.
+// Brittain Code — Electron main process.
 // Owns the agent loop: talks to Ollama, executes tools, streams results to the UI.
 
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execFile, exec } = require('child_process');
+const { initTools, TOOL_DEFS, RISKY_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory } = require('./tools');
+const { stderr } = require('process');
 
 const OLLAMA = 'http://127.0.0.1:11434';
-const MAX_TOOL_OUTPUT = 40_000;   // chars of tool output fed back to the model
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
+// The context window we actually request from Ollama. Without an explicit
+// num_ctx, Ollama uses its own (much smaller) default and SILENTLY TRUNCATES
+// the oldest messages — the model loses the system prompt and the task, then
+// hallucinates ("the user hasn't asked anything yet"). Capped below the model
+// maximum because KV-cache RAM grows with the window. 64k sized for gemma4:26b
+// on a 36GB Mac WITH Ollama's q8_0 KV cache enabled (OLLAMA_FLASH_ATTENTION=1,
+// OLLAMA_KV_CACHE_TYPE=q8_0 via launchctl setenv); drop to 32_768 without it.
+const NUM_CTX_CAP = 65_536;
+
+async function effectiveContext(model) {
+  return Math.min(await getContextLength(model), NUM_CTX_CAP);
+}
 
 let win = null;
 
@@ -16,6 +28,24 @@ let win = null;
 let conversation = [];            // ollama-format messages, excluding system
 let currentAbort = null;          // AbortController for the in-flight run
 let stopRequested = false;
+
+// ---------- usage accounting (per chat; reset on new session / chat load) ----------
+function freshUsage() {
+  return {
+    main: { calls: 0, prompt: 0, gen: 0 },
+    subagent: { calls: 0, prompt: 0, gen: 0, runs: 0 },
+    verifier: { calls: 0, prompt: 0, gen: 0 },
+    context: { tokens: 0, limit: 0 },
+  };
+}
+let usage = freshUsage();
+
+function recordUsage(bucket, stats) {
+  if (!stats) return;
+  usage[bucket].calls += 1;
+  usage[bucket].prompt += stats.promptTokens || 0;
+  usage[bucket].gen += stats.evalTokens || 0;
+}
 
 // ---------- window ----------
 function createWindow() {
@@ -35,7 +65,10 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  initTools(app.getPath('userData'));
+  createWindow();
+});
 app.on('window-all-closed', () => app.quit());
 
 // ---------- ollama helpers ----------
@@ -82,565 +115,6 @@ async function getCapabilities(model) {
 const supportsThinking = async (model) => (await getCapabilities(model)).includes('thinking');
 const supportsVision = async (model) => (await getCapabilities(model)).includes('vision');
 
-// ---------- persistent memory ----------
-// Plain-text lessons the agent saves with the `remember` tool; injected into
-// the system prompt of every chat. Lives at userData/memory.md — user-editable.
-function memoryPath() {
-  return path.join(app.getPath('userData'), 'memory.md');
-}
-
-function readMemory() {
-  try { return fs.readFileSync(memoryPath(), 'utf8'); } catch { return ''; }
-}
-
-// ---------- tools ----------
-function resolveInside(cwd, p) {
-  const abs = path.resolve(cwd, p || '.');
-  return abs;
-}
-
-function truncate(s) {
-  if (s.length <= MAX_TOOL_OUTPUT) return s;
-  return s.slice(0, MAX_TOOL_OUTPUT) + `\n...[truncated, ${s.length} chars total]`;
-}
-
-// Recursively visit files, skipping .git and node_modules; unreadable dirs are skipped.
-function walkDir(dir, onFile) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-  for (const e of entries) {
-    if (e.name === '.git' || e.name === 'node_modules') continue;
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) walkDir(p, onFile);
-    else if (e.isFile()) onFile(p);
-  }
-}
-
-// Convert a glob like "src/**/*.js" to a RegExp (no external deps).
-function globToRegex(glob) {
-  const esc = glob
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*/g, '\x01')
-    .replace(/\*/g, '[^/]*')
-    .replace(/\?/g, '[^/]')
-    .replace(/\x01\//g, '(?:.*/)?')   // "**/" matches zero or more directories
-    .replace(/\x01/g, '.*');
-  return new RegExp('^' + esc + '$');
-}
-
-const TOOL_DEFS = [
-  {
-    type: 'function',
-    function: {
-      name: 'read_file',
-      description: 'Read a text file. Returns the file contents.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'File path, relative to the working directory or absolute' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'write_file',
-      description: 'Write (create or overwrite) a text file with the given content. Creates parent directories as needed.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path to write' },
-          content: { type: 'string', description: 'Full file content' },
-        },
-        required: ['path', 'content'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'edit_file',
-      description: 'Replace one exact snippet of text in a file with new text. old_string must match the file exactly (including whitespace and indentation) and must appear exactly once, unless replace_all is true. This is the preferred tool for editing existing code.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path to edit' },
-          old_string: { type: 'string', description: 'The exact existing text to replace — copy it verbatim from the file' },
-          new_string: { type: 'string', description: 'The replacement text' },
-          replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false)' },
-        },
-        required: ['path', 'old_string', 'new_string'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'list_directory',
-      description: 'List files and folders in a directory. Directories end with /.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'Directory path (default: working directory)' } },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_command',
-      description: 'Run a shell command in the working directory and return stdout/stderr. 60 second timeout.',
-      parameters: {
-        type: 'object',
-        properties: { command: { type: 'string', description: 'The shell command to run' } },
-        required: ['command'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'search_files',
-      description: 'Search for a text pattern in files under the working directory (like grep -rn). Returns matching lines with file and line number.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Text or regex to search for' },
-          path: { type: 'string', description: 'Directory to search in (default: working directory)' },
-        },
-        required: ['pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'ask_user',
-      description: 'Ask the user one or more questions and wait for their answers. Use when you are blocked on decisions only the user can make (ambiguous requirements, destructive choices, multiple valid approaches). Ask each question as its own array entry — never cram several questions into one string. Give each question 2-4 short concrete options when possible.',
-      parameters: {
-        type: 'object',
-        properties: {
-          questions: {
-            type: 'array',
-            description: '1-4 questions to ask the user',
-            items: {
-              type: 'object',
-              properties: {
-                question: { type: 'string', description: 'One single question' },
-                options: { type: 'array', items: { type: 'string' }, description: '2-4 short suggested answers shown as buttons' },
-              },
-              required: ['question'],
-            },
-          },
-        },
-        required: ['questions'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'remember',
-      description: 'Save a short reusable lesson to persistent memory that will be available in all future chats. Use when the user corrects you, when you discover a project convention, or when you make a mistake worth avoiding next time. One concise sentence per fact.',
-      parameters: {
-        type: 'object',
-        properties: {
-          fact: { type: 'string', description: 'The lesson to remember, as one concise sentence' },
-        },
-        required: ['fact'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'append_file',
-      description: 'Append content to a text file. Creates the file if it does not exist.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path to append to' },
-          content: { type: 'string', description: 'Content to append' },
-        },
-        required: ['path', 'content'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'create_directory',
-      description: 'Create a new directory. Creates parent directories as needed.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'Directory path to create' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'delete_file',
-      description: 'Delete a file. Returns success message or error.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'File path to delete' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'search_in_file',
-      description: 'Search for a text pattern in a specific file and return matching lines with line numbers.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path to search in' },
-          pattern: { type: 'string', description: 'Text or regex to search for' },
-        },
-        required: ['path', 'pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'file_info',
-      description: 'Get information about a file including size, modification time, and permissions.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'File path to get info for' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'copy_file',
-      description: 'Copy a file from source to destination.',
-      parameters: {
-        type: 'object',
-        properties: {
-          source: { type: 'string', description: 'Source file path' },
-          destination: { type: 'string', description: 'Destination file path' },
-        },
-        required: ['source', 'destination'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'move_file',
-      description: 'Move/rename a file from source to destination.',
-      parameters: {
-        type: 'object',
-        properties: {
-          source: { type: 'string', description: 'Source file path' },
-          destination: { type: 'string', description: 'Destination file path' },
-        },
-        required: ['source', 'destination'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'find_files',
-      description: 'Find files matching a glob pattern in the working directory (e.g. "*.js", "src/**/*.css").',
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Glob pattern to match files (e.g., "*.js", "src/**/*")' },
-          path: { type: 'string', description: 'Directory to search in (default: working directory)' },
-        },
-        required: ['pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_file_lines',
-      description: 'Get specific lines from a file (1-based, inclusive). Defaults to 10 lines if end is omitted.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path' },
-          start: { type: 'number', description: 'Starting line number (1-based)' },
-          end: { type: 'number', description: 'Ending line number (1-based, inclusive)' },
-        },
-        required: ['path', 'start'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'replace_in_file',
-      description: 'Find-and-replace literal text everywhere in a file. The pattern is treated as plain text, not regex, unless is_regex is true. For precise single edits to code, prefer edit_file.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path to modify' },
-          pattern: { type: 'string', description: 'Literal text to find (or a JavaScript regex if is_regex is true)' },
-          replacement: { type: 'string', description: 'Replacement text' },
-          is_regex: { type: 'boolean', description: 'Treat pattern as a regular expression (default false)' },
-          flags: { type: 'string', description: 'Regex flags when is_regex is true (default "g")' },
-        },
-        required: ['path', 'pattern', 'replacement'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'count_lines',
-      description: 'Count lines in a file.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'File path' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_file_type',
-      description: 'Determine the file type based on its extension.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'File path' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'find_largest_files',
-      description: 'Find the largest files in a directory (skips .git and node_modules).',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Directory path to search in' },
-          count: { type: 'number', description: 'Number of largest files to return (default: 10)' },
-        },
-      },
-    },
-  },
-];
-
-const RISKY_TOOLS = new Set([
-  'write_file',
-  'run_command',
-  'append_file',
-  'create_directory',
-  'delete_file',
-  'copy_file',
-  'move_file',
-  'replace_in_file',
-  'edit_file',
-]);
-
-async function executeTool(name, args, cwd) {
-  switch (name) {
-    case 'read_file': {
-      const p = resolveInside(cwd, args.path);
-      const stat = fs.statSync(p);
-      if (stat.size > 2_000_000) return `Error: file too large (${stat.size} bytes)`;
-      return truncate(fs.readFileSync(p, 'utf8'));
-    }
-    case 'write_file': {
-      const p = resolveInside(cwd, args.path);
-      fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.writeFileSync(p, args.content ?? '', 'utf8');
-      return `Wrote ${(args.content ?? '').length} chars to ${p}`;
-    }
-    case 'list_directory': {
-      const p = resolveInside(cwd, args.path);
-      const entries = fs.readdirSync(p, { withFileTypes: true })
-        .filter((e) => e.name !== '.git' && e.name !== 'node_modules')
-        .map((e) => (e.isDirectory() ? e.name + '/' : e.name))
-        .sort();
-      return truncate(entries.join('\n') || '(empty directory)');
-    }
-    case 'run_command': {
-      return new Promise((resolve) => {
-        exec(args.command, { cwd, timeout: 60_000, maxBuffer: 4_000_000 }, (err, stdout, stderr) => {
-          let out = '';
-          if (stdout) out += stdout;
-          if (stderr) out += (out ? '\n--- stderr ---\n' : '') + stderr;
-          if (err && !err.killed) out += `\n(exit code ${err.code ?? 'signal ' + err.signal})`;
-          if (err && err.killed) out += '\n(command timed out after 60s)';
-          resolve(truncate(out || '(no output)'));
-        });
-      });
-    }
-    case 'search_files': {
-      const dir = resolveInside(cwd, args.path);
-      return new Promise((resolve) => {
-        execFile(
-          'grep',
-          ['-rn', '--exclude-dir=.git', '--exclude-dir=node_modules', '-I', '-m', '200', '-e', args.pattern, '.'],
-          { cwd: dir, timeout: 30_000, maxBuffer: 4_000_000 },
-          (err, stdout) => {
-            if (err && !stdout) return resolve('No matches found.');
-            resolve(truncate(stdout));
-          }
-        );
-      });
-    }
-    case 'remember': {
-      const fact = String(args.fact || '').trim().replace(/\s*\n+\s*/g, ' ');
-      if (!fact) return 'Error: fact must not be empty.';
-      if (readMemory().includes(fact)) return 'Already remembered.';
-      fs.appendFileSync(memoryPath(), '- ' + fact + '\n', 'utf8');
-      return 'Remembered. This will be available in future chats.';
-    }
-    case 'append_file': {
-      const p = resolveInside(cwd, args.path);
-      fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.appendFileSync(p, args.content ?? '', 'utf8');
-      return `Appended ${(args.content ?? '').length} chars to ${p}`;
-    }
-    case 'create_directory': {
-      const p = resolveInside(cwd, args.path);
-      fs.mkdirSync(p, { recursive: true });
-      return `Created directory ${p}`;
-    }
-    case 'delete_file': {
-      const p = resolveInside(cwd, args.path);
-      if (!fs.existsSync(p)) return `File not found: ${p}`;
-      fs.unlinkSync(p);
-      return `Deleted file ${p}`;
-    }
-    case 'search_in_file': {
-      const p = resolveInside(cwd, args.path);
-      const lines = fs.readFileSync(p, 'utf8').split('\n');
-      const regex = new RegExp(args.pattern);
-      const results = [];
-      for (let i = 0; i < lines.length && results.length < 200; i++) {
-        if (regex.test(lines[i])) results.push(`${i + 1}: ${lines[i]}`);
-      }
-      return results.length ? truncate(results.join('\n')) : 'No matches found.';
-    }
-    case 'file_info': {
-      const p = resolveInside(cwd, args.path);
-      const stat = fs.statSync(p);
-      return JSON.stringify({
-        size: stat.size,
-        modified: stat.mtime.toISOString(),
-        isDirectory: stat.isDirectory(),
-        isFile: stat.isFile(),
-        permissions: stat.mode.toString(8),
-      });
-    }
-    case 'copy_file': {
-      const source = resolveInside(cwd, args.source);
-      const dest = resolveInside(cwd, args.destination);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.copyFileSync(source, dest);
-      return `Copied ${source} to ${dest}`;
-    }
-    case 'move_file': {
-      const source = resolveInside(cwd, args.source);
-      const dest = resolveInside(cwd, args.destination);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.renameSync(source, dest);
-      return `Moved ${source} to ${dest}`;
-    }
-    case 'find_files': {
-      const dir = resolveInside(cwd, args.path);
-      const re = globToRegex(args.pattern);
-      const out = [];
-      walkDir(dir, (f) => {
-        const rel = path.relative(dir, f);
-        if (re.test(rel) || re.test(path.basename(f))) out.push(path.relative(cwd, f));
-      });
-      return truncate(out.slice(0, 500).join('\n')) || '(no files found)';
-    }
-    case 'get_file_lines': {
-      const p = resolveInside(cwd, args.path);
-      const lines = fs.readFileSync(p, 'utf8').split('\n');
-      const start = Math.max(0, (args.start || 1) - 1);
-      const end = args.end ? Math.min(lines.length, args.end) : Math.min(lines.length, start + 10);
-      return truncate(lines.slice(start, end).join('\n')) || '(no lines found)';
-    }
-    case 'edit_file': {
-      const p = resolveInside(cwd, args.path);
-      const content = fs.readFileSync(p, 'utf8');
-      const oldS = String(args.old_string ?? '');
-      const newS = String(args.new_string ?? '');
-      if (!oldS) return 'Error: old_string must not be empty.';
-      if (oldS === newS) return 'Error: old_string and new_string are identical.';
-      const count = content.split(oldS).length - 1;
-      if (count === 0) return `Error: old_string not found in ${p}. Read the file and copy the exact text, including whitespace and indentation.`;
-      if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
-      fs.writeFileSync(p, content.split(oldS).join(newS), 'utf8');
-      return `Edited ${p}: replaced ${count} occurrence(s).`;
-    }
-    case 'replace_in_file': {
-      const p = resolveInside(cwd, args.path);
-      const content = fs.readFileSync(p, 'utf8');
-      const pat = String(args.pattern ?? '');
-      const rep = String(args.replacement ?? '');
-      if (!pat) return 'Error: pattern must not be empty.';
-      let updated, count;
-      if (args.is_regex) {
-        const regex = new RegExp(pat, args.flags || 'g');
-        const matches = content.match(regex);
-        count = matches ? matches.length : 0;
-        if (!count) return `No matches for pattern in ${p} — file unchanged.`;
-        updated = content.replace(regex, rep);
-      } else {
-        count = content.split(pat).length - 1;
-        if (!count) return `No matches for text in ${p} — file unchanged.`;
-        updated = content.split(pat).join(rep);
-      }
-      // sanity guard: a bad pattern can explode the file (seen: 837k-line blowup)
-      if (updated.length > content.length * 3 + 100_000) {
-        return `Error: this replacement would grow the file from ${content.length} to ${updated.length} chars — refusing. The pattern is matching far more than intended.`;
-      }
-      fs.writeFileSync(p, updated, 'utf8');
-      return `Replaced ${count} occurrence(s) in ${p}`;
-    }
-    case 'count_lines': {
-      const p = resolveInside(cwd, args.path);
-      const content = fs.readFileSync(p, 'utf8');
-      return `Total lines: ${content.split('\n').length}`;
-    }
-    case 'get_file_type': {
-      const p = resolveInside(cwd, args.path);
-      if (fs.statSync(p).isDirectory()) return 'directory';
-      const typeMap = {
-        '.js': 'javascript', '.ts': 'typescript', '.jsx': 'javascript-react', '.tsx': 'typescript-react',
-        '.html': 'html', '.css': 'css', '.json': 'json', '.md': 'markdown', '.txt': 'text',
-        '.py': 'python', '.java': 'java', '.cpp': 'cpp', '.c': 'c', '.go': 'go', '.rs': 'rust',
-        '.rb': 'ruby', '.sh': 'shell', '.sql': 'sql', '.yaml': 'yaml', '.yml': 'yaml', '.xml': 'xml',
-      };
-      return typeMap[path.extname(p).toLowerCase()] || 'unknown';
-    }
-    case 'find_largest_files': {
-      const dir = resolveInside(cwd, args.path);
-      const count = args.count || 10;
-      const files = [];
-      walkDir(dir, (f) => {
-        try { files.push({ path: f, size: fs.statSync(f).size }); } catch {}
-      });
-      files.sort((a, b) => b.size - a.size);
-      const result = files.slice(0, count).map((f) => `${path.relative(cwd, f.path)}: ${f.size} bytes`);
-      return result.join('\n') || '(no files found)';
-    }
-    default:
-      return `Error: unknown tool "${name}"`;
-  }
-}
-
 // ---------- approval flow ----------
 const pendingApprovals = new Map();
 
@@ -680,11 +154,18 @@ ipcMain.on('question:response', (_e, { id, answer }) => {
 });
 
 // ---------- streaming chat with ollama ----------
-async function streamChat(model, messages, signal, think) {
+async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS) {
   const res = await fetch(OLLAMA + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true, ...(think === undefined ? {} : { think }) }),
+    body: JSON.stringify({
+      model,
+      messages,
+      ...(toolset ? { tools: toolset } : {}), // null = no tools (forces a text answer)
+      stream: true,
+      options: { num_ctx: numCtx },
+      ...(think === undefined ? {} : { think }),
+    }),
     signal,
   });
   if (!res.ok) throw new Error(`Ollama chat failed: ${res.status} ${await res.text()}`);
@@ -711,11 +192,11 @@ async function streamChat(model, messages, signal, think) {
       const msg = chunk.message || {};
       if (msg.thinking) {
         thinking += msg.thinking;
-        win.webContents.send('stream:thinking', msg.thinking);
+        if (!silent) win.webContents.send('stream:thinking', msg.thinking);
       }
       if (msg.content) {
         content += msg.content;
-        win.webContents.send('stream:token', msg.content);
+        if (!silent) win.webContents.send('stream:token', msg.content);
       }
       if (msg.tool_calls) toolCalls.push(...msg.tool_calls);
       if (chunk.done) {
@@ -783,6 +264,7 @@ function systemPrompt(cwd) {
     '- Commands run in zsh with a 60 second timeout; do not start interactive programs or servers that never exit.',
     '- If a tool call errors twice, stop and ask the user for guidance with ask_user. If the user denies a tool call, do not retry it.',
     '- For ambiguous or destructive decisions, ask with ask_user and give 2-4 concrete options. Otherwise state your assumption in one line and proceed.',
+    '- Delegate self-contained exploration or research to run_subagent (a faster read-only model). Give it complete instructions — it cannot see this conversation. You should ALMOST ALWAYS prefer it over reading many files yourself.',
     '- Save reusable lessons (user corrections, project conventions, mistakes to avoid) with the remember tool — they persist across chats.',
     '- Be concise. End each task with a 1-3 sentence summary of what changed. Report failures honestly.',
     '',
@@ -791,35 +273,39 @@ function systemPrompt(cwd) {
   const memory = readMemory().trim();
   if (memory) {
     // cap so a huge memory file cannot blow up the prompt (keep the newest lines)
-    lines.push('', 'Lessons remembered from previous sessions:', memory.slice(-2500));
+    const capped = memory.length > 4000
+      ? '[…older lessons truncated — prune memory.md]\n' + memory.slice(-4000)
+      : memory;
+    lines.push('', 'Lessons remembered from previous sessions:', capped);
   }
   // per-project instructions, like Claude Code's CLAUDE.md
   try {
     const proj = fs.readFileSync(path.join(cwd, 'BRITTAIN.md'), 'utf8').trim();
-    if (proj) lines.push('', 'Project instructions (from BRITTAIN.md in the working directory):', proj.slice(0, 3000));
+    if (proj) {
+      const capped = proj.length > 12_000
+        ? proj.slice(0, 12_000) + '\n[…BRITTAIN.md truncated at 12,000 chars — shorten the file]'
+        : proj;
+      lines.push('', 'Project instructions (from BRITTAIN.md in the working directory):', capped);
+    }
   } catch {}
   return lines.join('\n');
 }
 
-ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images }) => {
-  if (images?.length && !(await supportsVision(model))) {
-    return { ok: false, error: `${model} cannot see images — pick a vision-capable model or remove the attachment.` };
-  }
-  const userMsg = { role: 'user', content: text };
-  if (images?.length) userMsg.images = images;
-  conversation.push(userMsg);
-  stopRequested = false;
-  currentAbort = new AbortController();
-
+// One full agent turn: stream → tools → repeat until the model stops calling
+// tools or a cap is hit. Shared by chat:send and chat:loop.
+async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
   const messages = () => [{ role: 'system', content: systemPrompt(cwd) }, ...conversation];
-  const contextLength = await getContextLength(model);
+  // report the window we actually run with, not the model's theoretical max
+  const contextLength = await effectiveContext(model);
   // For models that support thinking, always send an explicit true/false —
   // omitting the param makes Ollama think by default, ignoring the toggle.
   const useThink = (await supportsThinking(model)) ? !!think : undefined;
+  let lastContent = '';
+  let lastStats = null;
 
-  try {
+  {
     for (let step = 0; step < MAX_AGENT_STEPS; step++) {
-      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink);
+      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink, false, contextLength);
 
       // rescue tool calls the model emitted as raw text (qwen3-coder quirk)
       if (!toolCalls.length) {
@@ -833,6 +319,8 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
       }
 
       if (stats) {
+        recordUsage('main', stats);
+        usage.context = { tokens: stats.promptTokens + stats.evalTokens, limit: contextLength };
         win.webContents.send('stream:stats', {
           contextTokens: stats.promptTokens + stats.evalTokens,
           contextLength,
@@ -844,6 +332,8 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
       if (thinking) assistantMsg.thinking = thinking;
       if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
       conversation.push(assistantMsg);
+      if (content) lastContent = content;
+      if (stats) lastStats = stats;
 
       if (!toolCalls.length || stopRequested) break;
 
@@ -876,6 +366,14 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
               : 'The user cancelled the question. Stop and wait for further instructions.';
           }
           win.webContents.send('stream:toolresult', { name, result: preview(result) });
+        } else if (name === 'run_subagent') {
+          const task = String(args.task || '').trim();
+          if (!task) {
+            result = 'Error: run_subagent requires a task with complete, self-contained instructions.';
+          } else {
+            result = await runSubagent(task, String(args.model || subModel || 'qwen3:8b'), cwd);
+          }
+          win.webContents.send('stream:toolresult', { name, result: preview(result) });
         } else if (RISKY_TOOLS.has(name) && !autoApprove) {
           const approved = await requestApproval({ name, args });
           result = approved
@@ -891,6 +389,229 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
         conversation.push({ role: 'tool', tool_name: name, content: String(result) });
       }
       if (stopRequested) break;
+    }
+  }
+  return { lastContent, lastStats, contextLength };
+}
+
+ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images, subModel }) => {
+  if (images?.length && !(await supportsVision(model))) {
+    return { ok: false, error: `${model} cannot see images — pick a vision-capable model or remove the attachment.` };
+  }
+  const userMsg = { role: 'user', content: text };
+  if (images?.length) userMsg.images = images;
+  conversation.push(userMsg);
+  stopRequested = false;
+  currentAbort = new AbortController();
+
+  try {
+    await runAgentTurn(model, cwd, autoApprove, think, subModel);
+    return { ok: true };
+  } catch (err) {
+    if (err.name === 'AbortError') return { ok: true, stopped: true };
+    return { ok: false, error: String(err.message || err) };
+  } finally {
+    currentAbort = null;
+    win.webContents.send('stream:done');
+  }
+});
+
+ipcMain.handle('tools:list', async () => {
+  return {
+    ok: true,
+    tools: TOOL_DEFS.map(t => ({
+      name: t.function.name,
+      isRisky: RISKY_TOOLS.has(t.function.name)
+    }))
+  };
+});
+
+// ---------- subagents ----------
+const SUBAGENT_MAX_STEPS = 12;
+const SUBAGENT_CTX_CAP = 24_576;    // smaller window: subagents are short-lived scouts
+const SUBAGENT_REPORT_CAP = 6000;   // chars of findings returned to the main agent
+const SUBAGENT_TIMEOUT_MS = 240_000; // wall-clock cap — model swapping makes steps slow, but not infinite
+
+function subagentSystemPrompt(cwd) {
+  return [
+    'You are a fast research subagent inside Brittain Code, working for a lead agent.',
+    `Working directory: ${cwd} — use paths relative to it.`,
+    'You have read-only exploration tools plus research-logging tools. You cannot edit code, run shell commands, or ask the user questions.',
+    '',
+    'Strategy — follow this order:',
+    '1. list_directory (or analyze_file_structure) first to see what files exist.',
+    '2. search_files with SHORT single-word patterns: search "history", never "chat history persistence logic". Multi-word phrases almost never match code.',
+    '3. read_file the promising files and base your answer on what you actually read.',
+    'If a search finds nothing, do not retry it with similar words — switch tactics (list the directory, read the most likely file).',
+    'You have a budget of roughly 12 tool calls. Spend a few exploring, then STOP calling tools and write your report.',
+    '',
+    'Your FINAL message is the only thing returned to the lead agent, so make it a complete findings report: cite file paths and line numbers, quote the relevant code, and answer every part of the task. If you cannot find something, say so explicitly rather than guessing.',
+  ].join('\n');
+}
+
+async function runSubagent(task, subModel, cwd) {
+  const msgs = [
+    { role: 'system', content: subagentSystemPrompt(cwd) },
+    { role: 'user', content: task },
+  ];
+  const numCtx = Math.min(await getContextLength(subModel), SUBAGENT_CTX_CAP);
+  // scouts should be fast: disable thinking where the model supports the flag
+  const useThink = (await supportsThinking(subModel)) ? false : undefined;
+  let finalContent = '';
+  let steps = 0;
+  // deadline for the whole subagent: aborts on user STOP or on timeout
+  const signal = currentAbort
+    ? AbortSignal.any([currentAbort.signal, AbortSignal.timeout(SUBAGENT_TIMEOUT_MS)])
+    : AbortSignal.timeout(SUBAGENT_TIMEOUT_MS);
+  const timedOut = () => signal.aborted && !stopRequested;
+
+  win.webContents.send('stream:subagent', { phase: 'start', task, model: subModel });
+  try {
+    usage.subagent.runs += 1;
+    for (let step = 0; step < SUBAGENT_MAX_STEPS; step++) {
+      if (stopRequested || signal.aborted) break;
+      let { content, toolCalls, stats } = await streamChat(subModel, msgs, signal, useThink, true, numCtx, SUBAGENT_TOOLS);
+      recordUsage('subagent', stats);
+
+      if (!toolCalls.length) {
+        const recovered = parseRawToolCalls(content);
+        if (recovered) {
+          toolCalls = recovered.calls;
+          content = recovered.cleaned;
+        }
+      }
+      if (content) finalContent = content;
+
+      const assistantMsg = { role: 'assistant', content };
+      if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
+      msgs.push(assistantMsg);
+      if (!toolCalls.length) break;
+
+      for (const tc of toolCalls) {
+        const name = tc.function?.name;
+        let args = tc.function?.arguments || {};
+        if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
+        steps++;
+        win.webContents.send('stream:subagent', { phase: 'tool', name, args });
+        const result = SUBAGENT_TOOL_NAMES.has(name)
+          ? await safeExecute(name, args, cwd)
+          : `Error: tool "${name}" is not available to subagents. Use your read-only exploration tools.`;
+        msgs.push({ role: 'tool', tool_name: name, content: String(result) });
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+      if (stopRequested) throw err; // user hit STOP — unwind the whole run
+      // timeout: fall through and salvage a report from what it saw
+    } else {
+      finalContent = finalContent || `Subagent failed: ${err.message}`;
+    }
+  }
+
+  // scout ran out of steps/time while still exploring — force a report from what it saw
+  if (!finalContent && !stopRequested) {
+    try {
+      msgs.push({
+        role: 'user',
+        content: 'Your tool budget is exhausted. Write your complete findings report NOW, using only what you have already seen. Cite file paths and line numbers. If parts of the task are unanswered, say which.',
+      });
+      // fresh 60s signal for the wrap-up: the main deadline may already be spent
+      const wrapSignal = currentAbort
+        ? AbortSignal.any([currentAbort.signal, AbortSignal.timeout(60_000)])
+        : AbortSignal.timeout(60_000);
+      const wrap = await streamChat(subModel, msgs, wrapSignal, useThink, true, numCtx, null);
+      finalContent = wrap.content || '';
+    } catch (err) {
+      if (err.name === 'AbortError' && stopRequested) throw err;
+      finalContent = finalContent || '(subagent timed out before writing a report)';
+    }
+  }
+
+  const report = (finalContent || '(subagent finished without producing findings)').slice(0, SUBAGENT_REPORT_CAP);
+  win.webContents.send('stream:subagent', { phase: 'done', report, steps });
+  return `Subagent report (${subModel}, ${steps} tool calls):\n${report}`;
+}
+
+// ---------- goal loop (/loop) ----------
+async function runVerifier(subModel, goal, summary, gitEvidence) {
+  try {
+    const think = (await supportsThinking(subModel)) ? false : undefined;
+    const data = await ollamaJson('/api/chat', {
+      model: subModel,
+      stream: false,
+      options: { num_ctx: 8192 },
+      ...(think === undefined ? {} : { think }),
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a strict completion verifier for a coding agent. Judge only from the evidence given. If the goal is FULLY achieved, reply with exactly: GOAL_COMPLETE. Otherwise reply with a short numbered list of the concrete steps that remain — no praise, no restating what was done. Never reply GOAL_COMPLETE if any part of the goal is unfinished or unverified.',
+        },
+        {
+          role: 'user',
+          content: `GOAL:\n${goal}\n\nAGENT'S FINAL MESSAGE THIS ITERATION:\n${(summary || '(none)').slice(0, 3000)}\n\nGIT CHANGES SO FAR (diff stat + status):\n${(gitEvidence || '(none)').slice(0, 2000)}`,
+        },
+      ],
+    });
+    recordUsage('verifier', { promptTokens: data.prompt_eval_count || 0, evalTokens: data.eval_count || 0 });
+    return (data.message?.content || '').trim() || 'No verdict returned — continue working toward the goal.';
+  } catch (err) {
+    return `Verifier unavailable (${err.message}) — continue working toward the goal.`;
+  }
+}
+
+ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, maxIterations }) => {
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
+  const info = (t) => win.webContents.send('stream:info', t);
+  const state = (t) => win.webContents.send('stream:state', t);
+
+  try {
+    let feedback = '';
+    for (let i = 1; i <= max; i++) {
+      if (stopRequested) break;
+      info(`━ Loop iteration ${i}/${max} ━`);
+      state(`loop ${i}/${max}`);
+
+      conversation.push({
+        role: 'user',
+        content: i === 1
+          ? `GOAL: ${goal}\n\nWork toward this goal. Use your tools, verify your work, and summarize what you accomplished when you stop.`
+          : `GOAL: ${goal}\n\nVerifier feedback on your previous iteration:\n${feedback}\n\nAddress the feedback and continue toward the goal. Summarize what you accomplished when you stop.`,
+      });
+
+      const { lastContent, lastStats, contextLength } = await runAgentTurn(model, cwd, autoApprove, think, subModel);
+      if (stopRequested) break;
+
+      state(`verifying ${i}/${max} (${subModel || 'qwen3:8b'})…`);
+      const diff = await gitRun(['diff', '--stat'], cwd);
+      const status = await gitRun(['status', '--porcelain'], cwd);
+      const verdict = await runVerifier(subModel || 'qwen3:8b', goal, lastContent, `${diff.out || ''}\n${status.out || ''}`.trim());
+      if (stopRequested) break;
+
+      if (/GOAL_COMPLETE/i.test(verdict)) {
+        info(`✔ Verifier: goal complete after ${i} iteration${i > 1 ? 's' : ''}.`);
+        break;
+      }
+      feedback = verdict.slice(0, 2000);
+      info(`Verifier: not done yet —\n${feedback}`);
+      if (i === max) {
+        info(`Loop ended: reached the ${max}-iteration cap without GOAL_COMPLETE.`);
+        break;
+      }
+
+      // auto-compact between iterations so long loops never hit silent truncation
+      const used = lastStats ? lastStats.promptTokens + lastStats.evalTokens : 0;
+      if (contextLength && used > 0.7 * contextLength) {
+        info('Context past 70% — auto-compacting before the next iteration…');
+        state('auto-compacting…');
+        const c = await compactConversation(model);
+        if (c.ok) {
+          win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+        } else {
+          info('Auto-compact failed (' + c.error + ') — continuing without it.');
+        }
+      }
     }
     return { ok: true };
   } catch (err) {
@@ -926,16 +647,25 @@ ipcMain.on('chat:stop', () => {
 
 ipcMain.handle('chat:reset', () => {
   conversation = [];
+  usage = freshUsage();
   return { ok: true };
 });
+
+ipcMain.handle('usage:get', () => usage);
 
 // chat history support: the renderer saves/loads conversations, but the live
 // array lives here — these let it read the current one and swap in a stored one.
 ipcMain.handle('chat:get', () => conversation);
 
-ipcMain.handle('chat:load', (_e, msgs) => {
+ipcMain.handle('chat:load', async (_e, msgs, model) => {
   conversation = Array.isArray(msgs) ? msgs : [];
-  return { ok: true };
+  usage = freshUsage();
+  // estimate the loaded context so the bar and /usage aren't blank until the
+  // next message (Ollama reports the exact count on the next request)
+  const approxTokens = Math.round(JSON.stringify(conversation).length / 4);
+  const contextLength = model ? await effectiveContext(model) : 0;
+  usage.context = { tokens: approxTokens, limit: contextLength };
+  return { ok: true, approxTokens, contextLength };
 });
 
 // ---------- durable chat storage ----------
@@ -1012,17 +742,12 @@ ipcMain.handle('models:list', async () => {
   }
 });
 
-// ---------- git integration ----------
-function gitRun(args, cwd) {
-  return new Promise((resolve) => {
-    execFile('git', args, { cwd, timeout: 15_000, maxBuffer: 4_000_000 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, out: stdout || '', err: (stderr || '').trim() });
-    });
-  });
-}
-
+// ---------- git integration (gitRun lives in tools.js) ----------
 ipcMain.handle('git:status', async (_e, cwd) => {
-  const branch = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+  // rev-parse fails on a freshly-initialized repo (no commits yet) —
+  // symbolic-ref reports the unborn branch name, so try it as a fallback.
+  let branch = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+  if (!branch.ok) branch = await gitRun(['symbolic-ref', '--short', 'HEAD'], cwd);
   if (!branch.ok) return { ok: false }; // not a git repo
   const status = await gitRun(['status', '--porcelain'], cwd);
   return {
@@ -1056,7 +781,7 @@ ipcMain.handle('git:commit', async (_e, cwd, message) => {
 ipcMain.handle('memory:get', () => ({ content: readMemory(), path: memoryPath() }));
 
 // ---------- conversation compaction ----------
-ipcMain.handle('chat:compact', async (_e, { model }) => {
+async function compactConversation(model) {
   if (conversation.length < 2) return { ok: false, error: 'Nothing to compact yet.' };
   try {
     // drop bulky tool outputs from what the summarizer sees
@@ -1069,18 +794,40 @@ ipcMain.handle('chat:compact', async (_e, { model }) => {
       role: 'user',
       content: 'Summarize this entire conversation so work can continue seamlessly in a fresh session: the goal, key decisions, files created or modified and their current state, and unresolved tasks. Output only the summary.',
     });
-    const data = await ollamaJson('/api/chat', { model, messages: msgs, stream: false });
+    const data = await ollamaJson('/api/chat', {
+      model,
+      messages: msgs,
+      stream: false,
+      options: { num_ctx: await effectiveContext(model) },
+    });
     const summary = (data.message?.content || '').trim();
     if (!summary) return { ok: false, error: 'Model returned an empty summary.' };
+
+    // Record usage for the summarization step
+    if (data.message?.prompt_eval_count || data.message?.eval_count) {
+      recordUsage('main', {
+        promptTokens: data.message.prompt_eval_count,
+        evalTokens: data.message.eval_count
+      });
+    }
+
     conversation = [
       { role: 'user', content: 'This conversation was compacted to save context. Continue from the summary below.' },
       { role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary },
     ];
-    return { ok: true };
+
+    // Update the central usage object in main process
+    const approxTokens = Math.round(JSON.stringify(conversation).length / 4);
+    const contextLength = await effectiveContext(model);
+    usage.context = { tokens: approxTokens, limit: contextLength };
+
+    return { ok: true, approxTokens, contextLength };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
-});
+}
+
+ipcMain.handle('chat:compact', (_e, { model }) => compactConversation(model));
 
 // ---------- chat export ----------
 ipcMain.handle('chat:export', async () => {
@@ -1116,4 +863,36 @@ ipcMain.handle('cwd:pick', async () => {
   const result = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
   if (result.canceled || !result.filePaths.length) return { ok: false };
   return { ok: true, path: result.filePaths[0] };
+});
+
+// ---------- generate chat title ----------
+ipcMain.handle('chat:generateTitle', async (_e, conversationContent) => {
+  try {
+    // If conversation is empty or invalid, return a default title
+    if (!conversationContent || !Array.isArray(conversationContent)) {
+      return { ok: false, error: 'Invalid conversation content' };
+    }
+    
+    // Create a system prompt that strictly asks for a descriptive, concise title
+    const systemPrompt = "You are a helpful chat summarizer. Given the following transcript of a programming chat, generate a single, descriptive, and concise title (maximum 7 words). Do not include any pre-text, explanation, or markdown formatting. Only output the title. Do not output any hashtags, markdown, or formatting. Just the plain text title. This is for generating a chat title only - do not output anything to the chat stream or UI. The only output should be the plain text title string.";
+    
+    // Get the last few messages to provide context for title generation
+    const lastMessages = conversationContent.slice(-5); // Get last 5 messages for context
+    
+    // Generate the title using the LLM
+    const response = await streamChat('qwen2.5-coder:1.5b', [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: JSON.stringify(lastMessages) }
+    ], null, false, true);
+    
+    // Return only the title without any extra formatting
+    let title = response.content.trim();
+    
+    // Clean up any markdown or formatting that might have slipped through
+    title = title.replace(/[#*`]/g, '').trim();
+    
+    return { ok: true, title };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
