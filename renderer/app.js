@@ -861,11 +861,12 @@ const SLASH_HELP = [
   '/diff — show the git diff for the working directory',
   '/commit <message> — stage all changes and commit',
   '/loop [n] <goal> — work toward a goal for up to n iterations (default 8); a verifier subagent judges completion after each pass',
-  '/model <name> — switch model (partial match ok)',
+  '/model <for name> — switch model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
   '/usage — show how context and tokens have been spent across all agents',
   '/memory — view what the agent has remembered',
   '/export — save this chat as a markdown file',
+  '/tools — list all available tools',
 ].join('\n');
 
 async function handleSlash(raw) {
@@ -989,6 +990,13 @@ async function handleSlash(raw) {
       if (res.ok) return addInfo('Exported to ' + res.path);
       if (res.error !== 'cancelled') return addError(res.error);
       return;
+    }
+
+    case 'tools': {
+      const res = await window.api.toolsList();
+      if (!res.ok) return addError('Failed to fetch tools: ' + res.error);
+      const toolLines = res.tools.map(t => (t.isRisky ? '[!] ' : '    ') + t.name);
+      return showOverlay('AVAILABLE TOOLS', toolLines.join('\n'));
     }
 
     default:

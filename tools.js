@@ -42,6 +42,16 @@ function truncate(s) {
   return s.slice(0, MAX_TOOL_OUTPUT) + `\n...[truncated, ${s.length} chars total]`;
 }
 
+function syntaxCheckNote(filePath) {
+  if (!/\.(js|mjs|cjs)$/.test(filePath)) return Promise.resolve('');
+  return new Promise((resolve) => {
+    execFile('node', ['--check', filePath], { timeout: 10_000 }, (err, _out, stderr) => {
+      if (!err) return resolve('\nSyntax check: OK');
+      resolve('\nSYNTAX CHECK FAILED - you broke this file, fix it before anything else:\n' + String(stderr).slice(0, 600));
+    });
+  });
+}
+
 // Recursively visit files, skipping .git and node_modules; unreadable dirs are skipped.
 function walkDir(dir, onFile) {
   let entries;
@@ -567,7 +577,7 @@ async function executeTool(name, args, cwd) {
       const p = resolveInside(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, args.content ?? '', 'utf8');
-      return `Wrote ${(args.content ?? '').length} chars to ${p}`;
+      return `Wrote ${(args.content ?? '').length} chars to ${p}` + await syntaxCheckNote(p);
     }
     case 'list_directory': {
       const p = resolveInside(cwd, args.path);
@@ -614,7 +624,7 @@ async function executeTool(name, args, cwd) {
       const p = resolveInside(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.appendFileSync(p, args.content ?? '', 'utf8');
-      return `Appended ${(args.content ?? '').length} chars to ${p}`;
+      return `Appended ${(args.content ?? '').length} chars to ${p}` + await syntaxCheckNote(p);
     }
     case 'create_directory': {
       const p = resolveInside(cwd, args.path);
@@ -690,7 +700,7 @@ async function executeTool(name, args, cwd) {
       if (count === 0) return `Error: old_string not found in ${p}. Read the file and copy the exact text, including whitespace and indentation.`;
       if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
       fs.writeFileSync(p, content.split(oldS).join(newS), 'utf8');
-      return `Edited ${p}: replaced ${count} occurrence(s).`;
+      return `Edited ${p}: replaced ${count} occurrence(s).` + await syntaxCheckNote(p);
     }
     case 'replace_in_file': {
       const p = resolveInside(cwd, args.path);
@@ -715,7 +725,7 @@ async function executeTool(name, args, cwd) {
         return `Error: this replacement would grow the file from ${content.length} to ${updated.length} chars — refusing. The pattern is matching far more than intended.`;
       }
       fs.writeFileSync(p, updated, 'utf8');
-      return `Replaced ${count} occurrence(s) in ${p}`;
+      return `Replaced ${count} occurrence(s) in ${p}` + await syntaxCheckNote(p);
     }
     case 'count_lines': {
       const p = resolveInside(cwd, args.path);

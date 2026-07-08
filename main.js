@@ -5,6 +5,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory } = require('./tools');
+const { stderr } = require('process');
 
 const OLLAMA = 'http://127.0.0.1:11434';
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
@@ -413,6 +414,16 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
     currentAbort = null;
     win.webContents.send('stream:done');
   }
+});
+
+ipcMain.handle('tools:list', async () => {
+  return {
+    ok: true,
+    tools: TOOL_DEFS.map(t => ({
+      name: t.function.name,
+      isRisky: RISKY_TOOLS.has(t.function.name)
+    }))
+  };
 });
 
 // ---------- subagents ----------
