@@ -372,18 +372,28 @@ const TOOL_DEFS = [
   },
   {
     type: 'function',
-    function:
-      {
-        name: 'check_port_usage',
-        description: 'Check if a specific port is currently in use by another process.',
-        parameters: {
-          type: 'object',
-          properties: {
-            port: { type: 'number', description: 'The port number to check.' },
-          },
-          required: ['port'],
+    function: {
+      name: 'create_git_branch',
+      description: 'Create a new git branch and switch to it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          branch_name: { type: 'string', description: 'The name of the new branch to create.' },
         },
+        required: ['branch_name'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_git_diff',
+      description: 'Show the git diff for unstaged changes in the working directory.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
   },
   {
     type: 'function',
@@ -496,6 +506,8 @@ const RISKY_TOOLS = new Set([
   'initiate_research_session',
   'record_observation',
   'finalize_research',
+  'create_git_branch',
+  'read_git_diff',
 ]);
 
 async function executeTool(name, args, cwd) {
@@ -700,6 +712,12 @@ async function executeTool(name, args, cwd) {
           resolve(truncate(stdout || stderr || '(no output)'));
         });
       });
+    }
+    case 'create_git_branch': {
+      return gitRun(['checkout', '-b', args.branch_name], cwd).then((res) => (res.ok ? `Created and switched to branch ${args.branch_name}` : `Error: ${res.err}`));
+    }
+    case 'read_git_diff': {
+      return gitRun(['diff'], cwd).then((res) => (res.ok ? truncate(res.out) : `Error: ${res.err}`));
     }
     case 'get_git_log': {
       const gitArgs = ['log', '--oneline', '--no-color'];
