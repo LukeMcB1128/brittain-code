@@ -39,6 +39,9 @@ You must use the `remember` tool to log persistent context when:
 - The user corrects your interpretation of an architectural pattern in this codebase.
 - You uncover a unique code style preference used within the `renderer/` folder.
 
+### 4. Research (`initiate_research_session`, `record_observation`, `finalize_research`)
+After you or a subagent FINISHS a research session, and make sure you know all the information from it, and then remove the RESEARCH_LOG.md file, make sure you have the report and it is finished.
+
 ---
 
 ## Critical Constraints

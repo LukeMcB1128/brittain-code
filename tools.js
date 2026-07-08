@@ -540,7 +540,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'finalize_research',
-      description: 'Finalizes the current research session, creating a RESEARCH_REPORT.md from the log and adding a summary.',
+      description: 'Finalizes the current research session, adding a comphrensive summary to the active RESEARCH_LOG.md file.',
       parameters: {
         type: 'object',
         properties: {
