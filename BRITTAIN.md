@@ -4,9 +4,9 @@ You are maintaining and developing the Brittain Code application itself. Follow 
 
 ## Core Architecture Rules
 
-### 1. Tool Lifecycle (Modifying main.js)
-When adding, removing, or updating tools in the application:
-- **Atomicity**: You must update the schema in `TOOL_DEFS` and the execution logic inside the `executeTool` switch statement within a single task loop.
+### 1. Tool Lifecycle (Modifying tools.js)
+All agent tools live in `tools.js` — schemas (`TOOL_DEFS`), the approval list (`RISKY_TOOLS`), implementations (`executeTool`), and their helpers. Do not add tool code to `main.js`; it imports everything from `tools.js`. When adding, removing, or updating tools:
+- **Atomicity**: You must update the schema in `TOOL_DEFS` and the execution logic inside the `executeTool` switch statement within a single task loop, both in `tools.js`.
 - **Security Tracking**: If a new tool performs file modifications, network requests, or system executions, you **must** append its name to the `RISKY_TOOLS` Set so the runtime prompts the user for authorization.
 - **Schema Validation**: Ensure any new tool definition strictly follows the OpenAI function-calling JSON schema format matching the existing tools.
 
@@ -42,5 +42,5 @@ You must use the `remember` tool to log persistent context when:
 ---
 
 ## Critical Constraints
-- **Zero Blind Rewrites**: Do not use `write_file` on any core file (`main.js`, `preload.js`, `renderer/app.js`) unless you have read the entire file first using `read_file` or mapped it using `get_file_lines`.
+- **Zero Blind Rewrites**: Do not use `write_file` on any core file (`main.js`, `tools.js`, `preload.js`, `renderer/app.js`) unless you have read the entire file first using `read_file` or mapped it using `get_file_lines`.
 - **Dependency Freeze**: Do not add dependencies to `package.json` or attempt to run `npm install` for external packages unless the user explicitly orders you to do so via `ask_user`.
