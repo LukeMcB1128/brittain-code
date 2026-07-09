@@ -293,10 +293,18 @@ function systemPrompt(cwd, model = '') {
   if (/devstral/i.test(model)) {
     lines.push(
       '',
-      'IMPORTANT — TOOL USE OVERRIDE:',
-      'You are NOT running inside OpenHands. Do not use bash, str_replace_editor, execute_bash, or any OpenHands tools — they do not exist here.',
-      'To act on files you MUST call the tools listed above: write_file to create files, edit_file to modify them, read_file to read them, run_command for shell commands.',
-      'Never output code blocks as a substitute for tool calls. If you intend to create or edit a file, call the tool — do not show the content in a markdown block and stop.',
+      'CRITICAL — TOOL USE RULES (read every turn):',
+      'You are NOT inside OpenHands. bash, str_replace_editor, execute_bash do not exist here. Calling them does nothing.',
+      '',
+      'The ONLY way to act on files is via these tools: write_file, edit_file, read_file, run_command, search_files.',
+      '',
+      'THE MOST IMPORTANT RULE: Never write a code block in your response and then stop. That pattern does nothing — no file is created, no code runs. A code block in prose is not a tool call.',
+      'If you find yourself writing ```javascript or ```html or any fenced block containing file content, STOP — call write_file or edit_file instead.',
+      '',
+      'Correct pattern: decide what to write → call write_file/edit_file → verify with read_file → continue.',
+      'Wrong pattern: decide what to write → show it in a markdown block → say "I will now write this" → stop.',
+      '',
+      'Every turn must end with either a tool call or a genuine final summary. If you have unfinished work, make a tool call, do not narrate it.',
     );
   }
   return lines.join('\n');
