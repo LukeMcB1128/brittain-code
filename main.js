@@ -252,7 +252,7 @@ function parseRawToolCalls(content) {
 }
 
 // ---------- agent loop ----------
-function systemPrompt(cwd) {
+function systemPrompt(cwd, model = '') {
   const lines = [
     "You are Brittain Code, an expert coding agent running fully offline on the user's Mac (macOS, zsh).",
     `Working directory: ${cwd} — use paths relative to it.`,
@@ -288,13 +288,24 @@ function systemPrompt(cwd) {
       lines.push('', 'Project instructions (from BRITTAIN.md in the working directory):', capped);
     }
   } catch {}
+  // Devstral is trained on the OpenHands scaffold and defaults to narrating
+  // plans in prose rather than calling tools. This addendum overrides that.
+  if (/devstral/i.test(model)) {
+    lines.push(
+      '',
+      'IMPORTANT — TOOL USE OVERRIDE:',
+      'You are NOT running inside OpenHands. Do not use bash, str_replace_editor, execute_bash, or any OpenHands tools — they do not exist here.',
+      'To act on files you MUST call the tools listed above: write_file to create files, edit_file to modify them, read_file to read them, run_command for shell commands.',
+      'Never output code blocks as a substitute for tool calls. If you intend to create or edit a file, call the tool — do not show the content in a markdown block and stop.',
+    );
+  }
   return lines.join('\n');
 }
 
 // One full agent turn: stream → tools → repeat until the model stops calling
 // tools or a cap is hit. Shared by chat:send and chat:loop.
 async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
-  const messages = () => [{ role: 'system', content: systemPrompt(cwd) }, ...conversation];
+  const messages = () => [{ role: 'system', content: systemPrompt(cwd, model) }, ...conversation];
   // report the window we actually run with, not the model's theoretical max
   const contextLength = await effectiveContext(model);
   // For models that support thinking, always send an explicit true/false —
