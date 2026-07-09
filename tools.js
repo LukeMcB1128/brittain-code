@@ -713,11 +713,24 @@ async function executeTool(name, args, cwd) {
       const newS = String(args.new_string ?? '');
       if (!oldS) return 'Error: old_string must not be empty.';
       if (oldS === newS) return 'Error: old_string and new_string are identical.';
-      const count = content.split(oldS).length - 1;
-      if (count === 0) return `Error: old_string not found in ${p}. Read the file and copy the exact text, including whitespace and indentation.`;
-      if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
-      const updated = content.split(oldS).join(newS);
-      const tmp = p + '.~check.js';
+      // exact match first; fall back to trailing-whitespace-normalized match
+      const trimLines = s => s.split('\n').map(l => l.trimEnd()).join('\n');
+      let updated;
+      let count = content.split(oldS).length - 1;
+      let fuzzy = false;
+      if (count === 0) {
+        const normContent = trimLines(content);
+        const normOld = trimLines(oldS);
+        count = normContent.split(normOld).length - 1;
+        if (count === 0) return `Error: old_string not found in ${p}. Read the file and copy the exact text, including indentation.`;
+        if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times (after whitespace normalization) in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
+        updated = normContent.split(normOld).join(trimLines(newS));
+        fuzzy = true;
+      } else {
+        if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
+        updated = content.split(oldS).join(newS);
+      }
+      const tmp = p + '.~check' + path.extname(p);
       try {
         fs.writeFileSync(tmp, updated, 'utf8');
         const check = await syntaxCheck(tmp);
@@ -726,7 +739,7 @@ async function executeTool(name, args, cwd) {
         try { fs.unlinkSync(tmp); } catch {}
       }
       fs.writeFileSync(p, updated, 'utf8');
-      return `Edited ${p}: replaced ${count} occurrence(s).\nSyntax check: OK`;
+      return `Edited ${p}: replaced ${count} occurrence(s)${fuzzy ? ' (matched after trailing-whitespace normalization)' : ''}.\nSyntax check: OK`;
     }
     case 'replace_in_file': {
       const p = resolveInside(cwd, args.path);
