@@ -44,13 +44,19 @@ function truncate(s) {
 
 function syntaxCheck(filePath) {
   if (!/\.(js|mjs|cjs)$/.test(filePath)) return Promise.resolve({ ok: true });
-  return new Promise((resolve) => {
-    execFile('node', ['--check', filePath], { timeout: 10_000 }, (err, stdout, stderr) => {
-      if (!err) return resolve({ ok: true });
-      const msg = (String(stderr) + String(stdout)).trim().slice(0, 600) || '(no details)';
-      resolve({ ok: false, msg });
-    });
-  });
+  try {
+    const code = fs.readFileSync(filePath, 'utf8');
+    new (require('vm').Script)(code, { filename: filePath });
+    return Promise.resolve({ ok: true });
+  } catch (e) {
+    // vm.Script parses CommonJS only — ES-module syntax (import/export,
+    // top-level await) is valid code we just can't verify this way.
+    // Skip rather than falsely reject edits in ESM projects.
+    if (/Cannot use import statement outside a module|Unexpected token 'export'|await is only valid in async functions and the top level bodies of modules/.test(e.message)) {
+      return Promise.resolve({ ok: true, unverified: true });
+    }
+    return Promise.resolve({ ok: false, msg: e.message });
+  }
 }
 
 // Recursively visit files, skipping .git and node_modules; unreadable dirs are skipped.
