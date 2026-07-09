@@ -54,14 +54,14 @@ Type these in the message box:
 | `/subagent [name]` | Show or set the subagent/verifier model (default qwen3:8b) |
 | `/loop [n] <goal>` | Work toward a goal for up to n iterations (default 8); a verifier subagent judges completion, and context auto-compacts between iterations. Turn AUTO-APPROVE on for unattended runs |
 | `/usage` | Show context remaining and token spend across main agent, subagents, and verifier |
-| `/memory` | View what the agent has remembered across chats |
+| `/memory` | View what the agent has remembered for the selected project |
 | `/export` | Save the chat as a markdown file |
 
 ## Git, project instructions, memory, images
 
 - When DIR is a git repo, the status bar shows the branch and changed-file count, with **DIFF** and **COMMIT** buttons. The diff refreshes after every agent run — review what it changed before committing.
 - Put a **`BRITTAIN.md`** in any project folder and its contents are added to the system prompt for chats in that folder (like Claude Code's CLAUDE.md) — conventions, build commands, things the agent should know.
-- The agent saves cross-chat lessons with its `remember` tool to `~/Library/Application Support/Brittain Code/memory.md` (view with `/memory`, edit the file directly to prune).
+- The agent saves cross-chat lessons per project under `~/Library/Application Support/Brittain Code/memory/projects/`. Nothing is written into the project itself. Use `/memory` to view the selected project's file and its exact location. The former universal `memory.md`, if present, remains visible as legacy data but is no longer injected into prompts.
 - Attach images with the **IMG** button or paste them into the text box (vision-capable models only).
 - **Esc** stops a running generation. Speed (tokens/sec) shows in the status bar after each response.
 

@@ -1004,8 +1004,14 @@ async function handleSlash(raw) {
     }
 
     case 'memory': {
-      const res = await window.api.memoryGet();
-      return showOverlay('MEMORY — ' + res.path, res.content.trim() || '(nothing remembered yet — the agent saves lessons here with the remember tool)');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      const res = await window.api.memoryGet(cwd);
+      if (!res.ok) return addError(res.error);
+      let content = res.content.trim() || '(nothing remembered for this project yet)';
+      if (res.legacyContent?.trim()) {
+        content += `\n\nLEGACY UNIVERSAL MEMORY (not injected)\n${res.legacyPath}\n\n${res.legacyContent.trim()}`;
+      }
+      return showOverlay('PROJECT MEMORY — ' + res.path, content);
     }
 
     case 'export': {

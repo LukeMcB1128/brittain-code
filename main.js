@@ -4,7 +4,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { initTools, TOOL_DEFS, RISKY_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory } = require('./tools');
+const { initTools, TOOL_DEFS, RISKY_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory } = require('./tools');
 
 const OLLAMA = 'http://127.0.0.1:11434';
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
@@ -269,13 +269,13 @@ function systemPrompt(cwd, model = '') {
     '',
     'Everything runs locally; you cannot access the internet.',
   ];
-  const memory = readMemory().trim();
+  const memory = readMemory(cwd).trim();
   if (memory) {
     // cap so a huge memory file cannot blow up the prompt (keep the newest lines)
     const capped = memory.length > 4000
-      ? '[…older lessons truncated — prune memory.md]\n' + memory.slice(-4000)
+      ? '[…older project lessons truncated — use /memory to locate and prune the file]\n' + memory.slice(-4000)
       : memory;
-    lines.push('', 'Lessons remembered from previous sessions:', capped);
+    lines.push('', 'Lessons remembered for this project from previous sessions:', capped);
   }
   // per-project instructions, like Claude Code's CLAUDE.md
   try {
@@ -818,7 +818,16 @@ ipcMain.handle('git:commit', async (_e, cwd, message) => {
 });
 
 // ---------- memory viewer ----------
-ipcMain.handle('memory:get', () => ({ content: readMemory(), path: memoryPath() }));
+ipcMain.handle('memory:get', (_e, cwd) => {
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  return {
+    ok: true,
+    content: readMemory(cwd),
+    path: memoryPath(cwd),
+    legacyContent: readLegacyMemory(),
+    legacyPath: legacyMemoryPath(),
+  };
+});
 
 // ---------- conversation compaction ----------
 async function compactConversation(model, signal = currentAbort?.signal) {

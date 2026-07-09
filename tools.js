@@ -21,14 +21,55 @@ function initTools(dir) {
 }
 
 // ---------- persistent memory ----------
-// Plain-text lessons the agent saves with the `remember` tool; injected into
-// the system prompt of every chat. Lives at userData/memory.md — user-editable.
-function memoryPath() {
+// Plain-text lessons saved by `remember`, scoped to the selected project while
+// living outside its repository. The canonical project path is hashed so app
+// data stays filename-safe; projects.json preserves a human-readable mapping.
+function canonicalProjectPath(cwd) {
+  if (!cwd) throw new Error('A working directory is required for project memory.');
+  try { return fs.realpathSync(cwd); } catch { return path.resolve(cwd); }
+}
+
+function projectMemoryId(cwd) {
+  return crypto.createHash('sha256').update(canonicalProjectPath(cwd)).digest('hex');
+}
+
+function memoryDir() {
+  return path.join(userDataDir || os.tmpdir(), 'memory');
+}
+
+function memoryPath(cwd) {
+  return path.join(memoryDir(), 'projects', projectMemoryId(cwd) + '.md');
+}
+
+function legacyMemoryPath() {
   return path.join(userDataDir || os.tmpdir(), 'memory.md');
 }
 
-function readMemory() {
-  try { return fs.readFileSync(memoryPath(), 'utf8'); } catch { return ''; }
+function readMemory(cwd) {
+  if (!cwd) return '';
+  try { return fs.readFileSync(memoryPath(cwd), 'utf8'); } catch { return ''; }
+}
+
+function readLegacyMemory() {
+  try { return fs.readFileSync(legacyMemoryPath(), 'utf8'); } catch { return ''; }
+}
+
+function registerProjectMemory(cwd) {
+  const canonicalPath = canonicalProjectPath(cwd);
+  const id = projectMemoryId(cwd);
+  const dir = memoryDir();
+  const indexPath = path.join(dir, 'projects.json');
+  let index = {};
+  try { index = JSON.parse(fs.readFileSync(indexPath, 'utf8')); } catch {}
+  index[id] = {
+    path: canonicalPath,
+    name: path.basename(canonicalPath) || canonicalPath,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = indexPath + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(index, null, 2), 'utf8');
+  fs.renameSync(tmp, indexPath);
 }
 
 // ---------- tools ----------
@@ -226,7 +267,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'remember',
-      description: 'Save a short reusable lesson to persistent memory that will be available in all future chats. Use when the user corrects you, when you discover a project convention, or when you make a mistake worth avoiding next time. One concise sentence per fact.',
+      description: 'Save a short reusable lesson to persistent memory for the current project. It will be available in future chats using the same working directory. Use when the user corrects you, when you discover a project convention, or when you make a mistake worth avoiding next time. One concise sentence per fact.',
       parameters: {
         type: 'object',
         properties: {
@@ -681,9 +722,12 @@ async function executeTool(name, args, cwd) {
     case 'remember': {
       const fact = String(args.fact || '').trim().replace(/\s*\n+\s*/g, ' ');
       if (!fact) return 'Error: fact must not be empty.';
-      if (readMemory().includes(fact)) return 'Already remembered.';
-      fs.appendFileSync(memoryPath(), '- ' + fact + '\n', 'utf8');
-      return 'Remembered. This will be available in future chats.';
+      if (readMemory(cwd).includes(fact)) return 'Already remembered for this project.';
+      const target = memoryPath(cwd);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.appendFileSync(target, '- ' + fact + '\n', 'utf8');
+      registerProjectMemory(cwd);
+      return 'Remembered for this project. This will be available in future chats that use the same directory.';
     }
     case 'append_file': {
       const p = resolveInside(cwd, args.path);
@@ -1037,4 +1081,6 @@ module.exports = {
   gitRun,
   memoryPath,
   readMemory,
+  legacyMemoryPath,
+  readLegacyMemory,
 };

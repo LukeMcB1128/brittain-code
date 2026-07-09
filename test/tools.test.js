@@ -5,10 +5,13 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+  initTools,
   TOOL_DEFS,
   RISKY_TOOLS,
   SUBAGENT_TOOL_NAMES,
   executeTool,
+  memoryPath,
+  readMemory,
 } = require('../tools');
 
 function tempProject() {
@@ -78,4 +81,29 @@ test('append_file and replace_in_file also roll back invalid JavaScript', async 
   }, cwd);
   assert.match(replaceResult, /Replacement rejected/);
   assert.equal(fs.readFileSync(target, 'utf8'), original);
+});
+
+test('remember stores isolated project memory outside both projects', async (t) => {
+  const userData = tempProject();
+  const firstProject = tempProject();
+  const secondProject = tempProject();
+  t.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(firstProject, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(secondProject, { recursive: true, force: true }));
+  initTools(userData);
+
+  await executeTool('remember', { fact: 'First project uses tabs.' }, firstProject);
+  await executeTool('remember', { fact: 'Second project uses spaces.' }, secondProject);
+
+  assert.match(readMemory(firstProject), /uses tabs/);
+  assert.doesNotMatch(readMemory(firstProject), /uses spaces/);
+  assert.match(readMemory(secondProject), /uses spaces/);
+  assert.notEqual(memoryPath(firstProject), memoryPath(secondProject));
+  assert.equal(memoryPath(firstProject).startsWith(userData + path.sep), true);
+  assert.equal(fs.existsSync(path.join(firstProject, 'memory.md')), false);
+  assert.equal(fs.existsSync(path.join(secondProject, 'memory.md')), false);
+
+  const index = JSON.parse(fs.readFileSync(path.join(userData, 'memory', 'projects.json'), 'utf8'));
+  assert.equal(Object.values(index).some((entry) => entry.path === fs.realpathSync(firstProject)), true);
+  assert.equal(Object.values(index).some((entry) => entry.path === fs.realpathSync(secondProject)), true);
 });
