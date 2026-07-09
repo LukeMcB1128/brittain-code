@@ -33,7 +33,23 @@ function readMemory() {
 
 // ---------- tools ----------
 function resolveInside(cwd, p) {
-  const abs = path.resolve(cwd, p || '.');
+  const root = fs.realpathSync(cwd);
+  const abs = path.resolve(root, p || '.');
+  const isInside = (candidate) => {
+    const rel = path.relative(root, candidate);
+    return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
+  };
+  if (!isInside(abs)) throw new Error(`Path escapes the working directory: ${p}`);
+
+  // Lexical checks alone can be bypassed through a symlink inside the project.
+  // Resolve the nearest existing ancestor so new files are safe as well.
+  let existing = abs;
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  if (!isInside(fs.realpathSync(existing))) throw new Error(`Path escapes the working directory through a symlink: ${p}`);
   return abs;
 }
 
@@ -91,7 +107,7 @@ const TOOL_DEFS = [
       description: 'Read a text file. Returns the file contents.',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string', description: 'File path, relative to the working directory or absolute' } },
+        properties: { path: { type: 'string', description: 'File path relative to the working directory' } },
         required: ['path'],
       },
     },
@@ -195,7 +211,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'run_subagent',
-      description: 'Delegate a self-contained exploration or research task to a smaller, faster model. The subagent has read-only tools (read, search, analyze files, git history) plus research logging — it cannot edit files, run commands, or ask the user anything. It CANNOT see this conversation, so the task must contain every detail it needs. Returns the subagent\'s findings. Use it to explore unfamiliar code, locate definitions and usages, or gather evidence across many files without spending your own context.',
+      description: 'Delegate a self-contained exploration or research task to a smaller, faster model. The subagent has read-only tools (read, search, analyze files, git history) and cannot edit files, create research logs, run commands, or ask the user anything. It CANNOT see this conversation, so the task must contain every detail it needs. Returns the subagent\'s findings. Use it to explore unfamiliar code, locate definitions and usages, or gather evidence across many files without spending your own context.',
       parameters: {
         type: 'object',
         properties: {
@@ -393,12 +409,27 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'get_environment_variables',
-      description: 'Retrieve environment variables. Optionally filter by name.',
+      description: 'Retrieve one environment variable by exact name. Requires user approval because values may be sensitive.',
       parameters: {
         type: 'object',
         properties: {
-          name: { type: 'string', description: 'Name of the variable to retrieve. If omitted, returns all variables.' }
+          name: { type: 'string', description: 'Exact name of the variable to retrieve.' }
         },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'check_port_usage',
+      description: 'Check whether a local TCP port has a listening process.',
+      parameters: {
+        type: 'object',
+        properties: {
+          port: { type: 'number', description: 'TCP port number from 1 to 65535.' },
+        },
+        required: ['port'],
       },
     },
   },
@@ -550,7 +581,7 @@ const TOOL_DEFS = [
           observation: { type: 'string', description: 'The observation to record' },
           evidence_path: { type: 'string', description: 'Path to the file or evidence supporting this observation' },
         },
-        required: ['observation'],
+        required: ['observation', 'evidence_path'],
       },
     },
   },
@@ -558,7 +589,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'finalize_research',
-      description: 'Finalizes the current research session, adding a comphrensive summary to the active RESEARCH_LOG.md file.',
+      description: 'Finalizes the current research session, creating a comprehensive RESEARCH_REPORT.md.',
       parameters: {
         type: 'object',
         properties: {
@@ -581,6 +612,10 @@ const RISKY_TOOLS = new Set([
   'replace_in_file',
   'edit_file',
   'create_git_branch',
+  'get_environment_variables',
+  'initiate_research_session',
+  'record_observation',
+  'finalize_research',
 ]);
 
 async function executeTool(name, args, cwd) {
@@ -597,9 +632,17 @@ async function executeTool(name, args, cwd) {
     case 'write_file': {
       const p = resolveInside(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.writeFileSync(p, args.content ?? '', 'utf8');
-      const wCheck = await syntaxCheck(p);
-      return `Wrote ${(args.content ?? '').length} chars to ${p}` + (wCheck.ok ? '\nSyntax check: OK' : `\nSYNTAX CHECK FAILED:\n${wCheck.msg}`);
+      const content = args.content ?? '';
+      const tmp = p + '.~check' + path.extname(p);
+      try {
+        fs.writeFileSync(tmp, content, 'utf8');
+        const check = await syntaxCheck(tmp);
+        if (!check.ok) return `Write rejected — syntax error (original file unchanged):\n${check.msg}`;
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
+      fs.writeFileSync(p, content, 'utf8');
+      return `Wrote ${content.length} chars to ${p}\nSyntax check: OK`;
     }
     case 'list_directory': {
       const p = resolveInside(cwd, args.path);
@@ -645,9 +688,18 @@ async function executeTool(name, args, cwd) {
     case 'append_file': {
       const p = resolveInside(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.appendFileSync(p, args.content ?? '', 'utf8');
-      const aCheck = await syntaxCheck(p);
-      return `Appended ${(args.content ?? '').length} chars to ${p}` + (aCheck.ok ? '\nSyntax check: OK' : `\nSYNTAX CHECK FAILED:\n${aCheck.msg}`);
+      const addition = args.content ?? '';
+      const updated = (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '') + addition;
+      const tmp = p + '.~check' + path.extname(p);
+      try {
+        fs.writeFileSync(tmp, updated, 'utf8');
+        const check = await syntaxCheck(tmp);
+        if (!check.ok) return `Append rejected — syntax error (original file unchanged):\n${check.msg}`;
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
+      fs.writeFileSync(p, updated, 'utf8');
+      return `Appended ${addition.length} chars to ${p}\nSyntax check: OK`;
     }
     case 'create_directory': {
       const p = resolveInside(cwd, args.path);
@@ -769,9 +821,16 @@ async function executeTool(name, args, cwd) {
       if (updated.length > content.length * 3 + 100_000) {
         return `Error: this replacement would grow the file from ${content.length} to ${updated.length} chars — refusing. The pattern is matching far more than intended.`;
       }
+      const tmp = p + '.~check' + path.extname(p);
+      try {
+        fs.writeFileSync(tmp, updated, 'utf8');
+        const check = await syntaxCheck(tmp);
+        if (!check.ok) return `Replacement rejected — syntax error (original file unchanged):\n${check.msg}`;
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
       fs.writeFileSync(p, updated, 'utf8');
-      const rCheck = await syntaxCheck(p);
-      return `Replaced ${count} occurrence(s) in ${p}` + (rCheck.ok ? '\nSyntax check: OK' : `\nSYNTAX CHECK FAILED:\n${rCheck.msg}`);
+      return `Replaced ${count} occurrence(s) in ${p}\nSyntax check: OK`;
     }
     case 'count_lines': {
       const p = resolveInside(cwd, args.path);
@@ -801,8 +860,8 @@ async function executeTool(name, args, cwd) {
       return result.join('\n') || '(no files found)';
     }
     case 'get_environment_variables': {
-      if (args.name) return process.env[args.name] || `Error: Environment variable '${args.name}' not found.`;
-      return JSON.stringify(process.env, null, 2);
+      if (!args.name) return 'Error: an exact environment variable name is required.';
+      return process.env[args.name] || `Error: Environment variable '${args.name}' not found.`;
     }
     case 'check_port_usage': {
       const port = parseInt(args.port, 10);
@@ -959,14 +1018,12 @@ function gitRun(args, cwd) {
 }
 
 // The restricted toolset available to subagents (run_subagent): read/search/
-// analyze plus the research-logging tools (which only write RESEARCH_LOG.md /
-// RESEARCH_REPORT.md). No code edits, no shell, no ask_user, no nesting.
+// analyze only. No writes, shell, ask_user, or nesting.
 const SUBAGENT_TOOL_NAMES = new Set([
   'read_file', 'list_directory', 'search_files', 'search_in_file', 'find_files',
   'get_file_lines', 'file_info', 'count_lines', 'get_file_type',
   'analyze_file_structure', 'pattern_search_deep', 'find_largest_files',
-  'get_git_log', 'read_git_diff', 'calculate_file_hash',
-  'initiate_research_session', 'record_observation', 'finalize_research',
+  'get_git_log', 'read_git_diff', 'calculate_file_hash', 'check_port_usage',
 ]);
 const SUBAGENT_TOOLS = TOOL_DEFS.filter((d) => SUBAGENT_TOOL_NAMES.has(d.function.name));
 

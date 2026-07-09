@@ -25,7 +25,7 @@ contextBridge.exposeInMainWorld('api', {
   historyDelete: (id) => ipcRenderer.invoke('history:delete', id),
   respondApproval: (id, approved) => ipcRenderer.send('approval:response', { id, approved }),
   respondQuestion: (id, answer) => ipcRenderer.send('question:response', { id, answer }),
-  generateChatTitle: (conversationContent) => ipcRenderer.invoke('chat:generateTitle', conversationContent),
+  generateChatTitle: (conversationContent, model) => ipcRenderer.invoke('chat:generateTitle', conversationContent, model),
   toolsList: () => ipcRenderer.invoke('tools:list'),
 
   onToken: (cb) => ipcRenderer.on('stream:token', (_e, t) => cb(t)),

@@ -31,7 +31,7 @@ To give it a custom icon: put an `icon.icns` in a `build/` folder, add `"icon": 
 2. Click **DIR** and choose the project folder the agent should work in.
 3. Type a task and hit Enter.
 
-The agent can read files, write files, list directories, search (grep), and run shell commands. By default it asks before **writes and shell commands** (approve/deny bar appears above the input). Flip **AUTO-APPROVE** in the top bar to let it run unattended.
+The agent can read files, write files, list directories, search (grep), and run shell commands. File tools are confined to the selected project directory. By default it asks before **writes, shell commands, and sensitive environment reads** (approve/deny bar appears above the input). Flip **AUTO-APPROVE** in the top bar to let it run unattended.
 
 The status bar shows: current state, context usage (tokens used vs the model's context window, with a fill bar), elapsed time for the current run, and total tool calls.
 
@@ -69,10 +69,11 @@ Type these in the message box:
 
 | File | What it does |
 |---|---|
-| `main.js` | Everything important: the agent loop, tool definitions (`TOOL_DEFS`), tool implementations (`executeTool`), the system prompt (`systemPrompt`), Ollama streaming. Add a new tool here in two places: a definition and a `case` in `executeTool`. |
+| `main.js` | The agent loop, system prompt, Ollama streaming, persistence, subagents, and application IPC handlers. |
+| `tools.js` | Tool schemas (`TOOL_DEFS`), implementations (`executeTool`), approval classification (`RISKY_TOOLS`), and tool helpers. Add or change tools here. |
 | `renderer/app.js` | UI behavior: sending, streaming display, timers, approval buttons. |
 | `renderer/style.css` | All styling. Colors are CSS variables at the top. |
 | `renderer/index.html` | The layout skeleton. |
 | `preload.js` | The IPC bridge — only touch when adding a new message channel. |
 
-Knobs at the top of `main.js`: `MAX_TOOL_OUTPUT` (chars of tool output the model sees), `MAX_AGENT_STEPS` (tool-loop cap), `RISKY_TOOLS` (which tools need approval).
+Important limits: `MAX_AGENT_STEPS` and `NUM_CTX_CAP` live near the top of `main.js`; `MAX_TOOL_OUTPUT` and `RISKY_TOOLS` live in `tools.js`.

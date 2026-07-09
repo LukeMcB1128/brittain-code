@@ -167,7 +167,7 @@ async function saveChat() {
   if (!currentChatId || !firstUser) {
     // Use the new LLM-based title generation
     try {
-      const titleRes = await window.api.generateChatTitle(conversation);
+      const titleRes = await window.api.generateChatTitle(conversation, modelSelect.value);
       if (titleRes.ok && titleRes.title) {
         title = titleRes.title;
       } else {
@@ -276,7 +276,7 @@ function renderConversation(conversation) {
   chat.innerHTML = '';
   for (const msg of conversation) {
     if (msg.role === 'user') {
-      const imgs = (msg.images || []).map((b) => 'data:image/png;base64,' + b);
+      const imgs = (msg.images || []).map((b, i) => `data:${msg.imageTypes?.[i] || 'image/png'};base64,${b}`);
       addMessage('user', msg.content || (imgs.length ? '(image)' : ''), imgs);
     } else if (msg.role === 'assistant') {
       if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
@@ -381,6 +381,7 @@ async function send() {
 
   // Ollama wants raw base64 without the data-URL prefix
   const images = pendingImages.map((d) => d.split(',')[1]);
+  const imageTypes = pendingImages.map((d) => d.slice(5, d.indexOf(';')) || 'image/png');
   const shownImages = pendingImages;
   pendingImages = [];
   renderImagePreview();
@@ -398,13 +399,19 @@ async function send() {
     autoApprove: autoApprove.checked,
     think: thinkToggle.checked,
     images,
+    imageTypes,
   });
 
   if (!res.ok) addError(res.error);
-  endRun();
-  
-  // Save the chat after each message
-  saveChat();
+
+  // Save before accepting another send so two first-message saves cannot race.
+  try {
+    await saveChat();
+  } catch (err) {
+    addError('Failed to save chat: ' + (err.message || err));
+  } finally {
+    endRun();
+  }
 }
 
 function startRun() {
@@ -887,11 +894,16 @@ async function handleSlash(raw) {
     case 'compact': {
       if (busy) return;
       if (!modelSelect.value) return addError('No model selected.');
-      busy = true;
+      startRun();
       setState('compacting…');
-      const res = await window.api.compact({ model: modelSelect.value });
-      busy = false;
-      setState('idle');
+      let res;
+      try {
+        res = await window.api.compact({ model: modelSelect.value });
+      } catch (err) {
+        res = { ok: false, error: err.message || String(err) };
+      } finally {
+        endRun();
+      }
       if (!res.ok) return addError('Compact failed: ' + res.error);
       renderConversation(await window.api.getConversation());
       updateContextBar(res.approxTokens, res.contextLength);
