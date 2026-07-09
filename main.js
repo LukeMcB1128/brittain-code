@@ -389,6 +389,17 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
         conversation.push({ role: 'tool', tool_name: name, content: String(result) });
       }
       if (stopRequested) break;
+
+      // auto-compact when context hits 90% to avoid silent truncation
+      if (lastStats && contextLength) {
+        const used = lastStats.promptTokens + lastStats.evalTokens;
+        if (used > 0.9 * contextLength) {
+          info('Context past 90% — auto-compacting…');
+          const c = await compactConversation(model);
+          if (c.ok) win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+          else info('Auto-compact failed (' + c.error + ') — continuing.');
+        }
+      }
     }
   }
   return { lastContent, lastStats, contextLength };
@@ -766,6 +777,11 @@ ipcMain.handle('git:diff', async (_e, cwd) => {
   if (unstaged.out.trim()) parts.push(unstaged.out);
   if (untracked.out.trim()) parts.push('═══ UNTRACKED FILES ═══\n' + untracked.out);
   return { ok: true, diff: parts.join('\n') || '(working tree clean)' };
+});
+
+ipcMain.handle('git:graph', async (_e, cwd) => {
+  const res = await gitRun(['log', '--graph', '--oneline', '--all', '--no-color'], cwd);
+  return res.ok ? { ok: true, graph: res.out || '(no commits yet)' } : { ok: false, error: res.err };
 });
 
 ipcMain.handle('git:commit', async (_e, cwd, message) => {

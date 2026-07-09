@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   loadConversation: (msgs, model) => ipcRenderer.invoke('chat:load', msgs, model),
   gitStatus: (cwd) => ipcRenderer.invoke('git:status', cwd),
   gitDiff: (cwd) => ipcRenderer.invoke('git:diff', cwd),
+  gitGraph: (cwd) => ipcRenderer.invoke('git:graph', cwd),
   gitCommit: (cwd, message) => ipcRenderer.invoke('git:commit', cwd, message),
   memoryGet: () => ipcRenderer.invoke('memory:get'),
   usageGet: () => ipcRenderer.invoke('usage:get'),

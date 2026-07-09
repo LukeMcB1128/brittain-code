@@ -860,6 +860,7 @@ const SLASH_HELP = [
   '/compact — summarize the conversation to free up context',
   '/diff — show the git diff for the working directory',
   '/commit <message> — stage all changes and commit',
+  '/graph — show a visual tree of the git commit history',
   '/loop [n] <goal> — work toward a goal for up to n iterations (default 8); a verifier subagent judges completion after each pass',
   '/model <for name> — switch model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
@@ -898,6 +899,13 @@ async function handleSlash(raw) {
 
     case 'diff':
       return showDiff();
+
+    case 'graph': {
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      const res = await window.api.gitGraph(cwd);
+      if (!res.ok) return addError(res.error);
+      return showOverlay('GIT GRAPH — ' + cwd, res.graph);
+    }
 
     case 'loop': {
       if (busy) return;

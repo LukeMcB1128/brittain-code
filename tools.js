@@ -42,12 +42,13 @@ function truncate(s) {
   return s.slice(0, MAX_TOOL_OUTPUT) + `\n...[truncated, ${s.length} chars total]`;
 }
 
-function syntaxCheckNote(filePath) {
-  if (!/\.(js|mjs|cjs)$/.test(filePath)) return Promise.resolve('');
+function syntaxCheck(filePath) {
+  if (!/\.(js|mjs|cjs)$/.test(filePath)) return Promise.resolve({ ok: true });
   return new Promise((resolve) => {
-    execFile('node', ['--check', filePath], { timeout: 10_000 }, (err, _out, stderr) => {
-      if (!err) return resolve('\nSyntax check: OK');
-      resolve('\nSYNTAX CHECK FAILED - you broke this file, fix it before anything else:\n' + String(stderr).slice(0, 600));
+    execFile('node', ['--check', filePath], { timeout: 10_000 }, (err, stdout, stderr) => {
+      if (!err) return resolve({ ok: true });
+      const msg = (String(stderr) + String(stdout)).trim().slice(0, 600) || '(no details)';
+      resolve({ ok: false, msg });
     });
   });
 }
@@ -436,6 +437,17 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'get_git_graph',
+      description: 'Show a visual tree of the git commit history.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'calculate_file_hash',
       description: 'Calculate the hash of a file using the specified algorithm.',
       parameters: {
@@ -567,6 +579,9 @@ const RISKY_TOOLS = new Set([
 
 async function executeTool(name, args, cwd) {
   switch (name) {
+    case 'get_git_graph': {
+      return gitRun(['log', '--graph', '--oneline', '--all', '--no-color'], cwd).then((res) => (res.ok ? truncate(res.out) : `Error: ${res.err}`));
+    }
     case 'read_file': {
       const p = resolveInside(cwd, args.path);
       const stat = fs.statSync(p);
@@ -577,7 +592,8 @@ async function executeTool(name, args, cwd) {
       const p = resolveInside(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, args.content ?? '', 'utf8');
-      return `Wrote ${(args.content ?? '').length} chars to ${p}` + await syntaxCheckNote(p);
+      const wCheck = await syntaxCheck(p);
+      return `Wrote ${(args.content ?? '').length} chars to ${p}` + (wCheck.ok ? '\nSyntax check: OK' : `\nSYNTAX CHECK FAILED:\n${wCheck.msg}`);
     }
     case 'list_directory': {
       const p = resolveInside(cwd, args.path);
@@ -624,7 +640,8 @@ async function executeTool(name, args, cwd) {
       const p = resolveInside(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.appendFileSync(p, args.content ?? '', 'utf8');
-      return `Appended ${(args.content ?? '').length} chars to ${p}` + await syntaxCheckNote(p);
+      const aCheck = await syntaxCheck(p);
+      return `Appended ${(args.content ?? '').length} chars to ${p}` + (aCheck.ok ? '\nSyntax check: OK' : `\nSYNTAX CHECK FAILED:\n${aCheck.msg}`);
     }
     case 'create_directory': {
       const p = resolveInside(cwd, args.path);
@@ -699,8 +716,17 @@ async function executeTool(name, args, cwd) {
       const count = content.split(oldS).length - 1;
       if (count === 0) return `Error: old_string not found in ${p}. Read the file and copy the exact text, including whitespace and indentation.`;
       if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
-      fs.writeFileSync(p, content.split(oldS).join(newS), 'utf8');
-      return `Edited ${p}: replaced ${count} occurrence(s).` + await syntaxCheckNote(p);
+      const updated = content.split(oldS).join(newS);
+      const tmp = p + '.~check.js';
+      try {
+        fs.writeFileSync(tmp, updated, 'utf8');
+        const check = await syntaxCheck(tmp);
+        if (!check.ok) return `Edit rejected — syntax error in new_string (original file unchanged):\n${check.msg}\nFix your new_string and try again.`;
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
+      fs.writeFileSync(p, updated, 'utf8');
+      return `Edited ${p}: replaced ${count} occurrence(s).\nSyntax check: OK`;
     }
     case 'replace_in_file': {
       const p = resolveInside(cwd, args.path);
@@ -725,7 +751,8 @@ async function executeTool(name, args, cwd) {
         return `Error: this replacement would grow the file from ${content.length} to ${updated.length} chars — refusing. The pattern is matching far more than intended.`;
       }
       fs.writeFileSync(p, updated, 'utf8');
-      return `Replaced ${count} occurrence(s) in ${p}` + await syntaxCheckNote(p);
+      const rCheck = await syntaxCheck(p);
+      return `Replaced ${count} occurrence(s) in ${p}` + (rCheck.ok ? '\nSyntax check: OK' : `\nSYNTAX CHECK FAILED:\n${rCheck.msg}`);
     }
     case 'count_lines': {
       const p = resolveInside(cwd, args.path);
