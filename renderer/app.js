@@ -371,6 +371,9 @@ async function send() {
   if ((!text && !pendingImages.length) || busy) return;
   if (text.startsWith('/')) {
     input.value = '';
+    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent')) {
+      hideStartupMessage();
+    }
     return handleSlash(text);
   }
   if (!modelSelect.value) return addError('No model selected — is Ollama running?');
