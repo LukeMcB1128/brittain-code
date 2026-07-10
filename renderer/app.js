@@ -732,15 +732,16 @@ function shortArgs(name, args) {
 // ---------- approvals ----------
 let pendingApprovalId = null;
 
-window.api.onApprovalRequest(({ id, name, args, network, sensitive }) => {
+window.api.onApprovalRequest(({ id, name, args, network, sensitive, destructive }) => {
   pendingApprovalId = id;
-  $('approval-tool').textContent = (network ? 'ONLINE REQUEST — ' : sensitive ? 'SENSITIVE READ — ' : 'APPROVE ') + name.toUpperCase() + '?';
+  $('approval-tool').textContent = (network ? 'ONLINE REQUEST — ' : sensitive ? 'SENSITIVE READ — ' : destructive ? 'DESTRUCTIVE — ' : 'APPROVE ') + name.toUpperCase() + '?';
   $('approval-detail').textContent =
     name === 'web_search' ? `This query will be sent to DuckDuckGo:\n\n${args.query}\n\nDomains: ${(args.allowed_domains || []).join(', ') || '(unrestricted)'}`
     : name === 'web_fetch' ? `This public URL will be requested and its text returned to the model:\n\n${args.url}`
     : name === 'get_environment_variables' ? `${args.reveal ? 'REVEAL RAW VALUE' : 'Inspect redacted metadata'}: ${args.name}\n\nRaw values, when revealed, are retained in chat history.`
     : name === 'list_processes' ? `Process command lines may contain credentials.\n\nFilter: ${args.pattern || '(all processes)'}`
     : name === 'read_file' && sensitive ? `This file may contain credentials or private key material. Its contents will be retained in chat history.\n\n${args.path}`
+    : name === 'revert_to_last_commit' ? `Restore ${args.path || 'the entire working tree'} to HEAD.\n\nTracked changes will be saved in a recoverable named Git stash first.\nUntracked files: ${args.include_untracked ? 'INCLUDED — they will leave the working tree and enter the stash' : 'preserved'}\nIgnored files and submodule contents: preserved`
     : name === 'run_command' ? args.command
     : name === 'write_file' || name === 'append_file' ? `${args.path}\n\n${(args.content || '').slice(0, 600)}`
     : name === 'replace_in_file' ? `${args.path}\n\nfind: ${args.pattern}\nreplace: ${args.replacement}`
@@ -1062,7 +1063,7 @@ async function handleSlash(raw) {
     case 'tools': {
       const res = await window.api.toolsList();
       if (!res.ok) return addError('Failed to fetch tools: ' + res.error);
-      const toolLines = res.tools.map(t => (t.isNetwork ? '[NET] ' : t.isSensitive ? '[SEC] ' : t.isRisky ? '[!]   ' : '      ') + t.name);
+      const toolLines = res.tools.map(t => (t.isNetwork ? '[NET] ' : t.isSensitive ? '[SEC] ' : t.isDestructive ? '[DEST]' : t.isRisky ? '[!]   ' : '      ') + ' ' + t.name);
       return showOverlay('AVAILABLE TOOLS', toolLines.join('\n'));
     }
 

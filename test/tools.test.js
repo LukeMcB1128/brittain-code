@@ -10,6 +10,7 @@ const {
   RISKY_TOOLS,
   NETWORK_TOOLS,
   SENSITIVE_TOOLS,
+  DESTRUCTIVE_TOOLS,
   SUBAGENT_TOOL_NAMES,
   executeTool,
   memoryPath,
@@ -37,6 +38,7 @@ test('tool schemas have unique names and matching execution cases', () => {
   }
   for (const name of implemented) assert.equal(names.includes(name), true, `${name} has an implementation but no schema`);
   for (const name of NETWORK_TOOLS) assert.equal(RISKY_TOOLS.has(name), true, `${name} must also be risky`);
+  for (const name of DESTRUCTIVE_TOOLS) assert.equal(RISKY_TOOLS.has(name), true, `${name} must also be risky`);
   for (const name of SUBAGENT_TOOL_NAMES) {
     assert.equal(RISKY_TOOLS.has(name), false, `${name} must remain read-only for subagents`);
     assert.equal(NETWORK_TOOLS.has(name), false, `${name} must remain offline for subagents`);
@@ -80,6 +82,64 @@ test('git_status and read_git_diff distinguish staged and unstaged changes', asy
   assert.match(all, /=== STAGED ===/);
   assert.match(all, /=== UNSTAGED ===/);
   assert.doesNotMatch(all, /staged content/);
+});
+
+test('revert_to_last_commit previews by default and creates a recoverable stash on execution', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const runGit = (...args) => require('node:child_process').execFileSync('git', args, { cwd, encoding: 'utf8' });
+  runGit('init', '--quiet');
+  runGit('config', 'user.name', 'Brittain Code Test');
+  runGit('config', 'user.email', 'test@example.invalid');
+  fs.writeFileSync(path.join(cwd, 'tracked.txt'), 'committed\n');
+  runGit('add', 'tracked.txt');
+  runGit('commit', '--quiet', '-m', 'baseline');
+  fs.writeFileSync(path.join(cwd, 'tracked.txt'), 'changed\n');
+  fs.writeFileSync(path.join(cwd, 'untracked.txt'), 'untracked\n');
+
+  const preview = await executeTool('revert_to_last_commit', {}, cwd);
+  assert.match(preview, /PREVIEW ONLY/);
+  assert.equal(fs.readFileSync(path.join(cwd, 'tracked.txt'), 'utf8'), 'changed\n');
+  assert.equal(fs.existsSync(path.join(cwd, 'untracked.txt')), true);
+
+  const reverted = JSON.parse(await executeTool('revert_to_last_commit', {
+    dry_run: false,
+    include_untracked: true,
+  }, cwd));
+  assert.equal(fs.readFileSync(path.join(cwd, 'tracked.txt'), 'utf8'), 'committed\n');
+  assert.equal(fs.existsSync(path.join(cwd, 'untracked.txt')), false);
+  assert.match(reverted.recovery_stash, /Brittain Code revert backup/);
+  assert.match(reverted.recovery_command, /^git stash apply --index stash@\{0\}$/);
+  assert.equal(DESTRUCTIVE_TOOLS.has('revert_to_last_commit'), true);
+
+  runGit('stash', 'apply', '--index', 'stash@{0}');
+  assert.equal(fs.readFileSync(path.join(cwd, 'tracked.txt'), 'utf8'), 'changed\n');
+  assert.equal(fs.readFileSync(path.join(cwd, 'untracked.txt'), 'utf8'), 'untracked\n');
+});
+
+test('revert_to_last_commit can limit the recovery stash and revert to one path', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const runGit = (...args) => require('node:child_process').execFileSync('git', args, { cwd, encoding: 'utf8' });
+  runGit('init', '--quiet');
+  runGit('config', 'user.name', 'Brittain Code Test');
+  runGit('config', 'user.email', 'test@example.invalid');
+  fs.writeFileSync(path.join(cwd, 'first.txt'), 'first committed\n');
+  fs.writeFileSync(path.join(cwd, 'second.txt'), 'second committed\n');
+  runGit('add', '.');
+  runGit('commit', '--quiet', '-m', 'baseline');
+  fs.writeFileSync(path.join(cwd, 'first.txt'), 'first changed\n');
+  fs.writeFileSync(path.join(cwd, 'second.txt'), 'second changed\n');
+
+  const result = JSON.parse(await executeTool('revert_to_last_commit', {
+    dry_run: false,
+    path: 'first.txt',
+  }, cwd));
+  assert.equal(result.scope, 'first.txt');
+  assert.equal(fs.readFileSync(path.join(cwd, 'first.txt'), 'utf8'), 'first committed\n');
+  assert.equal(fs.readFileSync(path.join(cwd, 'second.txt'), 'utf8'), 'second changed\n');
+  assert.equal(result.remaining_status, '(clean in selected scope)');
+  assert.match(runGit('status', '--short'), /second\.txt/);
 });
 
 test('run_project_check lists and executes only declared verification scripts', async (t) => {

@@ -4,7 +4,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses } = require('./tools');
+const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses } = require('./tools');
 
 const OLLAMA = 'http://127.0.0.1:11434';
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
@@ -429,6 +429,17 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
               : 'The user denied this online request. Do not retry it unless the user explicitly changes direction.';
             win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(online request denied by user)', denied: !approved });
           }
+        } else if (DESTRUCTIVE_TOOLS.has(name)) {
+          if (args.dry_run !== false) {
+            result = await safeExecute(name, args, cwd);
+            win.webContents.send('stream:toolresult', { name, result: preview(result) });
+          } else {
+            const approved = await requestApproval({ name, args, destructive: true });
+            result = approved
+              ? await safeExecute(name, args, cwd)
+              : 'The user denied this destructive operation. Do not retry it unless the user explicitly asks.';
+            win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(destructive operation denied by user)', denied: !approved });
+          }
         } else if (isSensitiveToolCall(name, args)) {
           const approved = await requestApproval({ name, args, sensitive: true });
           result = approved
@@ -503,6 +514,7 @@ ipcMain.handle('tools:list', async () => {
       isRisky: RISKY_TOOLS.has(t.function.name),
       isNetwork: NETWORK_TOOLS.has(t.function.name),
       isSensitive: SENSITIVE_TOOLS.has(t.function.name),
+      isDestructive: DESTRUCTIVE_TOOLS.has(t.function.name),
     }))
   };
 });

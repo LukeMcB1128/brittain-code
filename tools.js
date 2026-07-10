@@ -862,6 +862,21 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'revert_to_last_commit',
+      description: 'DESTRUCTIVE: Preview or restore working-tree changes to HEAD (the last commit). Defaults to preview only. Execution first creates a named Git stash as a recoverable safety backup, then leaves affected tracked files at HEAD. Untracked files are included only when explicitly requested; ignored files and changes inside submodules are never touched. Only execute when the user explicitly requested discarding/reverting changes.',
+      parameters: {
+        type: 'object',
+        properties: {
+          dry_run: { type: 'boolean', description: 'Preview affected paths without changing anything (default: true). Set exactly false to execute.' },
+          include_untracked: { type: 'boolean', description: 'Also stash and remove untracked files in scope (default: false). Ignored files are always preserved.' },
+          path: { type: 'string', description: 'Optional project-relative file or directory to revert; omit to revert the entire repository working tree.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'read_git_diff',
       description: 'Show Git changes. Defaults to unstaged changes; mode "staged" shows the index and mode "all" shows staged and unstaged sections. Untracked filenames are reported by git_status, but their contents are not part of a Git diff.',
       parameters: {
@@ -1050,6 +1065,7 @@ const TOOL_DEFS = [
 
 const NETWORK_TOOLS = new Set(['web_search', 'web_fetch']);
 const SENSITIVE_TOOLS = new Set(['get_environment_variables', 'list_processes']);
+const DESTRUCTIVE_TOOLS = new Set(['revert_to_last_commit']);
 
 const RISKY_TOOLS = new Set([
   'write_file',
@@ -1067,6 +1083,7 @@ const RISKY_TOOLS = new Set([
   'edit_file',
   'edit_files',
   'create_git_branch',
+  'revert_to_last_commit',
   'get_environment_variables',
   'list_processes',
   'initiate_research_session',
@@ -1693,6 +1710,66 @@ async function executeTool(name, args, cwd) {
       return gitRun(['status', '--short', '--branch', '--untracked-files=all'], cwd)
         .then((res) => (res.ok ? truncate(res.out || '(working tree clean)') : `Error: ${res.err}`));
     }
+    case 'revert_to_last_commit': {
+      const head = await gitRun(['rev-parse', '--verify', 'HEAD'], cwd);
+      if (!head.ok) return `Error: cannot revert because this repository has no commit at HEAD: ${head.err}`;
+      let pathArgs = [];
+      let scope = 'entire working tree';
+      if (args.path) {
+        let absolutePath;
+        try { absolutePath = resolveInside(cwd, args.path); }
+        catch (err) { return `Error: ${err.message}`; }
+        const relativePath = path.relative(fs.realpathSync(cwd), absolutePath) || '.';
+        pathArgs = ['--', relativePath];
+        scope = relativePath;
+      }
+      const statusArgs = ['status', '--short', '--untracked-files=all', ...pathArgs];
+      const before = await gitRun(statusArgs, cwd);
+      if (!before.ok) return `Error reading Git status: ${before.err}`;
+      if (!before.out.trim()) return `Nothing to revert in ${scope}; the selected scope already matches HEAD.`;
+      const includeUntracked = args.include_untracked === true;
+      if (args.dry_run !== false) {
+        return truncate([
+          'PREVIEW ONLY — no files changed.',
+          `Scope: ${scope}`,
+          `Target commit: ${head.out.trim()}`,
+          `Untracked files: ${includeUntracked ? 'will be included in the recovery stash and removed from the working tree' : 'will be preserved'}`,
+          'Ignored files and changes inside submodules will be preserved.',
+          '',
+          before.out.trimEnd(),
+          '',
+          'To execute, call this tool again with dry_run: false using the same path and include_untracked setting. Execution always requires explicit user approval.',
+        ].join('\n'));
+      }
+
+      const previousStash = await gitRun(['stash', 'list', '-1', '--format=%H'], cwd);
+      const message = `Brittain Code revert backup ${new Date().toISOString()}`;
+      const stashArgs = ['stash', 'push'];
+      if (includeUntracked) stashArgs.push('--include-untracked');
+      stashArgs.push('--message', message, ...pathArgs);
+      const stashed = await gitRun(stashArgs, cwd);
+      if (!stashed.ok) return `Error: Git could not create the recovery stash; no revert was completed: ${stashed.err}`;
+
+      const latestStash = await gitRun(['stash', 'list', '-1', '--format=%gd%x09%H%x09%s'], cwd);
+      if (!latestStash.ok) return `Error: revert may have completed, but the recovery stash could not be identified: ${latestStash.err}`;
+      const stashLine = latestStash.out.trim();
+      const stashParts = stashLine.split('\t');
+      const previousHash = previousStash.ok ? previousStash.out.trim() : '';
+      if (!stashLine || stashParts[1] === previousHash) {
+        return `No tracked changes were reverted in ${scope}. ${includeUntracked ? 'Git did not create a stash.' : 'Only untracked files may remain; rerun with include_untracked: true if explicitly desired.'}`;
+      }
+      const after = await gitRun(statusArgs, cwd);
+      const stashRef = stashParts[0] || 'stash@{0}';
+      return truncate(JSON.stringify({
+        reverted_to: head.out.trim(),
+        scope,
+        included_untracked: includeUntracked,
+        recovery_stash: stashLine,
+        recovery_command: `git stash apply --index ${stashRef}`,
+        remaining_status: after.ok ? (after.out.trim() || '(clean in selected scope)') : `status unavailable: ${after.err}`,
+        preserved: ['ignored files', 'changes inside submodules'],
+      }, null, 2));
+    }
     case 'read_git_diff': {
       const mode = args.mode || 'unstaged';
       if (!['unstaged', 'staged', 'all'].includes(mode)) return `Error: invalid diff mode "${mode}".`;
@@ -1997,6 +2074,7 @@ module.exports = {
   SUBAGENT_TOOL_NAMES,
   NETWORK_TOOLS,
   SENSITIVE_TOOLS,
+  DESTRUCTIVE_TOOLS,
   executeTool,
   gitRun,
   memoryPath,
