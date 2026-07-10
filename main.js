@@ -601,6 +601,13 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
   const info = (t) => win.webContents.send('stream:info', t);
   const state = (t) => win.webContents.send('stream:state', t);
 
+  // Drifting models (seen with devstral) obey the system prompt early, then
+  // revert to trained habits as tool results bury it thousands of tokens back.
+  // Re-inject the critical rules at the END of context on every iteration.
+  const driftReminder = /devstral/i.test(model)
+    ? '\n\nREMINDER (rules from your system prompt still apply): act ONLY via tool calls — write_file/edit_file/read_file/run_command. A markdown code block in your reply does nothing. Never end your turn by narrating what you will do; do it with a tool call.'
+    : '';
+
   try {
     let feedback = '';
     for (let i = 1; i <= max; i++) {
@@ -610,9 +617,10 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
 
       conversation.push({
         role: 'user',
-        content: i === 1
+        content: (i === 1
           ? `GOAL: ${goal}\n\nWork toward this goal. Use your tools, verify your work, and summarize what you accomplished when you stop.`
-          : `GOAL: ${goal}\n\nVerifier feedback on your previous iteration:\n${feedback}\n\nAddress the feedback and continue toward the goal. Summarize what you accomplished when you stop.`,
+          : `GOAL: ${goal}\n\nVerifier feedback on your previous iteration:\n${feedback}\n\nAddress the feedback and continue toward the goal. Summarize what you accomplished when you stop.`
+        ) + driftReminder,
       });
 
       const { lastContent, lastStats, contextLength } = await runAgentTurn(model, cwd, autoApprove, think, subModel);
@@ -861,7 +869,13 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     }
 
     conversation = [
-      { role: 'user', content: 'This conversation was compacted to save context. Continue from the summary below.' },
+      {
+        role: 'user',
+        content: 'This conversation was compacted to save context. Continue from the summary below.'
+          + (/devstral/i.test(model)
+            ? ' REMINDER: act only via tool calls (write_file/edit_file/read_file/run_command) — markdown code blocks in replies do nothing.'
+            : ''),
+      },
       { role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary },
     ];
 
