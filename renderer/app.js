@@ -10,6 +10,7 @@ const autoApprove = $('auto-approve');
 const chatList = $('chat-list');
 const sidebar = $('sidebar');
 const thinkToggle = $('think-toggle');
+const onlineResearchToggle = $('online-research');
 
 let cwd = null;
 let busy = false;
@@ -62,6 +63,7 @@ let currentChatId = null;
 
   thinkToggle.checked = localStorage.getItem('think') === '1';
   autoApprove.checked = localStorage.getItem('autoApprove') === '1';
+  onlineResearchToggle.checked = false; // privacy boundary: never restore online access implicitly
 
   // One-time migration: chats used to live in localStorage; move them to disk.
   try {
@@ -86,6 +88,13 @@ let currentChatId = null;
 
 thinkToggle.addEventListener('change', () => localStorage.setItem('think', thinkToggle.checked ? '1' : '0'));
 autoApprove.addEventListener('change', () => localStorage.setItem('autoApprove', autoApprove.checked ? '1' : '0'));
+onlineResearchToggle.addEventListener('change', () => {
+  if (!onlineResearchToggle.checked) return;
+  const approved = confirm(
+    'Enable ONLINE RESEARCH for this session?\n\nSearch queries and requested page URLs will leave this Mac. Every web_search and web_fetch call will still require explicit approval, even when AUTO-APPROVE is on.'
+  );
+  if (!approved) onlineResearchToggle.checked = false;
+});
 
 modelSelect.addEventListener('change', () => localStorage.setItem('model', modelSelect.value));
 
@@ -233,6 +242,7 @@ async function loadChat(chatId) {
   const res = await window.api.historyLoad(chatId);
   if (!res.ok) return addError('Could not load chat: ' + res.error);
   const saved = res.chat;
+  onlineResearchToggle.checked = false; // loading history must never restore network access
 
   // Push the stored conversation into the main process so the model continues from it.
   const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value);
@@ -415,6 +425,7 @@ async function send() {
     text,
     cwd,
     autoApprove: autoApprove.checked,
+    onlineResearch: onlineResearchToggle.checked,
     think: thinkToggle.checked,
     images,
     imageTypes,
@@ -712,6 +723,8 @@ function shortArgs(name, args) {
   if (args.source) return args.source + ' → ' + args.destination;
   if (args.path) return args.path;
   if (args.command) return args.command.length > 60 ? args.command.slice(0, 60) + '…' : args.command;
+  if (args.query) return args.query.length > 60 ? args.query.slice(0, 60) + '…' : args.query;
+  if (args.url) return args.url.length > 60 ? args.url.slice(0, 60) + '…' : args.url;
   if (args.pattern) return '"' + args.pattern + '"';
   return '';
 }
@@ -719,11 +732,16 @@ function shortArgs(name, args) {
 // ---------- approvals ----------
 let pendingApprovalId = null;
 
-window.api.onApprovalRequest(({ id, name, args }) => {
+window.api.onApprovalRequest(({ id, name, args, network, sensitive }) => {
   pendingApprovalId = id;
-  $('approval-tool').textContent = 'APPROVE ' + name.toUpperCase() + '?';
+  $('approval-tool').textContent = (network ? 'ONLINE REQUEST — ' : sensitive ? 'SENSITIVE READ — ' : 'APPROVE ') + name.toUpperCase() + '?';
   $('approval-detail').textContent =
-    name === 'run_command' ? args.command
+    name === 'web_search' ? `This query will be sent to DuckDuckGo:\n\n${args.query}\n\nDomains: ${(args.allowed_domains || []).join(', ') || '(unrestricted)'}`
+    : name === 'web_fetch' ? `This public URL will be requested and its text returned to the model:\n\n${args.url}`
+    : name === 'get_environment_variables' ? `${args.reveal ? 'REVEAL RAW VALUE' : 'Inspect redacted metadata'}: ${args.name}\n\nRaw values, when revealed, are retained in chat history.`
+    : name === 'list_processes' ? `Process command lines may contain credentials.\n\nFilter: ${args.pattern || '(all processes)'}`
+    : name === 'read_file' && sensitive ? `This file may contain credentials or private key material. Its contents will be retained in chat history.\n\n${args.path}`
+    : name === 'run_command' ? args.command
     : name === 'write_file' || name === 'append_file' ? `${args.path}\n\n${(args.content || '').slice(0, 600)}`
     : name === 'replace_in_file' ? `${args.path}\n\nfind: ${args.pattern}\nreplace: ${args.replacement}`
     : name === 'edit_file' ? `${args.path}\n\n- ${String(args.old_string || '').slice(0, 300)}\n+ ${String(args.new_string || '').slice(0, 300)}`
@@ -875,6 +893,7 @@ async function newSession() {
   $('ctx-fill').style.width = '0%';
   setState('idle');
   currentChatId = null;
+  onlineResearchToggle.checked = false;
   loadChatHistory(); // clear active highlight
   showStartupMessage();
 }
@@ -959,6 +978,7 @@ async function handleSlash(raw) {
         goal,
         cwd,
         autoApprove: autoApprove.checked,
+        onlineResearch: onlineResearchToggle.checked,
         think: thinkToggle.checked,
         maxIterations: iterations,
       });
@@ -1042,7 +1062,7 @@ async function handleSlash(raw) {
     case 'tools': {
       const res = await window.api.toolsList();
       if (!res.ok) return addError('Failed to fetch tools: ' + res.error);
-      const toolLines = res.tools.map(t => (t.isRisky ? '[!] ' : '    ') + t.name);
+      const toolLines = res.tools.map(t => (t.isNetwork ? '[NET] ' : t.isSensitive ? '[SEC] ' : t.isRisky ? '[!]   ' : '      ') + t.name);
       return showOverlay('AVAILABLE TOOLS', toolLines.join('\n'));
     }
 

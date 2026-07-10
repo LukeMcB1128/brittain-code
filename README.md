@@ -1,6 +1,6 @@
 # Brittain Code
 
-A fully offline coding agent desktop app, in the style of Claude Code / Codex, powered by your local Ollama models. No internet, no API keys, no backend server — the app talks directly to Ollama at `localhost:11434`.
+A local-first coding agent desktop app, in the style of Claude Code / Codex, powered by your local Ollama models. Inference, chats, project memory, and ordinary tools stay on your Mac; optional online research is disabled by default. No backend server or model API key is required — the app talks directly to Ollama at `localhost:11434`.
 
 ## Run it
 
@@ -31,13 +31,28 @@ To give it a custom icon: put an `icon.icns` in a `build/` folder, add `"icon": 
 2. Click **DIR** and choose the project folder the agent should work in.
 3. Type a task and hit Enter.
 
-The agent can read files, write files, list directories, search (grep), and run shell commands. File tools are confined to the selected project directory. By default it asks before **writes, shell commands, and sensitive environment reads** (approve/deny bar appears above the input). Flip **AUTO-APPROVE** in the top bar to let it run unattended.
+The agent can inspect and edit files, search source and locally installed documentation, run declared project checks, inspect Git state, manage local development processes, verify loopback HTTP servers, and run shell commands. File tools are confined to the selected project directory. It asks before writes, commands, and other risky operations. **AUTO-APPROVE** can make ordinary risky tools unattended, but online requests and sensitive reads always require explicit approval.
+
+Coordinated edits can use an atomic multi-file batch: every exact match and syntax check must pass before target files are replaced. Managed background processes receive opaque IDs, keep bounded logs, and are stopped when the app quits.
 
 The status bar shows: current state, context usage (tokens used vs the model's context window, with a fill bar), elapsed time for the current run, and total tool calls.
 
 **NEW SESSION** clears the conversation (context resets to zero).
 
-Chats are saved automatically as individual JSON files in `~/Library/Application Support/Brittain Code/chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar groups chats by the project folder they were worked in, and loading a chat restores its model, directory, and toggle states.
+Chats are saved automatically as individual JSON files in `~/Library/Application Support/Brittain Code/chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar groups chats by project folder. Loading a chat restores its model, directory, THINK, and AUTO-APPROVE states, but never restores ONLINE RESEARCH.
+
+## Online research
+
+**ONLINE RESEARCH** is an explicit session-only switch. Enabling it warns that search queries and requested URLs leave the Mac. It exposes two additional model tools:
+
+- `web_search` sends a redacted, length-limited query to DuckDuckGo's no-JavaScript HTML search. Optional domain filters and result caps are supported.
+- `web_fetch` retrieves a public HTTPS page as sanitized plain text. It rejects local/private/reserved destinations and URL credentials, validates every redirect, refuses non-text content, strips scripts and styles, and caps both downloads and returned text.
+
+Every online tool call shows its exact query or URL and asks for approval, even if AUTO-APPROVE is enabled. Results are marked as untrusted external content in both the tool output and model instructions. The no-key HTML search provider is best-effort and may occasionally return a challenge page or change its markup.
+
+The inference model remains local while online research is enabled, but the session is no longer fully offline. Shell commands are normal host processes and may also use installed network-capable programs when the user approves them; Brittain Code is not an operating-system network sandbox.
+
+Sensitive file reads (`.env`, private-key formats, credential files), process listings, and environment inspection also bypass AUTO-APPROVE. Environment values are redacted by default; explicitly revealed values and all other tool results become part of persisted chat history.
 
 ## Slash commands
 
@@ -56,6 +71,7 @@ Type these in the message box:
 | `/usage` | Show context remaining and token spend across main agent, subagents, and verifier |
 | `/memory` | View what the agent has remembered for the selected project |
 | `/export` | Save the chat as a markdown file |
+| `/tools` | List available tools and their risky, sensitive, or network classification |
 
 ## Git, project instructions, memory, images
 
@@ -70,10 +86,10 @@ Type these in the message box:
 | File | What it does |
 |---|---|
 | `main.js` | The agent loop, system prompt, Ollama streaming, persistence, subagents, and application IPC handlers. |
-| `tools.js` | Tool schemas (`TOOL_DEFS`), implementations (`executeTool`), approval classification (`RISKY_TOOLS`), and tool helpers. Add or change tools here. |
+| `tools.js` | Tool schemas, implementations, managed processes, network guards, and risky/network/sensitive approval classifications. Add or change tools here. |
 | `renderer/app.js` | UI behavior: sending, streaming display, timers, approval buttons. |
 | `renderer/style.css` | All styling. Colors are CSS variables at the top. |
 | `renderer/index.html` | The layout skeleton. |
 | `preload.js` | The IPC bridge — only touch when adding a new message channel. |
 
-Important limits: `MAX_AGENT_STEPS` and `NUM_CTX_CAP` live near the top of `main.js`; `MAX_TOOL_OUTPUT` and `RISKY_TOOLS` live in `tools.js`.
+Important limits: `MAX_AGENT_STEPS` and `NUM_CTX_CAP` live near the top of `main.js`; output, process-log, network-download, and tool-specific caps live in `tools.js`.

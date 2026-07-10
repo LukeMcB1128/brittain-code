@@ -2,7 +2,8 @@
   "name": "brittain-code",
   "productName": "Brittain Code",
   "version": "1.0.0",
-  "description": "Offline coding agent for local Ollama models",
+  "description": "Local-first coding agent for Ollama with optional online research",
+  "author": "Luke Brittain",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

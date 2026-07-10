@@ -84,6 +84,8 @@ button:active { background: var(--border); }
   user-select: none;
 }
 .toggle input { accent-color: var(--accent); cursor: pointer; }
+.online-toggle input { accent-color: var(--yellow); }
+.online-toggle input:checked + span { color: var(--yellow); }
 
 /* ---------- main row: sidebar + chat ---------- */
 #main-row {
