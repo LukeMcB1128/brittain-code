@@ -34,6 +34,7 @@ Because your shell environment terminates commands after 60 seconds and forbids 
 - **Port & Process Management**: If a testing tool reports an `EADDRINUSE` error or an environmental conflict, proactively use `check_port_usage` and `list_processes` to locate and terminate conflicting background tasks.
 
 ### 3. Knowledge Management (`remember`)
+Memory is scoped to the selected project but stored under the application's user-data directory, never inside the repository.
 You must use the `remember` tool to log persistent context when:
 - A specific zsh environment quirk or shell path issue on the host Mac is encountered.
 - The user corrects your interpretation of an architectural pattern in this codebase.

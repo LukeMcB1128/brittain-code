@@ -39,6 +39,15 @@ let currentChatId = null;
     subModel = res.models.includes('qwen3:8b') ? 'qwen3:8b' : res.models[0] || '';
   }
 
+  // tag the dev channel (npm start) so it's never mistaken for the installed app
+  if (await window.api.isDev()) {
+    const tag = document.createElement('span');
+    tag.className = 'dev-tag';
+    tag.textContent = 'DEV';
+    tag.title = 'Running live source via npm start — not the installed app';
+    document.querySelector('.brand').appendChild(tag);
+  }
+
   const savedCwd = localStorage.getItem('cwd');
   if (savedCwd) setCwd(savedCwd);
 
@@ -167,7 +176,7 @@ async function saveChat() {
   if (!currentChatId || !firstUser) {
     // Use the new LLM-based title generation
     try {
-      const titleRes = await window.api.generateChatTitle(conversation);
+      const titleRes = await window.api.generateChatTitle(conversation, modelSelect.value);
       if (titleRes.ok && titleRes.title) {
         title = titleRes.title;
       } else {
@@ -276,7 +285,7 @@ function renderConversation(conversation) {
   chat.innerHTML = '';
   for (const msg of conversation) {
     if (msg.role === 'user') {
-      const imgs = (msg.images || []).map((b) => 'data:image/png;base64,' + b);
+      const imgs = (msg.images || []).map((b, i) => `data:${msg.imageTypes?.[i] || 'image/png'};base64,${b}`);
       addMessage('user', msg.content || (imgs.length ? '(image)' : ''), imgs);
     } else if (msg.role === 'assistant') {
       if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
@@ -371,6 +380,9 @@ async function send() {
   if ((!text && !pendingImages.length) || busy) return;
   if (text.startsWith('/')) {
     input.value = '';
+    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent')) {
+      hideStartupMessage();
+    }
     return handleSlash(text);
   }
   if (!modelSelect.value) return addError('No model selected — is Ollama running?');
@@ -378,6 +390,7 @@ async function send() {
 
   // Ollama wants raw base64 without the data-URL prefix
   const images = pendingImages.map((d) => d.split(',')[1]);
+  const imageTypes = pendingImages.map((d) => d.slice(5, d.indexOf(';')) || 'image/png');
   const shownImages = pendingImages;
   pendingImages = [];
   renderImagePreview();
@@ -395,13 +408,19 @@ async function send() {
     autoApprove: autoApprove.checked,
     think: thinkToggle.checked,
     images,
+    imageTypes,
   });
 
   if (!res.ok) addError(res.error);
-  endRun();
-  
-  // Save the chat after each message
-  saveChat();
+
+  // Save before accepting another send so two first-message saves cannot race.
+  try {
+    await saveChat();
+  } catch (err) {
+    addError('Failed to save chat: ' + (err.message || err));
+  } finally {
+    endRun();
+  }
 }
 
 function startRun() {
@@ -884,11 +903,16 @@ async function handleSlash(raw) {
     case 'compact': {
       if (busy) return;
       if (!modelSelect.value) return addError('No model selected.');
-      busy = true;
+      startRun();
       setState('compacting…');
-      const res = await window.api.compact({ model: modelSelect.value });
-      busy = false;
-      setState('idle');
+      let res;
+      try {
+        res = await window.api.compact({ model: modelSelect.value });
+      } catch (err) {
+        res = { ok: false, error: err.message || String(err) };
+      } finally {
+        endRun();
+      }
       if (!res.ok) return addError('Compact failed: ' + res.error);
       renderConversation(await window.api.getConversation());
       updateContextBar(res.approxTokens, res.contextLength);
@@ -989,8 +1013,14 @@ async function handleSlash(raw) {
     }
 
     case 'memory': {
-      const res = await window.api.memoryGet();
-      return showOverlay('MEMORY — ' + res.path, res.content.trim() || '(nothing remembered yet — the agent saves lessons here with the remember tool)');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      const res = await window.api.memoryGet(cwd);
+      if (!res.ok) return addError(res.error);
+      let content = res.content.trim() || '(nothing remembered for this project yet)';
+      if (res.legacyContent?.trim()) {
+        content += `\n\nLEGACY UNIVERSAL MEMORY (not injected)\n${res.legacyPath}\n\n${res.legacyContent.trim()}`;
+      }
+      return showOverlay('PROJECT MEMORY — ' + res.path, content);
     }
 
     case 'export': {

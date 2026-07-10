@@ -31,7 +31,7 @@ To give it a custom icon: put an `icon.icns` in a `build/` folder, add `"icon": 
 2. Click **DIR** and choose the project folder the agent should work in.
 3. Type a task and hit Enter.
 
-The agent can read files, write files, list directories, search (grep), and run shell commands. By default it asks before **writes and shell commands** (approve/deny bar appears above the input). Flip **AUTO-APPROVE** in the top bar to let it run unattended.
+The agent can read files, write files, list directories, search (grep), and run shell commands. File tools are confined to the selected project directory. By default it asks before **writes, shell commands, and sensitive environment reads** (approve/deny bar appears above the input). Flip **AUTO-APPROVE** in the top bar to let it run unattended.
 
 The status bar shows: current state, context usage (tokens used vs the model's context window, with a fill bar), elapsed time for the current run, and total tool calls.
 
@@ -54,14 +54,14 @@ Type these in the message box:
 | `/subagent [name]` | Show or set the subagent/verifier model (default qwen3:8b) |
 | `/loop [n] <goal>` | Work toward a goal for up to n iterations (default 8); a verifier subagent judges completion, and context auto-compacts between iterations. Turn AUTO-APPROVE on for unattended runs |
 | `/usage` | Show context remaining and token spend across main agent, subagents, and verifier |
-| `/memory` | View what the agent has remembered across chats |
+| `/memory` | View what the agent has remembered for the selected project |
 | `/export` | Save the chat as a markdown file |
 
 ## Git, project instructions, memory, images
 
 - When DIR is a git repo, the status bar shows the branch and changed-file count, with **DIFF** and **COMMIT** buttons. The diff refreshes after every agent run — review what it changed before committing.
 - Put a **`BRITTAIN.md`** in any project folder and its contents are added to the system prompt for chats in that folder (like Claude Code's CLAUDE.md) — conventions, build commands, things the agent should know.
-- The agent saves cross-chat lessons with its `remember` tool to `~/Library/Application Support/Brittain Code/memory.md` (view with `/memory`, edit the file directly to prune).
+- The agent saves cross-chat lessons per project under `~/Library/Application Support/Brittain Code/memory/projects/`. Nothing is written into the project itself. Use `/memory` to view the selected project's file and its exact location. The former universal `memory.md`, if present, remains visible as legacy data but is no longer injected into prompts.
 - Attach images with the **IMG** button or paste them into the text box (vision-capable models only).
 - **Esc** stops a running generation. Speed (tokens/sec) shows in the status bar after each response.
 
@@ -69,10 +69,11 @@ Type these in the message box:
 
 | File | What it does |
 |---|---|
-| `main.js` | Everything important: the agent loop, tool definitions (`TOOL_DEFS`), tool implementations (`executeTool`), the system prompt (`systemPrompt`), Ollama streaming. Add a new tool here in two places: a definition and a `case` in `executeTool`. |
+| `main.js` | The agent loop, system prompt, Ollama streaming, persistence, subagents, and application IPC handlers. |
+| `tools.js` | Tool schemas (`TOOL_DEFS`), implementations (`executeTool`), approval classification (`RISKY_TOOLS`), and tool helpers. Add or change tools here. |
 | `renderer/app.js` | UI behavior: sending, streaming display, timers, approval buttons. |
 | `renderer/style.css` | All styling. Colors are CSS variables at the top. |
 | `renderer/index.html` | The layout skeleton. |
 | `preload.js` | The IPC bridge — only touch when adding a new message channel. |
 
-Knobs at the top of `main.js`: `MAX_TOOL_OUTPUT` (chars of tool output the model sees), `MAX_AGENT_STEPS` (tool-loop cap), `RISKY_TOOLS` (which tools need approval).
+Important limits: `MAX_AGENT_STEPS` and `NUM_CTX_CAP` live near the top of `main.js`; `MAX_TOOL_OUTPUT` and `RISKY_TOOLS` live in `tools.js`.

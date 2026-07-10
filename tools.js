@@ -21,19 +21,76 @@ function initTools(dir) {
 }
 
 // ---------- persistent memory ----------
-// Plain-text lessons the agent saves with the `remember` tool; injected into
-// the system prompt of every chat. Lives at userData/memory.md — user-editable.
-function memoryPath() {
+// Plain-text lessons saved by `remember`, scoped to the selected project while
+// living outside its repository. The canonical project path is hashed so app
+// data stays filename-safe; projects.json preserves a human-readable mapping.
+function canonicalProjectPath(cwd) {
+  if (!cwd) throw new Error('A working directory is required for project memory.');
+  try { return fs.realpathSync(cwd); } catch { return path.resolve(cwd); }
+}
+
+function projectMemoryId(cwd) {
+  return crypto.createHash('sha256').update(canonicalProjectPath(cwd)).digest('hex');
+}
+
+function memoryDir() {
+  return path.join(userDataDir || os.tmpdir(), 'memory');
+}
+
+function memoryPath(cwd) {
+  return path.join(memoryDir(), 'projects', projectMemoryId(cwd) + '.md');
+}
+
+function legacyMemoryPath() {
   return path.join(userDataDir || os.tmpdir(), 'memory.md');
 }
 
-function readMemory() {
-  try { return fs.readFileSync(memoryPath(), 'utf8'); } catch { return ''; }
+function readMemory(cwd) {
+  if (!cwd) return '';
+  try { return fs.readFileSync(memoryPath(cwd), 'utf8'); } catch { return ''; }
+}
+
+function readLegacyMemory() {
+  try { return fs.readFileSync(legacyMemoryPath(), 'utf8'); } catch { return ''; }
+}
+
+function registerProjectMemory(cwd) {
+  const canonicalPath = canonicalProjectPath(cwd);
+  const id = projectMemoryId(cwd);
+  const dir = memoryDir();
+  const indexPath = path.join(dir, 'projects.json');
+  let index = {};
+  try { index = JSON.parse(fs.readFileSync(indexPath, 'utf8')); } catch {}
+  index[id] = {
+    path: canonicalPath,
+    name: path.basename(canonicalPath) || canonicalPath,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = indexPath + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(index, null, 2), 'utf8');
+  fs.renameSync(tmp, indexPath);
 }
 
 // ---------- tools ----------
 function resolveInside(cwd, p) {
-  const abs = path.resolve(cwd, p || '.');
+  const root = fs.realpathSync(cwd);
+  const abs = path.resolve(root, p || '.');
+  const isInside = (candidate) => {
+    const rel = path.relative(root, candidate);
+    return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
+  };
+  if (!isInside(abs)) throw new Error(`Path escapes the working directory: ${p}`);
+
+  // Lexical checks alone can be bypassed through a symlink inside the project.
+  // Resolve the nearest existing ancestor so new files are safe as well.
+  let existing = abs;
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  if (!isInside(fs.realpathSync(existing))) throw new Error(`Path escapes the working directory through a symlink: ${p}`);
   return abs;
 }
 
@@ -44,13 +101,57 @@ function truncate(s) {
 
 function syntaxCheck(filePath) {
   if (!/\.(js|mjs|cjs)$/.test(filePath)) return Promise.resolve({ ok: true });
-  return new Promise((resolve) => {
-    execFile('node', ['--check', filePath], { timeout: 10_000 }, (err, stdout, stderr) => {
-      if (!err) return resolve({ ok: true });
-      const msg = (String(stderr) + String(stdout)).trim().slice(0, 600) || '(no details)';
-      resolve({ ok: false, msg });
-    });
-  });
+  try {
+    const code = fs.readFileSync(filePath, 'utf8');
+    new (require('vm').Script)(code, { filename: filePath });
+    return Promise.resolve({ ok: true });
+  } catch (e) {
+    // vm.Script parses CommonJS only — ES-module syntax (import/export,
+    // top-level await) is valid code we just can't verify this way.
+    // Skip rather than falsely reject edits in ESM projects.
+    if (/Cannot use import statement outside a module|Unexpected token 'export'|await is only valid in async functions and the top level bodies of modules/.test(e.message)) {
+      return Promise.resolve({ ok: true, unverified: true });
+    }
+    return Promise.resolve({ ok: false, msg: e.message });
+  }
+}
+
+// ---------- degraded-model guards ----------
+// Long autonomous runs (see fablereview.md) showed models leaking their inner
+// monologue into code comments, truncating good files with shrinking rewrites,
+// and rewriting the same file in a futile loop. These heuristics put loud
+// warnings in the tool result — the one place a drifting model still reads.
+const SELF_TALK = /(?:\/\/|\/\*|#).{0,60}(?:I(?:'m| am) sorry|I apologi[sz]e|my bad|I messed up|Wait, I\b|let me fix|Let's just do this properly|oops|I will now)/i;
+
+function selfTalkNote(content) {
+  return SELF_TALK.test(String(content))
+    ? '\nWARNING: the content you wrote contains conversational self-talk in comments (e.g. "Wait, I…", "my bad"). You are leaking your reasoning into the file. Read the file back and remove every comment that is commentary about yourself rather than about the code.'
+    : '';
+}
+
+function shrinkageNote(oldLen, newLen) {
+  if (oldLen >= 500 && newLen < oldLen * 0.5) {
+    return `\nWARNING: this overwrite SHRANK the file from ${oldLen} to ${newLen} chars. If that was not deliberate you just truncated your own work — read the file NOW and restore what is missing before doing anything else.`;
+  }
+  return '';
+}
+
+// futility breaker: consecutive write_file calls to the same path with nothing
+// in between is the signature of a rewrite death-spiral.
+let lastWritePath = '';
+let consecutiveWrites = 0;
+function trackRewrite(name, p) {
+  if (name !== 'write_file') {
+    lastWritePath = '';
+    consecutiveWrites = 0;
+    return '';
+  }
+  if (p === lastWritePath) consecutiveWrites += 1;
+  else { lastWritePath = p; consecutiveWrites = 1; }
+  if (consecutiveWrites >= 3) {
+    return `\nSTOP: this is consecutive rewrite #${consecutiveWrites} of ${p} with no other action in between. Rewriting again will not help. Call read_file on it, state exactly what is wrong, then make ONE targeted change with edit_file.`;
+  }
+  return '';
 }
 
 // Recursively visit files, skipping .git and node_modules; unreadable dirs are skipped.
@@ -85,7 +186,7 @@ const TOOL_DEFS = [
       description: 'Read a text file. Returns the file contents.',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string', description: 'File path, relative to the working directory or absolute' } },
+        properties: { path: { type: 'string', description: 'File path relative to the working directory' } },
         required: ['path'],
       },
     },
@@ -189,7 +290,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'run_subagent',
-      description: 'Delegate a self-contained exploration or research task to a smaller, faster model. The subagent has read-only tools (read, search, analyze files, git history) plus research logging — it cannot edit files, run commands, or ask the user anything. It CANNOT see this conversation, so the task must contain every detail it needs. Returns the subagent\'s findings. Use it to explore unfamiliar code, locate definitions and usages, or gather evidence across many files without spending your own context.',
+      description: 'Delegate a self-contained exploration or research task to a smaller, faster model. The subagent has read-only tools (read, search, analyze files, git history) and cannot edit files, create research logs, run commands, or ask the user anything. It CANNOT see this conversation, so the task must contain every detail it needs. Returns the subagent\'s findings. Use it to explore unfamiliar code, locate definitions and usages, or gather evidence across many files without spending your own context.',
       parameters: {
         type: 'object',
         properties: {
@@ -204,7 +305,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'remember',
-      description: 'Save a short reusable lesson to persistent memory that will be available in all future chats. Use when the user corrects you, when you discover a project convention, or when you make a mistake worth avoiding next time. One concise sentence per fact.',
+      description: 'Save a short reusable lesson to persistent memory for the current project. It will be available in future chats using the same working directory. Use when the user corrects you, when you discover a project convention, or when you make a mistake worth avoiding next time. One concise sentence per fact.',
       parameters: {
         type: 'object',
         properties: {
@@ -387,12 +488,27 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'get_environment_variables',
-      description: 'Retrieve environment variables. Optionally filter by name.',
+      description: 'Retrieve one environment variable by exact name. Requires user approval because values may be sensitive.',
       parameters: {
         type: 'object',
         properties: {
-          name: { type: 'string', description: 'Name of the variable to retrieve. If omitted, returns all variables.' }
+          name: { type: 'string', description: 'Exact name of the variable to retrieve.' }
         },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'check_port_usage',
+      description: 'Check whether a local TCP port has a listening process.',
+      parameters: {
+        type: 'object',
+        properties: {
+          port: { type: 'number', description: 'TCP port number from 1 to 65535.' },
+        },
+        required: ['port'],
       },
     },
   },
@@ -544,7 +660,7 @@ const TOOL_DEFS = [
           observation: { type: 'string', description: 'The observation to record' },
           evidence_path: { type: 'string', description: 'Path to the file or evidence supporting this observation' },
         },
-        required: ['observation'],
+        required: ['observation', 'evidence_path'],
       },
     },
   },
@@ -552,7 +668,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'finalize_research',
-      description: 'Finalizes the current research session, adding a comphrensive summary to the active RESEARCH_LOG.md file.',
+      description: 'Finalizes the current research session, creating a comprehensive RESEARCH_REPORT.md.',
       parameters: {
         type: 'object',
         properties: {
@@ -575,9 +691,15 @@ const RISKY_TOOLS = new Set([
   'replace_in_file',
   'edit_file',
   'create_git_branch',
+  'get_environment_variables',
+  'initiate_research_session',
+  'record_observation',
+  'finalize_research',
 ]);
 
 async function executeTool(name, args, cwd) {
+  // futility tracking must see every call so any non-write action resets it
+  const futilityNote = trackRewrite(name, name === 'write_file' && args?.path ? resolveInside(cwd, args.path) : '');
   switch (name) {
     case 'get_git_graph': {
       return gitRun(['log', '--graph', '--oneline', '--all', '--no-color'], cwd).then((res) => (res.ok ? truncate(res.out) : `Error: ${res.err}`));
@@ -591,9 +713,22 @@ async function executeTool(name, args, cwd) {
     case 'write_file': {
       const p = resolveInside(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.writeFileSync(p, args.content ?? '', 'utf8');
-      const wCheck = await syntaxCheck(p);
-      return `Wrote ${(args.content ?? '').length} chars to ${p}` + (wCheck.ok ? '\nSyntax check: OK' : `\nSYNTAX CHECK FAILED:\n${wCheck.msg}`);
+      const content = args.content ?? '';
+      let oldLen = 0;
+      try { oldLen = fs.statSync(p).size; } catch {}
+      const tmp = p + '.~check' + path.extname(p);
+      try {
+        fs.writeFileSync(tmp, content, 'utf8');
+        const check = await syntaxCheck(tmp);
+        if (!check.ok) return `Write rejected — syntax error (original file unchanged):\n${check.msg}` + futilityNote;
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
+      fs.writeFileSync(p, content, 'utf8');
+      return `Wrote ${content.length} chars to ${p}\nSyntax check: OK`
+        + shrinkageNote(oldLen, Buffer.byteLength(content, 'utf8'))
+        + selfTalkNote(content)
+        + futilityNote;
     }
     case 'list_directory': {
       const p = resolveInside(cwd, args.path);
@@ -632,16 +767,28 @@ async function executeTool(name, args, cwd) {
     case 'remember': {
       const fact = String(args.fact || '').trim().replace(/\s*\n+\s*/g, ' ');
       if (!fact) return 'Error: fact must not be empty.';
-      if (readMemory().includes(fact)) return 'Already remembered.';
-      fs.appendFileSync(memoryPath(), '- ' + fact + '\n', 'utf8');
-      return 'Remembered. This will be available in future chats.';
+      if (readMemory(cwd).includes(fact)) return 'Already remembered for this project.';
+      const target = memoryPath(cwd);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.appendFileSync(target, '- ' + fact + '\n', 'utf8');
+      registerProjectMemory(cwd);
+      return 'Remembered for this project. This will be available in future chats that use the same directory.';
     }
     case 'append_file': {
       const p = resolveInside(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.appendFileSync(p, args.content ?? '', 'utf8');
-      const aCheck = await syntaxCheck(p);
-      return `Appended ${(args.content ?? '').length} chars to ${p}` + (aCheck.ok ? '\nSyntax check: OK' : `\nSYNTAX CHECK FAILED:\n${aCheck.msg}`);
+      const addition = args.content ?? '';
+      const updated = (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '') + addition;
+      const tmp = p + '.~check' + path.extname(p);
+      try {
+        fs.writeFileSync(tmp, updated, 'utf8');
+        const check = await syntaxCheck(tmp);
+        if (!check.ok) return `Append rejected — syntax error (original file unchanged):\n${check.msg}`;
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
+      fs.writeFileSync(p, updated, 'utf8');
+      return `Appended ${addition.length} chars to ${p}\nSyntax check: OK` + selfTalkNote(addition);
     }
     case 'create_directory': {
       const p = resolveInside(cwd, args.path);
@@ -713,11 +860,24 @@ async function executeTool(name, args, cwd) {
       const newS = String(args.new_string ?? '');
       if (!oldS) return 'Error: old_string must not be empty.';
       if (oldS === newS) return 'Error: old_string and new_string are identical.';
-      const count = content.split(oldS).length - 1;
-      if (count === 0) return `Error: old_string not found in ${p}. Read the file and copy the exact text, including whitespace and indentation.`;
-      if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
-      const updated = content.split(oldS).join(newS);
-      const tmp = p + '.~check.js';
+      // exact match first; fall back to trailing-whitespace-normalized match
+      const trimLines = s => s.split('\n').map(l => l.trimEnd()).join('\n');
+      let updated;
+      let count = content.split(oldS).length - 1;
+      let fuzzy = false;
+      if (count === 0) {
+        const normContent = trimLines(content);
+        const normOld = trimLines(oldS);
+        count = normContent.split(normOld).length - 1;
+        if (count === 0) return `Error: old_string not found in ${p}. Read the file and copy the exact text, including indentation.`;
+        if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times (after whitespace normalization) in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
+        updated = normContent.split(normOld).join(trimLines(newS));
+        fuzzy = true;
+      } else {
+        if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
+        updated = content.split(oldS).join(newS);
+      }
+      const tmp = p + '.~check' + path.extname(p);
       try {
         fs.writeFileSync(tmp, updated, 'utf8');
         const check = await syntaxCheck(tmp);
@@ -726,7 +886,7 @@ async function executeTool(name, args, cwd) {
         try { fs.unlinkSync(tmp); } catch {}
       }
       fs.writeFileSync(p, updated, 'utf8');
-      return `Edited ${p}: replaced ${count} occurrence(s).\nSyntax check: OK`;
+      return `Edited ${p}: replaced ${count} occurrence(s)${fuzzy ? ' (matched after trailing-whitespace normalization)' : ''}.\nSyntax check: OK` + selfTalkNote(newS);
     }
     case 'replace_in_file': {
       const p = resolveInside(cwd, args.path);
@@ -750,9 +910,16 @@ async function executeTool(name, args, cwd) {
       if (updated.length > content.length * 3 + 100_000) {
         return `Error: this replacement would grow the file from ${content.length} to ${updated.length} chars — refusing. The pattern is matching far more than intended.`;
       }
+      const tmp = p + '.~check' + path.extname(p);
+      try {
+        fs.writeFileSync(tmp, updated, 'utf8');
+        const check = await syntaxCheck(tmp);
+        if (!check.ok) return `Replacement rejected — syntax error (original file unchanged):\n${check.msg}`;
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
       fs.writeFileSync(p, updated, 'utf8');
-      const rCheck = await syntaxCheck(p);
-      return `Replaced ${count} occurrence(s) in ${p}` + (rCheck.ok ? '\nSyntax check: OK' : `\nSYNTAX CHECK FAILED:\n${rCheck.msg}`);
+      return `Replaced ${count} occurrence(s) in ${p}\nSyntax check: OK`;
     }
     case 'count_lines': {
       const p = resolveInside(cwd, args.path);
@@ -782,8 +949,8 @@ async function executeTool(name, args, cwd) {
       return result.join('\n') || '(no files found)';
     }
     case 'get_environment_variables': {
-      if (args.name) return process.env[args.name] || `Error: Environment variable '${args.name}' not found.`;
-      return JSON.stringify(process.env, null, 2);
+      if (!args.name) return 'Error: an exact environment variable name is required.';
+      return process.env[args.name] || `Error: Environment variable '${args.name}' not found.`;
     }
     case 'check_port_usage': {
       const port = parseInt(args.port, 10);
@@ -940,14 +1107,12 @@ function gitRun(args, cwd) {
 }
 
 // The restricted toolset available to subagents (run_subagent): read/search/
-// analyze plus the research-logging tools (which only write RESEARCH_LOG.md /
-// RESEARCH_REPORT.md). No code edits, no shell, no ask_user, no nesting.
+// analyze only. No writes, shell, ask_user, or nesting.
 const SUBAGENT_TOOL_NAMES = new Set([
   'read_file', 'list_directory', 'search_files', 'search_in_file', 'find_files',
   'get_file_lines', 'file_info', 'count_lines', 'get_file_type',
   'analyze_file_structure', 'pattern_search_deep', 'find_largest_files',
-  'get_git_log', 'read_git_diff', 'calculate_file_hash',
-  'initiate_research_session', 'record_observation', 'finalize_research',
+  'get_git_log', 'read_git_diff', 'calculate_file_hash', 'check_port_usage',
 ]);
 const SUBAGENT_TOOLS = TOOL_DEFS.filter((d) => SUBAGENT_TOOL_NAMES.has(d.function.name));
 
@@ -961,4 +1126,6 @@ module.exports = {
   gitRun,
   memoryPath,
   readMemory,
+  legacyMemoryPath,
+  readLegacyMemory,
 };

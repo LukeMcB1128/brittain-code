@@ -4,8 +4,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { initTools, TOOL_DEFS, RISKY_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory } = require('./tools');
-const { stderr } = require('process');
+const { initTools, TOOL_DEFS, RISKY_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory } = require('./tools');
 
 const OLLAMA = 'http://127.0.0.1:11434';
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
@@ -17,6 +16,10 @@ const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user mess
 // on a 36GB Mac WITH Ollama's q8_0 KV cache enabled (OLLAMA_FLASH_ATTENTION=1,
 // OLLAMA_KV_CACHE_TYPE=q8_0 via launchctl setenv); drop to 32_768 without it.
 const NUM_CTX_CAP = 65_536;
+// Low temperature for agent work: model defaults (~0.7-0.8) suit chat, but for
+// code generation they invite near-miss token glitches — the '\．' and
+// byte-fallback junk seen in long runs (fablereview.md).
+const AGENT_TEMPERATURE = 0.3;
 
 async function effectiveContext(model) {
   return Math.min(await getContextLength(model), NUM_CTX_CAP);
@@ -55,7 +58,7 @@ function createWindow() {
     minWidth: 700,
     minHeight: 500,
     backgroundColor: '#111214',
-    title: 'Brittain Code',
+    title: 'Brittain Code' + (app.isPackaged ? '' : ' — DEV'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -163,7 +166,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
       messages,
       ...(toolset ? { tools: toolset } : {}), // null = no tools (forces a text answer)
       stream: true,
-      options: { num_ctx: numCtx },
+      options: { num_ctx: numCtx, temperature: AGENT_TEMPERATURE },
       ...(think === undefined ? {} : { think }),
     }),
     signal,
@@ -252,7 +255,7 @@ function parseRawToolCalls(content) {
 }
 
 // ---------- agent loop ----------
-function systemPrompt(cwd) {
+function systemPrompt(cwd, model = '') {
   const lines = [
     "You are Brittain Code, an expert coding agent running fully offline on the user's Mac (macOS, zsh).",
     `Working directory: ${cwd} — use paths relative to it.`,
@@ -270,13 +273,13 @@ function systemPrompt(cwd) {
     '',
     'Everything runs locally; you cannot access the internet.',
   ];
-  const memory = readMemory().trim();
+  const memory = readMemory(cwd).trim();
   if (memory) {
     // cap so a huge memory file cannot blow up the prompt (keep the newest lines)
     const capped = memory.length > 4000
-      ? '[…older lessons truncated — prune memory.md]\n' + memory.slice(-4000)
+      ? '[…older project lessons truncated — use /memory to locate and prune the file]\n' + memory.slice(-4000)
       : memory;
-    lines.push('', 'Lessons remembered from previous sessions:', capped);
+    lines.push('', 'Lessons remembered for this project from previous sessions:', capped);
   }
   // per-project instructions, like Claude Code's CLAUDE.md
   try {
@@ -288,13 +291,32 @@ function systemPrompt(cwd) {
       lines.push('', 'Project instructions (from BRITTAIN.md in the working directory):', capped);
     }
   } catch {}
+  // Devstral is trained on the OpenHands scaffold and defaults to narrating
+  // plans in prose rather than calling tools. This addendum overrides that.
+  if (/devstral/i.test(model)) {
+    lines.push(
+      '',
+      'CRITICAL — TOOL USE RULES (read every turn):',
+      'You are NOT inside OpenHands. bash, str_replace_editor, execute_bash do not exist here. Calling them does nothing.',
+      '',
+      'The ONLY way to act on files is via these tools: write_file, edit_file, read_file, run_command, search_files.',
+      '',
+      'THE MOST IMPORTANT RULE: Never write a code block in your response and then stop. That pattern does nothing — no file is created, no code runs. A code block in prose is not a tool call.',
+      'If you find yourself writing ```javascript or ```html or any fenced block containing file content, STOP — call write_file or edit_file instead.',
+      '',
+      'Correct pattern: decide what to write → call write_file/edit_file → verify with read_file → continue.',
+      'Wrong pattern: decide what to write → show it in a markdown block → say "I will now write this" → stop.',
+      '',
+      'Every turn must end with either a tool call or a genuine final summary. If you have unfinished work, make a tool call, do not narrate it.',
+    );
+  }
   return lines.join('\n');
 }
 
 // One full agent turn: stream → tools → repeat until the model stops calling
 // tools or a cap is hit. Shared by chat:send and chat:loop.
 async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
-  const messages = () => [{ role: 'system', content: systemPrompt(cwd) }, ...conversation];
+  const messages = () => [{ role: 'system', content: systemPrompt(cwd, model) }, ...conversation];
   // report the window we actually run with, not the model's theoretical max
   const contextLength = await effectiveContext(model);
   // For models that support thinking, always send an explicit true/false —
@@ -302,6 +324,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
   const useThink = (await supportsThinking(model)) ? !!think : undefined;
   let lastContent = '';
   let lastStats = null;
+  let exhaustedWithToolCalls = false;
 
   {
     for (let step = 0; step < MAX_AGENT_STEPS; step++) {
@@ -331,6 +354,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
       const assistantMsg = { role: 'assistant', content };
       if (thinking) assistantMsg.thinking = thinking;
       if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
+      exhaustedWithToolCalls = toolCalls.length > 0;
       conversation.push(assistantMsg);
       if (content) lastContent = content;
       if (stats) lastStats = stats;
@@ -390,27 +414,33 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
       }
       if (stopRequested) break;
 
-      // auto-compact when context hits 90% to avoid silent truncation
+      // auto-compact at 70%: generation QUALITY degrades well before overflow
+      // (glitch tokens, thought-leak into files — see fablereview.md), so this
+      // is a quality guard, not just a size guard
       if (lastStats && contextLength) {
         const used = lastStats.promptTokens + lastStats.evalTokens;
-        if (used > 0.9 * contextLength) {
-          info('Context past 90% — auto-compacting…');
+        if (used > 0.7 * contextLength) {
+          win.webContents.send('stream:info', 'Context past 70% — auto-compacting…');
           const c = await compactConversation(model);
           if (c.ok) win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
-          else info('Auto-compact failed (' + c.error + ') — continuing.');
+          else win.webContents.send('stream:info', 'Auto-compact failed (' + c.error + ') — continuing.');
         }
       }
     }
   }
+  if (exhaustedWithToolCalls && !stopRequested) {
+    win.webContents.send('stream:info', `Agent stopped after reaching the ${MAX_AGENT_STEPS}-step safety cap.`);
+  }
   return { lastContent, lastStats, contextLength };
 }
 
-ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images, subModel }) => {
+ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images, imageTypes, subModel }) => {
   if (images?.length && !(await supportsVision(model))) {
     return { ok: false, error: `${model} cannot see images — pick a vision-capable model or remove the attachment.` };
   }
   const userMsg = { role: 'user', content: text };
   if (images?.length) userMsg.images = images;
+  if (imageTypes?.length) userMsg.imageTypes = imageTypes;
   conversation.push(userMsg);
   stopRequested = false;
   currentAbort = new AbortController();
@@ -447,7 +477,7 @@ function subagentSystemPrompt(cwd) {
   return [
     'You are a fast research subagent inside Brittain Code, working for a lead agent.',
     `Working directory: ${cwd} — use paths relative to it.`,
-    'You have read-only exploration tools plus research-logging tools. You cannot edit code, run shell commands, or ask the user questions.',
+    'You have read-only exploration tools. You cannot edit code, create research logs, run shell commands, or ask the user questions.',
     '',
     'Strategy — follow this order:',
     '1. list_directory (or analyze_file_structure) first to see what files exist.',
@@ -544,13 +574,13 @@ async function runSubagent(task, subModel, cwd) {
 }
 
 // ---------- goal loop (/loop) ----------
-async function runVerifier(subModel, goal, summary, gitEvidence) {
+async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
   try {
     const think = (await supportsThinking(subModel)) ? false : undefined;
     const data = await ollamaJson('/api/chat', {
       model: subModel,
       stream: false,
-      options: { num_ctx: 8192 },
+      options: { num_ctx: 8192, temperature: AGENT_TEMPERATURE },
       ...(think === undefined ? {} : { think }),
       messages: [
         {
@@ -562,7 +592,7 @@ async function runVerifier(subModel, goal, summary, gitEvidence) {
           content: `GOAL:\n${goal}\n\nAGENT'S FINAL MESSAGE THIS ITERATION:\n${(summary || '(none)').slice(0, 3000)}\n\nGIT CHANGES SO FAR (diff stat + status):\n${(gitEvidence || '(none)').slice(0, 2000)}`,
         },
       ],
-    });
+    }, signal);
     recordUsage('verifier', { promptTokens: data.prompt_eval_count || 0, evalTokens: data.eval_count || 0 });
     return (data.message?.content || '').trim() || 'No verdict returned — continue working toward the goal.';
   } catch (err) {
@@ -577,6 +607,13 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
   const info = (t) => win.webContents.send('stream:info', t);
   const state = (t) => win.webContents.send('stream:state', t);
 
+  // Drifting models (seen with devstral) obey the system prompt early, then
+  // revert to trained habits as tool results bury it thousands of tokens back.
+  // Re-inject the critical rules at the END of context on every iteration.
+  const driftReminder = /devstral/i.test(model)
+    ? '\n\nREMINDER (rules from your system prompt still apply): act ONLY via tool calls — write_file/edit_file/read_file/run_command. A markdown code block in your reply does nothing. Never end your turn by narrating what you will do; do it with a tool call.'
+    : '';
+
   try {
     let feedback = '';
     for (let i = 1; i <= max; i++) {
@@ -586,9 +623,10 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
 
       conversation.push({
         role: 'user',
-        content: i === 1
+        content: (i === 1
           ? `GOAL: ${goal}\n\nWork toward this goal. Use your tools, verify your work, and summarize what you accomplished when you stop.`
-          : `GOAL: ${goal}\n\nVerifier feedback on your previous iteration:\n${feedback}\n\nAddress the feedback and continue toward the goal. Summarize what you accomplished when you stop.`,
+          : `GOAL: ${goal}\n\nVerifier feedback on your previous iteration:\n${feedback}\n\nAddress the feedback and continue toward the goal. Summarize what you accomplished when you stop.`
+        ) + driftReminder,
       });
 
       const { lastContent, lastStats, contextLength } = await runAgentTurn(model, cwd, autoApprove, think, subModel);
@@ -597,10 +635,10 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
       state(`verifying ${i}/${max} (${subModel || 'qwen3:8b'})…`);
       const diff = await gitRun(['diff', '--stat'], cwd);
       const status = await gitRun(['status', '--porcelain'], cwd);
-      const verdict = await runVerifier(subModel || 'qwen3:8b', goal, lastContent, `${diff.out || ''}\n${status.out || ''}`.trim());
+      const verdict = await runVerifier(subModel || 'qwen3:8b', goal, lastContent, `${diff.out || ''}\n${status.out || ''}`.trim(), currentAbort.signal);
       if (stopRequested) break;
 
-      if (/GOAL_COMPLETE/i.test(verdict)) {
+      if (verdict.trim().toUpperCase() === 'GOAL_COMPLETE') {
         info(`✔ Verifier: goal complete after ${i} iteration${i > 1 ? 's' : ''}.`);
         break;
       }
@@ -663,6 +701,9 @@ ipcMain.handle('chat:reset', () => {
 });
 
 ipcMain.handle('usage:get', () => usage);
+
+// true when running from source (npm start) rather than the installed build
+ipcMain.handle('app:isDev', () => !app.isPackaged);
 
 // chat history support: the renderer saves/loads conversations, but the live
 // array lives here — these let it read the current one and swap in a stored one.
@@ -794,10 +835,19 @@ ipcMain.handle('git:commit', async (_e, cwd, message) => {
 });
 
 // ---------- memory viewer ----------
-ipcMain.handle('memory:get', () => ({ content: readMemory(), path: memoryPath() }));
+ipcMain.handle('memory:get', (_e, cwd) => {
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  return {
+    ok: true,
+    content: readMemory(cwd),
+    path: memoryPath(cwd),
+    legacyContent: readLegacyMemory(),
+    legacyPath: legacyMemoryPath(),
+  };
+});
 
 // ---------- conversation compaction ----------
-async function compactConversation(model) {
+async function compactConversation(model, signal = currentAbort?.signal) {
   if (conversation.length < 2) return { ok: false, error: 'Nothing to compact yet.' };
   try {
     // drop bulky tool outputs from what the summarizer sees
@@ -814,21 +864,27 @@ async function compactConversation(model) {
       model,
       messages: msgs,
       stream: false,
-      options: { num_ctx: await effectiveContext(model) },
-    });
+      options: { num_ctx: await effectiveContext(model), temperature: AGENT_TEMPERATURE },
+    }, signal);
     const summary = (data.message?.content || '').trim();
     if (!summary) return { ok: false, error: 'Model returned an empty summary.' };
 
     // Record usage for the summarization step
-    if (data.message?.prompt_eval_count || data.message?.eval_count) {
+    if (data.prompt_eval_count || data.eval_count) {
       recordUsage('main', {
-        promptTokens: data.message.prompt_eval_count,
-        evalTokens: data.message.eval_count
+        promptTokens: data.prompt_eval_count,
+        evalTokens: data.eval_count
       });
     }
 
     conversation = [
-      { role: 'user', content: 'This conversation was compacted to save context. Continue from the summary below.' },
+      {
+        role: 'user',
+        content: 'This conversation was compacted to save context. Continue from the summary below.'
+          + (/devstral/i.test(model)
+            ? ' REMINDER: act only via tool calls (write_file/edit_file/read_file/run_command) — markdown code blocks in replies do nothing.'
+            : ''),
+      },
       { role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary },
     ];
 
@@ -843,7 +899,18 @@ async function compactConversation(model) {
   }
 }
 
-ipcMain.handle('chat:compact', (_e, { model }) => compactConversation(model));
+ipcMain.handle('chat:compact', async (_e, { model }) => {
+  stopRequested = false;
+  currentAbort = new AbortController();
+  try {
+    return await compactConversation(model, currentAbort.signal);
+  } catch (err) {
+    if (err.name === 'AbortError') return { ok: false, error: 'Compaction stopped.' };
+    return { ok: false, error: String(err.message || err) };
+  } finally {
+    currentAbort = null;
+  }
+});
 
 // ---------- chat export ----------
 ipcMain.handle('chat:export', async () => {
@@ -882,10 +949,10 @@ ipcMain.handle('cwd:pick', async () => {
 });
 
 // ---------- generate chat title ----------
-ipcMain.handle('chat:generateTitle', async (_e, conversationContent) => {
+ipcMain.handle('chat:generateTitle', async (_e, conversationContent, model) => {
   try {
     // If conversation is empty or invalid, return a default title
-    if (!conversationContent || !Array.isArray(conversationContent)) {
+    if (!conversationContent || !Array.isArray(conversationContent) || !model) {
       return { ok: false, error: 'Invalid conversation content' };
     }
     
@@ -894,12 +961,13 @@ ipcMain.handle('chat:generateTitle', async (_e, conversationContent) => {
     
     // Get the last few messages to provide context for title generation
     const lastMessages = conversationContent.slice(-5); // Get last 5 messages for context
+    const titleThink = (await supportsThinking(model)) ? false : undefined;
     
     // Generate the title using the LLM
-    const response = await streamChat('qwen2.5-coder:1.5b', [
+    const response = await streamChat(model, [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: JSON.stringify(lastMessages) }
-    ], null, false, true);
+    ], AbortSignal.timeout(60_000), titleThink, true, Math.min(await effectiveContext(model), 8192), null);
     
     // Return only the title without any extra formatting
     let title = response.content.trim();

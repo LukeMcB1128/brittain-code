@@ -47,6 +47,17 @@ body { display: flex; flex-direction: column; }
 
 .spacer { flex: 1; }
 
+/* dev-channel badge (shown only under npm start) */
+.dev-tag {
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--yellow);
+  border: 1px solid var(--yellow);
+  padding: 1px 5px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
 select, button {
   background: var(--bg-input);
   color: var(--text);
