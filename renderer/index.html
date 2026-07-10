@@ -16,6 +16,10 @@
       <input type="checkbox" id="think-toggle" />
       <span>THINK</span>
     </label>
+    <label class="toggle online-toggle" title="Opt in to external web search and page retrieval. Queries and URLs leave this Mac; every online call still asks for approval.">
+      <input type="checkbox" id="online-research" />
+      <span>ONLINE</span>
+    </label>
     <label class="toggle" title="When on, file writes and shell commands run without asking">
       <input type="checkbox" id="auto-approve" />
       <span>AUTO-APPROVE</span>
@@ -73,6 +77,8 @@
       <span>tools used: <span id="tool-count">0</span></span>
       <span class="sep">|</span>
       <span>speed: <span id="tok-speed">–</span></span>
+      <span class="sep">|</span>
+      <span id="version-display" class="hidden" title="App version (from package.json)"></span>
       <span id="git-info" class="hidden">
         <span class="sep">|</span>
         <span id="git-branch" title="Current git branch (± = changed files)"></span>
