@@ -290,7 +290,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'run_subagent',
-      description: 'Delegate a self-contained exploration or research task to a smaller, faster model. The subagent has read-only tools (read, search, analyze files, git history) and cannot edit files, create research logs, run commands, or ask the user anything. It CANNOT see this conversation, so the task must contain every detail it needs. Returns the subagent\'s findings. Use it to explore unfamiliar code, locate definitions and usages, or gather evidence across many files without spending your own context.',
+      description: 'Delegate a self-contained exploration or research task to a smaller, faster model. The subagent has read-only tools (read, search, analyze files, git history) and cannot edit files, create research logs, run commands, or ask the user anything. It CANNOT see this conversation, so the task must contain every detail it needs. Returns the subagent\'s findings. Use it to explore unfamiliar code, locate definitions and usages, or gather evidence across many files without spending your own context. If you have an active research session, transcribe the subagent\'s key findings into the log yourself with record_observation — the subagent cannot.',
       parameters: {
         type: 'object',
         properties: {
@@ -641,7 +641,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'initiate_research_session',
-      description: 'Starts a new research session by creating a RESEARCH_LOG.md file with the given objective. IMPORTANT: Follow RESEARCH_PROTOCOL.md (use record_observation and finalize_research).',
+      description: 'Starts a new research session by creating a RESEARCH_LOG.md file with the given objective. IMPORTANT: Follow RESEARCH_PROTOCOL.md (use record_observation and finalize_research). OWNERSHIP RULE: YOU own the entire session — subagents cannot write to the research log. If you delegate exploration to run_subagent, record its findings yourself with record_observation when it returns, then finalize_research when the objective is answered. Never initiate a session you will not personally finalize. Note: this overwrites any existing RESEARCH_LOG.md.',
       parameters: {
         type: 'object',
         properties: { objective: { type: 'string', description: 'The objective of the research session' } },

@@ -705,6 +705,7 @@ ipcMain.handle('usage:get', () => usage);
 
 // true when running from source (npm start) rather than the installed build
 ipcMain.handle('app:isDev', () => !app.isPackaged);
+ipcMain.handle('app:getVersion', () => require('./package.json').version);
 
 // chat history support: the renderer saves/loads conversations, but the live
 // array lives here — these let it read the current one and swap in a stored one.

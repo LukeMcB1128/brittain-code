@@ -34,6 +34,15 @@ let currentChatId = null;
   const saved = localStorage.getItem('model');
   if (saved && res.models.includes(saved)) modelSelect.value = saved;
 
+  // Display version number
+  try {
+    const version = await window.api.getVersion();
+    $('version-display').textContent = version;
+    $('version-display').classList.remove('hidden');
+  } catch (e) {
+    console.error('Failed to load version:', e);
+  }
+
   // subagent model: validate the saved choice against what's installed
   if (!res.models.includes(subModel)) {
     subModel = res.models.includes('qwen3:8b') ? 'qwen3:8b' : res.models[0] || '';

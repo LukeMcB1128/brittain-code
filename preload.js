@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('api', {
   memoryGet: (cwd) => ipcRenderer.invoke('memory:get', cwd),
   usageGet: () => ipcRenderer.invoke('usage:get'),
   isDev: () => ipcRenderer.invoke('app:isDev'),
+  getVersion: () => ipcRenderer.invoke('app:getVersion'),
   compact: (payload) => ipcRenderer.invoke('chat:compact', payload),
   loop: (payload) => ipcRenderer.invoke('chat:loop', payload),
   exportChat: () => ipcRenderer.invoke('chat:export'),
