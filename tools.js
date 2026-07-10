@@ -2066,12 +2066,83 @@ const SUBAGENT_TOOL_NAMES = new Set([
 ]);
 const SUBAGENT_TOOLS = TOOL_DEFS.filter((d) => SUBAGENT_TOOL_NAMES.has(d.function.name));
 
+// Scoped toolsets for /orchestrate. The planner can inspect and delegate but
+// cannot modify the project. The coder can change and verify code, but cannot
+// use the network, inspect sensitive host state, commit, revert, or spawn more
+// agents. submit_implementation_plan is handled by main.js because it controls
+// the orchestration state machine rather than touching the filesystem.
+const SUBMIT_IMPLEMENTATION_PLAN_TOOL = {
+  type: 'function',
+  function: {
+    name: 'submit_implementation_plan',
+    description: 'Finish planning by submitting an ordered implementation plan. Call this exactly once after inspecting enough of the project. Tasks run sequentially, so later tasks may depend on earlier tasks.',
+    parameters: {
+      type: 'object',
+      properties: {
+        summary: { type: 'string', description: 'Short architectural summary of the approach.' },
+        tasks: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 6,
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'Short task title.' },
+              objective: { type: 'string', description: 'Concrete implementation objective for the coding model.' },
+              acceptance_criteria: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Observable conditions required for this task to be complete.',
+              },
+              relevant_files: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Project-relative files the coder should inspect first. This is guidance, not a write allowlist.',
+              },
+              constraints: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Important project or safety constraints for this task.',
+              },
+            },
+            required: ['title', 'objective', 'acceptance_criteria'],
+          },
+        },
+      },
+      required: ['summary', 'tasks'],
+    },
+  },
+};
+
+const ORCHESTRATOR_TOOL_NAMES = new Set([
+  ...SUBAGENT_TOOL_NAMES,
+  'run_subagent', 'web_search', 'web_fetch',
+]);
+const ORCHESTRATOR_TOOLS = [
+  ...TOOL_DEFS.filter((d) => ORCHESTRATOR_TOOL_NAMES.has(d.function.name)),
+  SUBMIT_IMPLEMENTATION_PLAN_TOOL,
+];
+
+const CODER_TOOL_NAMES = new Set([
+  'read_file', 'write_file', 'edit_file', 'edit_files', 'append_file',
+  'create_directory', 'delete_file', 'copy_file', 'move_file', 'replace_in_file',
+  'list_directory', 'search_files', 'search_in_file', 'find_files',
+  'search_local_docs', 'get_file_lines', 'file_info', 'count_lines',
+  'get_file_type', 'analyze_file_structure', 'pattern_search_deep',
+  'run_command', 'run_project_check', 'git_status', 'read_git_diff',
+]);
+const CODER_TOOLS = TOOL_DEFS.filter((d) => CODER_TOOL_NAMES.has(d.function.name));
+
 module.exports = {
   initTools,
   TOOL_DEFS,
   RISKY_TOOLS,
   SUBAGENT_TOOLS,
   SUBAGENT_TOOL_NAMES,
+  ORCHESTRATOR_TOOLS,
+  ORCHESTRATOR_TOOL_NAMES,
+  CODER_TOOLS,
+  CODER_TOOL_NAMES,
   NETWORK_TOOLS,
   SENSITIVE_TOOLS,
   DESTRUCTIVE_TOOLS,

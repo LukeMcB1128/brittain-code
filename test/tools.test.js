@@ -12,6 +12,10 @@ const {
   SENSITIVE_TOOLS,
   DESTRUCTIVE_TOOLS,
   SUBAGENT_TOOL_NAMES,
+  ORCHESTRATOR_TOOLS,
+  ORCHESTRATOR_TOOL_NAMES,
+  CODER_TOOLS,
+  CODER_TOOL_NAMES,
   executeTool,
   memoryPath,
   readMemory,
@@ -51,6 +55,27 @@ test('tool definitions and implementations stay aligned for check_port_usage', (
   const environmentTool = TOOL_DEFS.find((definition) => definition.function.name === 'get_environment_variables');
   assert.deepEqual(environmentTool.function.parameters.required, ['name']);
   assert.equal(RISKY_TOOLS.has('get_environment_variables'), true);
+});
+
+test('orchestration roles receive deliberately scoped toolsets', () => {
+  const plannerNames = new Set(ORCHESTRATOR_TOOLS.map((definition) => definition.function.name));
+  const coderNames = new Set(CODER_TOOLS.map((definition) => definition.function.name));
+
+  assert.equal(plannerNames.has('submit_implementation_plan'), true);
+  assert.equal(plannerNames.has('run_subagent'), true);
+  assert.equal(plannerNames.has('web_search'), true);
+  assert.equal(plannerNames.has('write_file'), false);
+  assert.equal(plannerNames.has('run_command'), false);
+  assert.equal(ORCHESTRATOR_TOOL_NAMES.has('submit_implementation_plan'), false, 'controller-only plan submission is not executable through tools.js');
+
+  assert.equal(coderNames.has('read_file'), true);
+  assert.equal(coderNames.has('edit_file'), true);
+  assert.equal(coderNames.has('run_project_check'), true);
+  assert.equal(coderNames.has('web_search'), false);
+  assert.equal(coderNames.has('run_subagent'), false);
+  assert.equal(coderNames.has('get_environment_variables'), false);
+  assert.equal(coderNames.has('revert_to_last_commit'), false);
+  assert.deepEqual(coderNames, CODER_TOOL_NAMES);
 });
 
 test('git_status and read_git_diff distinguish staged and unstaged changes', async (t) => {

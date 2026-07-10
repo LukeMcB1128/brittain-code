@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('api', {
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   compact: (payload) => ipcRenderer.invoke('chat:compact', payload),
   loop: (payload) => ipcRenderer.invoke('chat:loop', payload),
+  orchestrate: (payload) => ipcRenderer.invoke('chat:orchestrate', payload),
   exportChat: () => ipcRenderer.invoke('chat:export'),
   historyList: () => ipcRenderer.invoke('history:list'),
   historySave: (meta, conversation) => ipcRenderer.invoke('history:save', meta, conversation),
