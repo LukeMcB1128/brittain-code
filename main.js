@@ -25,6 +25,44 @@ async function effectiveContext(model) {
   return Math.min(await getContextLength(model), NUM_CTX_CAP);
 }
 
+// ---------- context hygiene ----------
+// Oversized input does NOT error: Ollama context-shifts, silently discarding
+// the oldest tokens (seen live: 174k evaluated through a 65k window). These
+// helpers keep what we send inside the window so the model never loses the
+// system prompt without us knowing.
+const estimateTokens = (value) => Math.round(JSON.stringify(value).length / 4);
+
+// Keep images only on the most recent image-bearing message. Stored history
+// keeps every image for display — this trims copies sent to the model, since
+// each retained screenshot is re-sent (and re-processed) on every turn.
+function stripOldImages(msgs) {
+  let lastWithImage = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].images?.length) { lastWithImage = i; break; }
+  }
+  return msgs.map((m, i) => {
+    if (!m.images?.length || i === lastWithImage) return m;
+    const { images, imageTypes, ...rest } = m;
+    return { ...rest, content: (m.content || '') + '\n[an attached image was removed from context to save space]' };
+  });
+}
+
+// Drop oldest messages until the set fits the budget (used for the summarizer
+// call, which would otherwise context-shift while trying to fix context-shifting).
+function fitToWindow(msgs, maxTokens) {
+  if (estimateTokens(msgs) <= maxTokens) return msgs;
+  const kept = [];
+  let total = 0;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const cost = estimateTokens(msgs[i]);
+    if (total + cost > maxTokens && kept.length) break;
+    kept.unshift(msgs[i]);
+    total += cost;
+  }
+  kept.unshift({ role: 'user', content: '[Earlier conversation omitted — it no longer fit the context window.]' });
+  return kept;
+}
+
 let win = null;
 
 // ---------- conversation state (lives in main so tool messages stay in history) ----------
@@ -335,7 +373,7 @@ function systemPrompt(cwd, model = '', onlineResearch = false) {
 // One full agent turn: stream → tools → repeat until the model stops calling
 // tools or a cap is hit. Shared by chat:send and chat:loop.
 async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineResearch = false) {
-  const messages = () => [{ role: 'system', content: systemPrompt(cwd, model, onlineResearch) }, ...conversation];
+  const messages = () => [{ role: 'system', content: systemPrompt(cwd, model, onlineResearch) }, ...stripOldImages(conversation)];
   const activeTools = onlineResearch ? TOOL_DEFS : TOOL_DEFS.filter((definition) => !NETWORK_TOOLS.has(definition.function.name));
   // report the window we actually run with, not the model's theoretical max
   const contextLength = await effectiveContext(model);
@@ -483,10 +521,29 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   return { lastContent, lastStats, contextLength };
 }
 
+// If the conversation is already over the threshold BEFORE we send (e.g. it
+// grew last session, or was loaded pre-bloated), compact first — otherwise the
+// request context-shifts and the model silently loses its oldest messages.
+async function maybePrecompact(model) {
+  if (conversation.length < 2) return;
+  const contextLength = await effectiveContext(model);
+  const estimated = estimateTokens(stripOldImages(conversation));
+  if (estimated <= 0.7 * contextLength) return;
+  win.webContents.send('stream:info', `Context is ~${Math.round((estimated / contextLength) * 100)}% full before sending — auto-compacting first…`);
+  win.webContents.send('stream:state', 'auto-compacting…');
+  const c = await compactConversation(model);
+  if (c.ok) {
+    win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+  } else {
+    win.webContents.send('stream:info', 'Pre-send compact failed (' + c.error + ') — sending anyway; the oldest messages may be invisible to the model.');
+  }
+}
+
 ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images, imageTypes, subModel, onlineResearch }) => {
   if (images?.length && !(await supportsVision(model))) {
     return { ok: false, error: `${model} cannot see images — pick a vision-capable model or remove the attachment.` };
   }
+  await maybePrecompact(model);
   const userMsg = { role: 'user', content: text };
   if (images?.length) userMsg.images = images;
   if (imageTypes?.length) userMsg.imageTypes = imageTypes;
@@ -667,6 +724,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
     : '';
 
   try {
+    await maybePrecompact(model); // a loop may start on an already-bloated chat
     let feedback = '';
     for (let i = 1; i <= max; i++) {
       if (stopRequested) break;
@@ -767,7 +825,7 @@ ipcMain.handle('chat:load', async (_e, msgs, model) => {
   usage = freshUsage();
   // estimate the loaded context so the bar and /usage aren't blank until the
   // next message (Ollama reports the exact count on the next request)
-  const approxTokens = Math.round(JSON.stringify(conversation).length / 4);
+  const approxTokens = estimateTokens(stripOldImages(conversation));
   const contextLength = model ? await effectiveContext(model) : 0;
   usage.context = { tokens: approxTokens, limit: contextLength };
   return { ok: true, approxTokens, contextLength };
@@ -903,12 +961,17 @@ ipcMain.handle('memory:get', (_e, cwd) => {
 async function compactConversation(model, signal = currentAbort?.signal) {
   if (conversation.length < 2) return { ok: false, error: 'Nothing to compact yet.' };
   try {
-    // drop bulky tool outputs from what the summarizer sees
-    const msgs = conversation.map((m) =>
-      m.role === 'tool' && String(m.content).length > 1500
-        ? { ...m, content: String(m.content).slice(0, 1500) + '…[truncated]' }
-        : m
-    );
+    // drop images and bulky tool outputs from what the summarizer sees, then
+    // hard-fit to the window — the summarizer must not context-shift itself
+    const windowBudget = Math.floor((await effectiveContext(model)) * 0.8);
+    let msgs = stripOldImages(conversation)
+      .map(({ images, imageTypes, ...m }) => m) // summarizer never needs images at all
+      .map((m) =>
+        m.role === 'tool' && String(m.content).length > 1500
+          ? { ...m, content: String(m.content).slice(0, 1500) + '…[truncated]' }
+          : m
+      );
+    msgs = fitToWindow(msgs, windowBudget);
     msgs.push({
       role: 'user',
       content: 'Summarize this entire conversation so work can continue seamlessly in a fresh session: the goal, key decisions, files created or modified and their current state, and unresolved tasks. Output only the summary.',
@@ -942,7 +1005,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     ];
 
     // Update the central usage object in main process
-    const approxTokens = Math.round(JSON.stringify(conversation).length / 4);
+    const approxTokens = estimateTokens(stripOldImages(conversation));
     const contextLength = await effectiveContext(model);
     usage.context = { tokens: approxTokens, limit: contextLength };
 
@@ -1013,7 +1076,9 @@ ipcMain.handle('chat:generateTitle', async (_e, conversationContent, model) => {
     const systemPrompt = "You are a helpful chat summarizer. Given the following transcript of a programming chat, generate a single, descriptive, and concise title (maximum 7 words). Do not include any pre-text, explanation, or markdown formatting. Only output the title. Do not output any hashtags, markdown, or formatting. Just the plain text title. This is for generating a chat title only - do not output anything to the chat stream or UI. The only output should be the plain text title string.";
     
     // Get the last few messages to provide context for title generation
-    const lastMessages = conversationContent.slice(-5); // Get last 5 messages for context
+    // last 5 messages, minus image payloads — base64 would otherwise be
+    // JSON.stringify'd straight into the title model's tiny context
+    const lastMessages = conversationContent.slice(-5).map(({ images, imageTypes, ...m }) => m);
     const titleThink = (await supportsThinking(model)) ? false : undefined;
     
     // Generate the title using the LLM
