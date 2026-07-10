@@ -421,6 +421,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
         const used = lastStats.promptTokens + lastStats.evalTokens;
         if (used > 0.7 * contextLength) {
           win.webContents.send('stream:info', 'Context past 70% — auto-compacting…');
+          win.webContents.send('stream:state', 'compacting');
           const c = await compactConversation(model);
           if (c.ok) win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
           else win.webContents.send('stream:info', 'Auto-compact failed (' + c.error + ') — continuing.');
