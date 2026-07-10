@@ -116,6 +116,44 @@ function syntaxCheck(filePath) {
   }
 }
 
+// ---------- degraded-model guards ----------
+// Long autonomous runs (see fablereview.md) showed models leaking their inner
+// monologue into code comments, truncating good files with shrinking rewrites,
+// and rewriting the same file in a futile loop. These heuristics put loud
+// warnings in the tool result — the one place a drifting model still reads.
+const SELF_TALK = /(?:\/\/|\/\*|#).{0,60}(?:I(?:'m| am) sorry|I apologi[sz]e|my bad|I messed up|Wait, I\b|let me fix|Let's just do this properly|oops|I will now)/i;
+
+function selfTalkNote(content) {
+  return SELF_TALK.test(String(content))
+    ? '\nWARNING: the content you wrote contains conversational self-talk in comments (e.g. "Wait, I…", "my bad"). You are leaking your reasoning into the file. Read the file back and remove every comment that is commentary about yourself rather than about the code.'
+    : '';
+}
+
+function shrinkageNote(oldLen, newLen) {
+  if (oldLen >= 500 && newLen < oldLen * 0.5) {
+    return `\nWARNING: this overwrite SHRANK the file from ${oldLen} to ${newLen} chars. If that was not deliberate you just truncated your own work — read the file NOW and restore what is missing before doing anything else.`;
+  }
+  return '';
+}
+
+// futility breaker: consecutive write_file calls to the same path with nothing
+// in between is the signature of a rewrite death-spiral.
+let lastWritePath = '';
+let consecutiveWrites = 0;
+function trackRewrite(name, p) {
+  if (name !== 'write_file') {
+    lastWritePath = '';
+    consecutiveWrites = 0;
+    return '';
+  }
+  if (p === lastWritePath) consecutiveWrites += 1;
+  else { lastWritePath = p; consecutiveWrites = 1; }
+  if (consecutiveWrites >= 3) {
+    return `\nSTOP: this is consecutive rewrite #${consecutiveWrites} of ${p} with no other action in between. Rewriting again will not help. Call read_file on it, state exactly what is wrong, then make ONE targeted change with edit_file.`;
+  }
+  return '';
+}
+
 // Recursively visit files, skipping .git and node_modules; unreadable dirs are skipped.
 function walkDir(dir, onFile) {
   let entries;
@@ -660,6 +698,8 @@ const RISKY_TOOLS = new Set([
 ]);
 
 async function executeTool(name, args, cwd) {
+  // futility tracking must see every call so any non-write action resets it
+  const futilityNote = trackRewrite(name, name === 'write_file' && args?.path ? resolveInside(cwd, args.path) : '');
   switch (name) {
     case 'get_git_graph': {
       return gitRun(['log', '--graph', '--oneline', '--all', '--no-color'], cwd).then((res) => (res.ok ? truncate(res.out) : `Error: ${res.err}`));
@@ -674,16 +714,21 @@ async function executeTool(name, args, cwd) {
       const p = resolveInside(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       const content = args.content ?? '';
+      let oldLen = 0;
+      try { oldLen = fs.statSync(p).size; } catch {}
       const tmp = p + '.~check' + path.extname(p);
       try {
         fs.writeFileSync(tmp, content, 'utf8');
         const check = await syntaxCheck(tmp);
-        if (!check.ok) return `Write rejected — syntax error (original file unchanged):\n${check.msg}`;
+        if (!check.ok) return `Write rejected — syntax error (original file unchanged):\n${check.msg}` + futilityNote;
       } finally {
         try { fs.unlinkSync(tmp); } catch {}
       }
       fs.writeFileSync(p, content, 'utf8');
-      return `Wrote ${content.length} chars to ${p}\nSyntax check: OK`;
+      return `Wrote ${content.length} chars to ${p}\nSyntax check: OK`
+        + shrinkageNote(oldLen, Buffer.byteLength(content, 'utf8'))
+        + selfTalkNote(content)
+        + futilityNote;
     }
     case 'list_directory': {
       const p = resolveInside(cwd, args.path);
@@ -743,7 +788,7 @@ async function executeTool(name, args, cwd) {
         try { fs.unlinkSync(tmp); } catch {}
       }
       fs.writeFileSync(p, updated, 'utf8');
-      return `Appended ${addition.length} chars to ${p}\nSyntax check: OK`;
+      return `Appended ${addition.length} chars to ${p}\nSyntax check: OK` + selfTalkNote(addition);
     }
     case 'create_directory': {
       const p = resolveInside(cwd, args.path);
@@ -841,7 +886,7 @@ async function executeTool(name, args, cwd) {
         try { fs.unlinkSync(tmp); } catch {}
       }
       fs.writeFileSync(p, updated, 'utf8');
-      return `Edited ${p}: replaced ${count} occurrence(s)${fuzzy ? ' (matched after trailing-whitespace normalization)' : ''}.\nSyntax check: OK`;
+      return `Edited ${p}: replaced ${count} occurrence(s)${fuzzy ? ' (matched after trailing-whitespace normalization)' : ''}.\nSyntax check: OK` + selfTalkNote(newS);
     }
     case 'replace_in_file': {
       const p = resolveInside(cwd, args.path);

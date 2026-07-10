@@ -107,3 +107,50 @@ test('remember stores isolated project memory outside both projects', async (t) 
   assert.equal(Object.values(index).some((entry) => entry.path === fs.realpathSync(firstProject)), true);
   assert.equal(Object.values(index).some((entry) => entry.path === fs.realpathSync(secondProject)), true);
 });
+
+test('write_file warns when an overwrite dramatically shrinks a file', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+
+  const big = '// line\n'.repeat(200); // ~1600 chars
+  await executeTool('write_file', { path: 'app.js', content: big }, cwd);
+  await executeTool('read_file', { path: 'app.js' }, cwd); // reset rewrite tracker
+  const result = await executeTool('write_file', { path: 'app.js', content: 'const x = 1;' }, cwd);
+
+  assert.match(result, /SHRANK the file from \d+ to \d+ chars/);
+  // growing or same-size writes stay quiet
+  await executeTool('read_file', { path: 'app.js' }, cwd);
+  const grow = await executeTool('write_file', { path: 'app.js', content: big }, cwd);
+  assert.doesNotMatch(grow, /SHRANK/);
+});
+
+test('written code containing conversational self-talk is flagged', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+
+  const leaked = 'const a = 1;\n// Wait, I missed an assignment!\n// I am so sorry. Let me fix this.\nconst b = 2;\n';
+  const result = await executeTool('write_file', { path: 'leak.js', content: leaked }, cwd);
+  assert.match(result, /self-talk/);
+
+  // real comments must not trip it
+  const clean = 'const a = 1;\n// Wait for the DB to initialize before querying.\nconst b = 2;\n';
+  const ok = await executeTool('write_file', { path: 'clean.js', content: clean }, cwd);
+  assert.doesNotMatch(ok, /self-talk/);
+});
+
+test('consecutive rewrites of the same file trigger the futility breaker', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+
+  const r1 = await executeTool('write_file', { path: 'spin.js', content: 'const v = 1;' }, cwd);
+  const r2 = await executeTool('write_file', { path: 'spin.js', content: 'const v = 2;' }, cwd);
+  assert.doesNotMatch(r1 + r2, /STOP: this is consecutive/);
+
+  const r3 = await executeTool('write_file', { path: 'spin.js', content: 'const v = 3;' }, cwd);
+  assert.match(r3, /STOP: this is consecutive rewrite #3/);
+
+  // any other tool call resets the spiral counter
+  await executeTool('read_file', { path: 'spin.js' }, cwd);
+  const r4 = await executeTool('write_file', { path: 'spin.js', content: 'const v = 4;' }, cwd);
+  assert.doesNotMatch(r4, /STOP: this is consecutive/);
+});

@@ -16,6 +16,10 @@ const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user mess
 // on a 36GB Mac WITH Ollama's q8_0 KV cache enabled (OLLAMA_FLASH_ATTENTION=1,
 // OLLAMA_KV_CACHE_TYPE=q8_0 via launchctl setenv); drop to 32_768 without it.
 const NUM_CTX_CAP = 65_536;
+// Low temperature for agent work: model defaults (~0.7-0.8) suit chat, but for
+// code generation they invite near-miss token glitches — the '\．' and
+// byte-fallback junk seen in long runs (fablereview.md).
+const AGENT_TEMPERATURE = 0.3;
 
 async function effectiveContext(model) {
   return Math.min(await getContextLength(model), NUM_CTX_CAP);
@@ -162,7 +166,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
       messages,
       ...(toolset ? { tools: toolset } : {}), // null = no tools (forces a text answer)
       stream: true,
-      options: { num_ctx: numCtx },
+      options: { num_ctx: numCtx, temperature: AGENT_TEMPERATURE },
       ...(think === undefined ? {} : { think }),
     }),
     signal,
@@ -410,11 +414,13 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel) {
       }
       if (stopRequested) break;
 
-      // auto-compact when context hits 90% to avoid silent truncation
+      // auto-compact at 70%: generation QUALITY degrades well before overflow
+      // (glitch tokens, thought-leak into files — see fablereview.md), so this
+      // is a quality guard, not just a size guard
       if (lastStats && contextLength) {
         const used = lastStats.promptTokens + lastStats.evalTokens;
-        if (used > 0.9 * contextLength) {
-          win.webContents.send('stream:info', 'Context past 90% — auto-compacting…');
+        if (used > 0.7 * contextLength) {
+          win.webContents.send('stream:info', 'Context past 70% — auto-compacting…');
           const c = await compactConversation(model);
           if (c.ok) win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
           else win.webContents.send('stream:info', 'Auto-compact failed (' + c.error + ') — continuing.');
@@ -574,7 +580,7 @@ async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
     const data = await ollamaJson('/api/chat', {
       model: subModel,
       stream: false,
-      options: { num_ctx: 8192 },
+      options: { num_ctx: 8192, temperature: AGENT_TEMPERATURE },
       ...(think === undefined ? {} : { think }),
       messages: [
         {
@@ -855,7 +861,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
       model,
       messages: msgs,
       stream: false,
-      options: { num_ctx: await effectiveContext(model) },
+      options: { num_ctx: await effectiveContext(model), temperature: AGENT_TEMPERATURE },
     }, signal);
     const summary = (data.message?.content || '').trim();
     if (!summary) return { ok: false, error: 'Model returned an empty summary.' };
