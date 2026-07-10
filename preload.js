@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('api', {
   gitCommit: (cwd, message) => ipcRenderer.invoke('git:commit', cwd, message),
   memoryGet: (cwd) => ipcRenderer.invoke('memory:get', cwd),
   usageGet: () => ipcRenderer.invoke('usage:get'),
+  isDev: () => ipcRenderer.invoke('app:isDev'),
   compact: (payload) => ipcRenderer.invoke('chat:compact', payload),
   loop: (payload) => ipcRenderer.invoke('chat:loop', payload),
   exportChat: () => ipcRenderer.invoke('chat:export'),

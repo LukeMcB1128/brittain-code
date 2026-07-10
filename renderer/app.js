@@ -39,6 +39,15 @@ let currentChatId = null;
     subModel = res.models.includes('qwen3:8b') ? 'qwen3:8b' : res.models[0] || '';
   }
 
+  // tag the dev channel (npm start) so it's never mistaken for the installed app
+  if (await window.api.isDev()) {
+    const tag = document.createElement('span');
+    tag.className = 'dev-tag';
+    tag.textContent = 'DEV';
+    tag.title = 'Running live source via npm start — not the installed app';
+    document.querySelector('.brand').appendChild(tag);
+  }
+
   const savedCwd = localStorage.getItem('cwd');
   if (savedCwd) setCwd(savedCwd);
 

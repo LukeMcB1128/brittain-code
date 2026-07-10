@@ -58,7 +58,7 @@ function createWindow() {
     minWidth: 700,
     minHeight: 500,
     backgroundColor: '#111214',
-    title: 'Brittain Code',
+    title: 'Brittain Code' + (app.isPackaged ? '' : ' — DEV'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -701,6 +701,9 @@ ipcMain.handle('chat:reset', () => {
 });
 
 ipcMain.handle('usage:get', () => usage);
+
+// true when running from source (npm start) rather than the installed build
+ipcMain.handle('app:isDev', () => !app.isPackaged);
 
 // chat history support: the renderer saves/loads conversations, but the live
 // array lives here — these let it read the current one and swap in a stored one.
