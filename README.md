@@ -68,12 +68,20 @@ Type these in the message box:
 | `/diff` | Show the git diff of the working directory in an overlay |
 | `/commit <message>` | Stage everything and commit |
 | `/model <name>` | Switch model (partial match) |
+| `/coder [name]` | Show or set the writable coding-worker model (default qwen3-coder:30b when installed) |
 | `/subagent [name]` | Show or set the subagent/verifier model (default qwen3:8b) |
 | `/loop [n] <goal>` | Work toward a goal for up to n iterations (default 8); a verifier subagent judges completion, and context auto-compacts between iterations. Turn AUTO-APPROVE on for unattended runs |
-| `/usage` | Show context remaining and token spend across main agent, subagents, and verifier |
+| `/orchestrate <goal>` | Use the selected model as a read-only planner, delegate sequential tasks to the coder model, and verify each task with the subagent model |
+| `/usage` | Show context remaining and token spend across planner/main agent, scouts, coders, and verifier |
 | `/memory` | View what the agent has remembered for the selected project |
 | `/export` | Save the chat as a markdown file |
 | `/tools` | List available tools and their risky, sensitive, or network classification |
+
+## Offline orchestration
+
+`/orchestrate` separates planning from implementation while keeping inference local. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. Tasks run sequentially to avoid loading multiple large Ollama models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at 70% usage, with at most two compactions per stage; every coder task still starts with a fresh context.
+
+The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is enabled, with the same per-request approval boundary as ordinary chats. Coding workers and verifiers never receive network tools. Restart Brittain Code after installing a new Ollama model so the model list refreshes; for example, `gpt-oss:20b` can then be selected in the main dropdown, with `/coder gpt-oss:20b`, or with `/subagent gpt-oss:20b` for role-by-role comparison.
 
 ## Git, project instructions, memory, images
 

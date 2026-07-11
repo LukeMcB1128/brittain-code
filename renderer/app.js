@@ -15,6 +15,7 @@ const onlineResearchToggle = $('online-research');
 let cwd = null;
 let busy = false;
 let subModel = localStorage.getItem('subModel') || 'qwen3:8b'; // set via /subagent
+let coderModel = localStorage.getItem('coderModel') || 'qwen3-coder:30b'; // set via /coder
 let elapsedTimer = null;
 let toolCount = 0;
 let currentChatId = null;
@@ -47,6 +48,16 @@ let currentChatId = null;
   // subagent model: validate the saved choice against what's installed
   if (!res.models.includes(subModel)) {
     subModel = res.models.includes('qwen3:8b') ? 'qwen3:8b' : res.models[0] || '';
+  }
+  // Prefer the coding-specialized model, then gpt-oss as a capable local
+  // fallback once installed, then whichever subagent model is available.
+  if (!res.models.includes(coderModel)) {
+    coderModel = res.models.includes('qwen3-coder:30b')
+      ? 'qwen3-coder:30b'
+      : res.models.includes('gpt-oss:20b')
+        ? 'gpt-oss:20b'
+        : subModel || res.models[0] || '';
+    localStorage.setItem('coderModel', coderModel);
   }
 
   // tag the dev channel (npm start) so it's never mistaken for the installed app
@@ -399,7 +410,7 @@ async function send() {
   if ((!text && !pendingImages.length) || busy) return;
   if (text.startsWith('/')) {
     input.value = '';
-    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent')) {
+    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate')) {
       hideStartupMessage();
     }
     return handleSlash(text);
@@ -594,7 +605,7 @@ window.api.onSubagent((d) => {
     const head = document.createElement('div');
     head.className = 'sub-head';
     head.innerHTML = '<span class="sub-title"></span><span class="sub-status">exploring…</span>';
-    head.querySelector('.sub-title').textContent = 'SUBAGENT · ' + d.model;
+    head.querySelector('.sub-title').textContent = (d.role || 'SUBAGENT') + ' · ' + d.model;
     const task = document.createElement('div');
     task.className = 'sub-task';
     task.textContent = d.task.length > 160 ? d.task.slice(0, 160) + '…' : d.task;
@@ -609,7 +620,7 @@ window.api.onSubagent((d) => {
     });
     chat.appendChild(card);
     currentSubCard = card;
-    setState('subagent working');
+    setState((d.role || 'subagent').toLowerCase() + ' working');
     scrollDown();
   } else if (d.phase === 'tool' && currentSubCard) {
     const line = document.createElement('div');
@@ -700,10 +711,12 @@ function updateContextBar(contextTokens, contextLength) {
   fill.id = 'ctx-fill';
 }
 
-window.api.onStats(({ contextTokens, contextLength, tokPerSec }) => {
+window.api.onStats(({ contextTokens, contextLength, tokPerSec, scope }) => {
   updateContextBar(contextTokens, contextLength);
   if (tokPerSec) $('tok-speed').textContent = tokPerSec.toFixed(1) + ' t/s';
-  if (!compactWarned && contextTokens / contextLength > 0.8) {
+  // Planner context is short-lived and discarded after /orchestrate. Warn only
+  // when the persisted conversation itself needs compaction.
+  if (scope !== 'planner' && !compactWarned && contextTokens / contextLength > 0.8) {
     compactWarned = true;
     addInfo('Context is over 80% full — run /compact soon or the model will start losing the oldest messages (including its instructions).');
   }
@@ -910,7 +923,9 @@ const SLASH_HELP = [
   '/commit <message> — stage all changes and commit',
   '/graph — show a visual tree of the git commit history',
   '/loop [n] <goal> — work toward a goal for up to n iterations (default 8); a verifier subagent judges completion after each pass',
+  '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
   '/model <for name> — switch model (partial match ok)',
+  '/coder [name] — show or set the writable coding-worker model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
   '/usage — show how context and tokens have been spent across all agents',
   '/memory — view what the agent has remembered',
@@ -988,6 +1003,39 @@ async function handleSlash(raw) {
       return saveChat();
     }
 
+    case 'orchestrate': {
+      if (busy) return;
+      if (!modelSelect.value) return addError('No orchestrator model selected.');
+      if (!coderModel) return addError('No coder model selected. Use /coder <name>.');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      if (!arg) return addError('Usage: /orchestrate <goal>');
+      if (!autoApprove.checked) addInfo('AUTO-APPROVE is off. The coding worker will pause for file writes and commands; online requests always require separate approval.');
+
+      addMessage('user', `ORCHESTRATE: ${arg}`);
+      startRun();
+      let res;
+      try {
+        res = await window.api.orchestrate({
+          model: modelSelect.value,
+          coderModel,
+          subModel,
+          goal: arg,
+          cwd,
+          autoApprove: autoApprove.checked,
+          onlineResearch: onlineResearchToggle.checked,
+          think: thinkToggle.checked,
+        });
+        if (!res.ok) addError(res.error);
+        else if (res.report) renderMarkdown(addMessage('assistant', res.report), res.report);
+        await saveChat();
+      } catch (err) {
+        addError('Orchestration failed: ' + (err.message || err));
+      } finally {
+        endRun();
+      }
+      return res;
+    }
+
     case 'commit': {
       if (!cwd) return addError('No directory set.');
       if (!arg) return addError('Usage: /commit <message>');
@@ -1015,12 +1063,22 @@ async function handleSlash(raw) {
       return addInfo('Subagent model set to ' + match);
     }
 
+    case 'coder': {
+      const models = [...modelSelect.options].map((o) => o.value);
+      if (!arg) return addInfo(`Coder model: ${coderModel}\nAvailable: ${models.join(', ')}\nUse /coder <name> to change. Restart Brittain Code after installing a new Ollama model so it appears here.`);
+      const match = models.find((v) => v.includes(arg));
+      if (!match) return addError(`No installed model matching "${arg}". If Ollama just finished installing it, restart Brittain Code to refresh the model list.`);
+      coderModel = match;
+      localStorage.setItem('coderModel', match);
+      return addInfo('Coder model set to ' + match);
+    }
+
     case 'usage': {
       const u = await window.api.usageGet();
       const fmt = (n) => (n || 0).toLocaleString();
       const row = (label, b) => `${label.padEnd(11)} ${String(b.calls).padStart(4)} calls   ${fmt(b.prompt).padStart(10)} processed   ${fmt(b.gen).padStart(9)} generated`;
-      const totalGen = u.main.gen + u.subagent.gen + u.verifier.gen;
-      const totalProc = u.main.prompt + u.subagent.prompt + u.verifier.prompt;
+      const totalGen = u.main.gen + u.subagent.gen + u.coder.gen + u.verifier.gen;
+      const totalProc = u.main.prompt + u.subagent.prompt + u.coder.prompt + u.verifier.prompt;
       const ctx = u.context.limit
         ? `${fmt(u.context.tokens)} / ${fmt(u.context.limit)} (${Math.round((u.context.tokens / u.context.limit) * 100)}% used, ${fmt(u.context.limit - u.context.tokens)} left)`
         : '(no requests yet this chat)';
@@ -1031,13 +1089,14 @@ async function handleSlash(raw) {
         'INFERENCE (tokens, since this chat was opened)',
         '  ' + row('main agent', u.main),
         '  ' + row('subagents', u.subagent) + `   (${u.subagent.runs} run${u.subagent.runs === 1 ? '' : 's'})`,
+        '  ' + row('coders', u.coder) + `   (${u.coder.runs} run${u.coder.runs === 1 ? '' : 's'})`,
         '  ' + row('verifier', u.verifier),
         '  ' + '─'.repeat(60),
         `  total       ${fmt(totalProc)} processed, ${fmt(totalGen)} generated`,
         '',
         'Note: "processed" counts every token the models read, including the',
         'same conversation re-read on each agent step — it measures compute',
-        'spent, not context size. Subagent/verifier tokens never touch the',
+        'spent, not context size. Subagent/coder/verifier tokens never touch the',
         'main context; that is the point of delegating.',
       ].join('\n'));
     }
