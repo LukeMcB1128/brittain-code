@@ -1072,25 +1072,88 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
 
 async function collectOrchestrationGitEvidence(cwd) {
   const [status, staged, unstaged, untracked] = await Promise.all([
-    gitRun(['status', '--porcelain'], cwd),
-    gitRun(['diff', '--cached', '--no-ext-diff'], cwd),
-    gitRun(['diff', '--no-ext-diff'], cwd),
-    gitRun(['ls-files', '--others', '--exclude-standard'], cwd),
+    gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd),
+    gitRun(['diff', '--cached', '--no-ext-diff', '--', '.'], cwd),
+    gitRun(['diff', '--no-ext-diff', '--', '.'], cwd),
+    gitRun(['ls-files', '--others', '--exclude-standard', '--directory', '--', '.'], cwd),
   ]);
+  const capLines = (text, maxLines) => {
+    const lines = String(text || '').split('\n').filter(Boolean);
+    return lines.length > maxLines
+      ? lines.slice(0, maxLines).join('\n') + `\n…[${lines.length - maxLines} more entries omitted]`
+      : lines.join('\n');
+  };
   return [
-    'STATUS:\n' + (status.ok ? status.out || '(clean)' : '(not a Git repository)'),
-    'STAGED DIFF:\n' + (staged.ok ? staged.out || '(none)' : '(unavailable)'),
-    'UNSTAGED DIFF:\n' + (unstaged.ok ? unstaged.out || '(none)' : '(unavailable)'),
-    'UNTRACKED FILES:\n' + (untracked.ok ? untracked.out || '(none)' : '(unavailable)'),
-  ].join('\n\n').slice(0, 30_000);
+    'STATUS:\n' + (status.ok ? capLines(status.out, 80) || '(clean)' : '(not a Git repository)'),
+    'STAGED DIFF:\n' + (staged.ok ? String(staged.out || '').slice(0, 9000) || '(none)' : '(unavailable)'),
+    'UNSTAGED DIFF:\n' + (unstaged.ok ? String(unstaged.out || '').slice(0, 9000) || '(none)' : '(unavailable)'),
+    'UNTRACKED PATHS (directories collapsed):\n' + (untracked.ok ? capLines(untracked.out, 80) || '(none)' : '(unavailable)'),
+  ].join('\n\n').slice(0, 22_000);
+}
+
+const ORCHESTRATION_MUTATING_TOOLS = new Set([
+  'write_file', 'edit_file', 'edit_files', 'append_file', 'create_directory',
+  'delete_file', 'copy_file', 'move_file', 'replace_in_file',
+]);
+
+function evidencePaths(entry) {
+  const paths = [];
+  if (entry.args?.path) paths.push(String(entry.args.path));
+  if (entry.args?.source) paths.push(String(entry.args.source));
+  if (entry.args?.destination) paths.push(String(entry.args.destination));
+  if (Array.isArray(entry.args?.edits)) {
+    for (const edit of entry.args.edits) if (edit?.path) paths.push(String(edit.path));
+  }
+  return paths;
+}
+
+function conciseTaskResult(result, index) {
+  const changed = [...new Set(result.coderResult.evidence
+    .filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name))
+    .flatMap(evidencePaths))].slice(0, 12);
+  const checkEntries = result.coderResult.evidence
+    .filter((entry) => entry.name === 'run_project_check' || entry.name === 'run_command')
+    .slice(-5);
+  const checks = checkEntries.map((entry) => {
+    const label = entry.args?.check || entry.args?.command || entry.name;
+    let failed = /error|failed|timed out|denied|exit code [1-9]/i.test(entry.result);
+    try {
+      const parsed = JSON.parse(entry.result);
+      if (typeof parsed.exit_code === 'number') failed = parsed.exit_code !== 0;
+    } catch {}
+    return `${String(label).slice(0, 100)} — ${failed ? 'issue reported' : 'completed'}`;
+  });
+  const lines = [
+    `### ${index + 1}. ${result.task.title} — ${result.complete ? 'verified' : 'incomplete'}`,
+    `Changed: ${changed.length ? changed.join(', ') : 'no modified paths recorded by coding tools'}`,
+    `Checks: ${checks.length ? checks.join('; ') : 'no verification command recorded'}`,
+  ];
+  if (result.repairs) lines.push(`Repair attempts: ${result.repairs}`);
+  if (!result.complete) lines.push(`Remaining: ${String(result.verdict || 'Verifier did not return a verdict.').slice(0, 900)}`);
+  lines.push('');
+  return lines;
+}
+
+function conciseWorkingTree(gitEvidence) {
+  const match = String(gitEvidence || '').match(/STATUS:\n([\s\S]*?)\n\nSTAGED DIFF:/);
+  const lines = (match?.[1] || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  if (!lines.length || lines[0] === '(clean)') return 'clean';
+  if (lines[0] === '(not a Git repository)') return 'not a Git repository';
+  const shown = lines.slice(0, 10);
+  return `${lines.length} scoped status entr${lines.length === 1 ? 'y' : 'ies'}: ${shown.join(', ')}${lines.length > shown.length ? `, +${lines.length - shown.length} more` : ''}`;
 }
 
 async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, gitEvidence, baselineStatus, signal) {
   const relevantEvidence = coderResult.evidence
-    .filter((entry) => entry.name === 'run_project_check' || entry.name === 'run_command' || entry.name === 'read_file' || entry.name === 'read_git_diff')
-    .map((entry) => `${entry.name} ${JSON.stringify(entry.args)}\n${entry.result}`)
+    .filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name) || entry.name === 'run_project_check' || entry.name === 'run_command' || entry.name === 'read_file' || entry.name === 'read_git_diff')
+    .map((entry) => {
+      const args = ORCHESTRATION_MUTATING_TOOLS.has(entry.name)
+        ? { paths: evidencePaths(entry) }
+        : entry.args;
+      return `${entry.name} ${JSON.stringify(args)}\n${entry.result}`;
+    })
     .join('\n\n')
-    .slice(0, 12_000);
+    .slice(0, 9000);
   try {
     const useThink = (await supportsThinking(verifierModel)) ? false : undefined;
     const data = await ollamaJson('/api/chat', {
@@ -1105,7 +1168,7 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
         },
         {
           role: 'user',
-          content: `OVERALL GOAL:\n${goal}\n\nTASK:\n${JSON.stringify(task, null, 2)}\n\nWORKING TREE BEFORE ORCHESTRATION:\n${baselineStatus || '(clean or unavailable)'}\n\nCODER REPORT:\n${coderResult.report}\n\nRECORDED TOOL EVIDENCE:\n${relevantEvidence || '(no verification commands were recorded)'}\n\nCURRENT GIT EVIDENCE:\n${gitEvidence}`,
+          content: `OVERALL GOAL:\n${goal}\n\nTASK:\n${JSON.stringify(task, null, 2)}\n\nWORKING TREE BEFORE ORCHESTRATION:\n${baselineStatus || '(clean or unavailable)'}\n\nCODER REPORT:\n${String(coderResult.report || '').slice(0, 3500)}\n\nRECORDED TOOL EVIDENCE:\n${relevantEvidence || '(no verification commands were recorded)'}\n\nCURRENT GIT EVIDENCE:\n${gitEvidence}`,
         },
       ],
     }, signal);
@@ -1226,7 +1289,7 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
   stopRequested = false;
   currentAbort = new AbortController();
   const verifierModel = subModel || 'qwen3:8b';
-  const baseline = await gitRun(['status', '--porcelain'], cwd);
+  const baseline = await gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd);
   const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
   conversation.push({ role: 'user', content: `ORCHESTRATE: ${goal.trim()}` });
 
@@ -1303,25 +1366,17 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
     const report = [
       allComplete ? '## Orchestration complete' : '## Orchestration stopped with remaining work',
       '',
-      `Planner: ${model}`,
-      `Coder: ${coderModel}`,
-      `Verifier: ${verifierModel}`,
-      `Online research: ${onlineResearch ? 'enabled for the planner only' : 'disabled; all roles stayed offline'}`,
+      `Models: ${model} planner → ${coderModel} coder → ${verifierModel} verifier`,
+      `Online research: ${onlineResearch ? 'planner only' : 'off'}`,
       '',
       `Plan: ${plan.summary}`,
       '',
-      ...results.flatMap((result, index) => [
-        `### ${index + 1}. ${result.task.title} — ${result.complete ? 'verified' : 'incomplete'}`,
-        result.coderResult.report,
-        result.complete ? `Verifier: GOAL_COMPLETE${result.repairs ? ` after ${result.repairs} repair` : ''}.` : `Verifier:\n${result.verdict}`,
-        '',
-      ]),
-      '### Final verifier',
-      finalVerdict,
+      ...results.flatMap(conciseTaskResult),
+      `Final verification: ${allComplete ? 'GOAL_COMPLETE' : String(finalVerdict).slice(0, 1000)}`,
       '',
-      '### Final working tree evidence',
-      finalEvidence,
-    ].join('\n').slice(0, 40_000);
+      `Working tree: ${conciseWorkingTree(finalEvidence)}`,
+      'Open DIFF to inspect the full patch and untracked paths.',
+    ].join('\n').slice(0, 6000);
     conversation.push({ role: 'assistant', content: report });
     return { ok: true, report, complete: allComplete };
   } catch (err) {

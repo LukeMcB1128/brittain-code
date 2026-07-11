@@ -79,7 +79,7 @@ Type these in the message box:
 
 ## Offline orchestration
 
-`/orchestrate` separates planning from implementation while keeping inference local. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. Tasks run sequentially to avoid loading multiple large Ollama models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at 70% usage, with at most two compactions per stage; every coder task still starts with a fresh context.
+`/orchestrate` separates planning from implementation while keeping inference local. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. Tasks run sequentially to avoid loading multiple large Ollama models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at 70% usage, with at most two compactions per stage; every coder task still starts with a fresh context. The final chat response stays concise; use DIFF when you want the complete patch and working-tree detail.
 
 The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is enabled, with the same per-request approval boundary as ordinary chats. Coding workers and verifiers never receive network tools. Restart Brittain Code after installing a new Ollama model so the model list refreshes; for example, `gpt-oss:20b` can then be selected in the main dropdown, with `/coder gpt-oss:20b`, or with `/subagent gpt-oss:20b` for role-by-role comparison.
 
