@@ -29,7 +29,7 @@ Do this **identically** for each model you want to compare:
 
 1. **Reset the repo** to the baseline:
    ```bash
-   cd ~/brittain-bench && git reset --hard -q bench-baseline && git clean -fdq
+   cd ~/Downloads/Coding/brittain-bench && git reset --hard -q bench-baseline && git clean -fdq
    ```
 2. In Brittain Code: **NEW SESSION**, then **DIR → ~/brittain-bench**.
 3. Hold settings constant for every model: **AUTO-APPROVE on**, **ONLINE RESEARCH off**,
@@ -39,13 +39,13 @@ Do this **identically** for each model you want to compare:
    (not `/loop` or `/orchestrate` — those add scaffolding and hide the model's own ability).
 5. When it stops, **grade before you reset**:
    ```bash
-   node benchmark/grade.js          # auto-picks the newest chat for ~/brittain-bench
+   node "/Users/lukemclarenbrittain/Downloads/Coding/Brittain Code/benchmark/grade.js"         # auto-picks the newest chat for ~/brittain-bench
    ```
 
 The grader prints a per-criterion breakdown, a total, and a `JSON {...}` line you can
 collect into a scoreboard. Point it elsewhere with `--dir`, or grade a specific run with
 `--chat ~/Library/Application\ Support/Brittain\ Code/chats/<id>.json`
-(`node benchmark/grade.js --list` shows matching chats).
+(`node "/Users/lukemclarenbrittain/Downloads/Coding/Brittain Code/benchmark/grade.js" --list` shows matching chats).
 
 ## Notes
 

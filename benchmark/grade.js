@@ -27,24 +27,42 @@ const cp = require('child_process');
 // ---------- args ----------
 const argv = process.argv.slice(2);
 function flag(name) { const i = argv.indexOf(name); return i >= 0 ? (argv[i + 1] || '') : null; }
-const BENCH_DIR = path.resolve((flag('--dir') || process.env.BENCH_DIR || path.join(os.homedir(), 'brittain-bench')).replace(/^~/, os.homedir()));
+const BENCH_DIR_EXPLICIT = !!(flag('--dir') || process.env.BENCH_DIR);
+let BENCH_DIR = path.resolve((flag('--dir') || process.env.BENCH_DIR || path.join(os.homedir(), 'brittain-bench')).replace(/^~/, os.homedir()));
 const CHATS_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'Brittain Code', 'chats');
 
 // ---------- transcript loading ----------
+function readIndex() {
+  try { return JSON.parse(fs.readFileSync(path.join(CHATS_DIR, 'index.json'), 'utf8')); } catch { return []; }
+}
 function chatEntriesForDir() {
-  let index = [];
-  try { index = JSON.parse(fs.readFileSync(path.join(CHATS_DIR, 'index.json'), 'utf8')); } catch {}
-  return index
+  return readIndex()
     .filter((c) => path.resolve(c.cwd || '') === BENCH_DIR)
     .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
 }
+// When the user didn't pin a dir, find the newest chat whose folder is named
+// "brittain-bench" (wherever they set it up) and grade against that.
+function autoDetectBenchDir() {
+  const cand = readIndex()
+    .filter((c) => path.basename(path.resolve(c.cwd || '')) === 'brittain-bench')
+    .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))[0];
+  return cand ? path.resolve(cand.cwd) : null;
+}
 function loadTranscript() {
   const explicit = flag('--chat');
-  if (explicit) return JSON.parse(fs.readFileSync(explicit, 'utf8')).conversation || [];
-  const matches = chatEntriesForDir();
+  if (explicit) {
+    const raw = JSON.parse(fs.readFileSync(explicit, 'utf8'));
+    const meta = { id: raw.id || path.basename(explicit, '.json'), model: raw.model || null, cwd: raw.cwd || '', timestamp: raw.timestamp || null };
+    return { convo: raw.conversation || [], meta };
+  }
+  let matches = chatEntriesForDir();
+  if (!matches.length && !BENCH_DIR_EXPLICIT) {
+    const auto = autoDetectBenchDir();
+    if (auto) { BENCH_DIR = auto; matches = chatEntriesForDir(); }
+  }
   if (!matches.length) {
     console.error(`No saved chat found for ${BENCH_DIR} in ${CHATS_DIR}.`);
-    console.error('Make sure the run finished (Brittain Code saves on completion), or pass --chat <file>.');
+    console.error('Make sure the run finished (Brittain Code saves on completion), or pass --chat <file> / --dir <path>.');
     process.exit(2);
   }
   const file = path.join(CHATS_DIR, matches[0].id + '.json');
@@ -59,8 +77,8 @@ if (argv.includes('--list')) {
 }
 
 const loaded = loadTranscript();
-const convo = Array.isArray(loaded) ? loaded : loaded.convo;
-const meta = Array.isArray(loaded) ? {} : loaded.meta || {};
+const convo = loaded.convo;
+const meta = loaded.meta || {};
 
 // ---------- flatten tool calls in order ----------
 const READ_TOOLS = new Set(['read_file', 'get_file_lines', 'search_in_file', 'file_info', 'list_directory', 'find_files', 'search_files', 'analyze_file_structure', 'get_file_type', 'count_lines']);
@@ -209,3 +227,34 @@ if (hid.fails.length) console.log('Failing hidden checks :  ' + hid.fails.join('
 
 // machine-readable line for building a scoreboard
 console.log('\nJSON ' + JSON.stringify({ model: meta.model || null, total, ...S, visible: vis.pass, hidden: hid.pass, toolCalls: calls.length }));
+
+// ---------- accumulate to results.json + (re)build the chart ----------
+const record = {
+  chatId: meta.id || null,
+  model: meta.model || '(unknown)',
+  total,
+  output: S.O1 + S.O2 + S.O3,
+  discipline: S.D1 + S.D2 + S.D3 + S.D4 + S.D5 + S.D6,
+  ...S,
+  visible: vis.pass, hidden: hid.pass,
+  toolCalls: calls.length,
+  mutations: calls.filter((c) => c.isMutate).length,
+  benchDir: BENCH_DIR,
+  ranAt: meta.timestamp || null,
+  gradedAt: new Date().toISOString(),
+};
+const RESULTS = path.join(__dirname, 'results.json');
+let all = [];
+try { all = JSON.parse(fs.readFileSync(RESULTS, 'utf8')); } catch {}
+// re-grading the same chat overwrites its old record instead of duplicating
+all = all.filter((r) => !(r.chatId && record.chatId && r.chatId === record.chatId));
+all.push(record);
+fs.writeFileSync(RESULTS, JSON.stringify(all, null, 2));
+
+let reportPath = '(skipped)';
+if (!argv.includes('--no-report')) {
+  try { reportPath = require('./report.js').writeReport(RESULTS, path.join(__dirname, 'report.html')); }
+  catch (e) { reportPath = 'report failed: ' + e.message; }
+}
+console.log(`\nData : ${RESULTS}  (${all.length} run${all.length === 1 ? '' : 's'})`);
+console.log(`Chart: ${reportPath}`);
