@@ -15,7 +15,7 @@ const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user mess
 // maximum because KV-cache RAM grows with the window. 64k sized for gemma4:26b
 // on a 36GB Mac WITH Ollama's q8_0 KV cache enabled (OLLAMA_FLASH_ATTENTION=1,
 // OLLAMA_KV_CACHE_TYPE=q8_0 via launchctl setenv); drop to 32_768 without it.
-const NUM_CTX_CAP = 65_536;
+const NUM_CTX_CAP = 131_072; // sized for heavy use
 // Low temperature for agent work: model defaults (~0.7-0.8) suit chat, but for
 // code generation they invite near-miss token glitches — the '\．' and
 // byte-fallback junk seen in long runs (fablereview.md).
@@ -409,6 +409,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   // omitting the param makes Ollama think by default, ignoring the toggle.
   const useThink = (await supportsThinking(model)) ? !!think : undefined;
   let lastContent = '';
+  let emptyNudges = 0;
   let lastStats = null;
   let exhaustedWithToolCalls = false;
 
@@ -440,7 +441,27 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       if (content) lastContent = content;
       if (stats) lastStats = stats;
 
-      if (!toolCalls.length || stopRequested) break;
+      if (stopRequested) break;
+      if (!toolCalls.length) {
+        // Thinking models sometimes emit EOS right after their reasoning —
+        // no content, no tool call (seen live: "Let's verify part of file
+        // after edit." then silence). Don't mistake a stall for completion:
+        // nudge up to twice, visibly, then give up honestly.
+        const stalled = !content || !content.trim();
+        if (stalled && emptyNudges < 2) {
+          emptyNudges++;
+          win.webContents.send('stream:info', `Model stopped without output or a tool call — nudging it to continue (${emptyNudges}/2)…`);
+          conversation.push({
+            role: 'user',
+            content: 'You stopped without any visible output or tool call. Continue the task now: make your next tool call, or write your final summary if the task is complete.',
+          });
+          continue;
+        }
+        if (stalled) {
+          win.webContents.send('stream:info', 'Model produced no output after 2 nudges — giving up on this turn. Send a message to continue.');
+        }
+        break;
+      }
 
       for (const tc of toolCalls) {
         const name = tc.function?.name;
