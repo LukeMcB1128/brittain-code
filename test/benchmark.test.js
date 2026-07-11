@@ -68,11 +68,26 @@ test('benchmark report uses readable charts and task, mode, and thinking filters
     efficiency: 12,
     wallTimeMs: 1000,
     fullPass: true,
+  }, {
+    schemaVersion: 2,
+    configKey: 'feature|solo|model-a|think=false',
+    task: 'feature',
+    mode: 'solo',
+    modelLabel: 'model-a',
+    settings: { think: false, contextCap: 131072 },
+    total: 70,
+    correctness: 40,
+    reliability: 10,
+    efficiency: 10,
+    wallTimeMs: 3000,
+    fullPass: false,
   }]));
   writeReport(results, report);
   const html = fs.readFileSync(report, 'utf8');
   assert.match(html, /class="score-chart"/);
   assert.match(html, /class="legend-item"/);
   assert.match(html, /<select id="think">/);
+  assert.match(html, /tasks 2\/2/);
+  assert.match(html, /data-view-key="feature\|all\|all"/);
   assert.doesNotMatch(html, /rotate\(-35/);
 });
