@@ -6,7 +6,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 
 const { TASKS } = require('../benchmark/tasks');
-const { aggregate, normalize } = require('../benchmark/report');
+const { writeReport, aggregate, normalize } = require('../benchmark/report');
 
 test('benchmark task fixtures are versioned, protected, and intentionally incomplete', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-benchmark-suite-'));
@@ -48,4 +48,31 @@ test('legacy benchmark rows remain report-compatible', () => {
   assert.equal(row.task, 'cart');
   assert.equal(row.mode, 'solo');
   assert.equal(row.fullPass, true);
+});
+
+test('benchmark report uses readable charts and task, mode, and thinking filters', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-benchmark-report-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const results = path.join(dir, 'results.json');
+  const report = path.join(dir, 'report.html');
+  fs.writeFileSync(results, JSON.stringify([{
+    schemaVersion: 2,
+    configKey: 'cart|solo|model-a|think=false',
+    task: 'cart',
+    mode: 'solo',
+    modelLabel: 'model-a',
+    settings: { think: false, contextCap: 131072 },
+    total: 90,
+    correctness: 55,
+    reliability: 13,
+    efficiency: 12,
+    wallTimeMs: 1000,
+    fullPass: true,
+  }]));
+  writeReport(results, report);
+  const html = fs.readFileSync(report, 'utf8');
+  assert.match(html, /class="score-chart"/);
+  assert.match(html, /class="legend-item"/);
+  assert.match(html, /<select id="think">/);
+  assert.doesNotMatch(html, /rotate\(-35/);
 });
