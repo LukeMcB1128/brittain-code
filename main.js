@@ -198,6 +198,16 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
+// Packaged apps launched from Finder inherit launchd's minimal PATH — node,
+// npm, and other Homebrew tools are invisible to run_command (seen live in a
+// benchmark: "node: command not found", after which the model fabricated its
+// results). Make the packaged app's PATH match a normal terminal's.
+for (const extra of ['/opt/homebrew/bin', '/usr/local/bin', process.env.HOME + '/.local/bin']) {
+  if (!(process.env.PATH || '').split(':').includes(extra)) {
+    process.env.PATH = extra + ':' + (process.env.PATH || '');
+  }
+}
+
 app.whenReady().then(() => {
   initTools(app.getPath('userData'));
   createWindow();
