@@ -711,10 +711,12 @@ function updateContextBar(contextTokens, contextLength) {
   fill.id = 'ctx-fill';
 }
 
-window.api.onStats(({ contextTokens, contextLength, tokPerSec }) => {
+window.api.onStats(({ contextTokens, contextLength, tokPerSec, scope }) => {
   updateContextBar(contextTokens, contextLength);
   if (tokPerSec) $('tok-speed').textContent = tokPerSec.toFixed(1) + ' t/s';
-  if (!compactWarned && contextTokens / contextLength > 0.8) {
+  // Planner context is short-lived and discarded after /orchestrate. Warn only
+  // when the persisted conversation itself needs compaction.
+  if (scope !== 'planner' && !compactWarned && contextTokens / contextLength > 0.8) {
     compactWarned = true;
     addInfo('Context is over 80% full — run /compact soon or the model will start losing the oldest messages (including its instructions).');
   }
