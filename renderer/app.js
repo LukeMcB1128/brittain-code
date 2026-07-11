@@ -196,6 +196,7 @@ async function saveChat() {
   // The live conversation lives in the main process — pull it over IPC.
   const conversation = await window.api.getConversation();
   if (!conversation.length) return;
+  const runMetrics = await window.api.usageGet();
 
   // Only generate a new title if this is a new chat (no existing title or title is generic)
   let title = 'Chat';
@@ -240,6 +241,10 @@ async function saveChat() {
       cwd: cwd || '',
       think: thinkToggle.checked,
       autoApprove: autoApprove.checked,
+      onlineResearch: onlineResearchToggle.checked,
+      subModel,
+      coderModel,
+      runMetrics,
       timestamp: new Date().toISOString(),
     },
     conversation
@@ -256,7 +261,7 @@ async function loadChat(chatId) {
   onlineResearchToggle.checked = false; // loading history must never restore network access
 
   // Push the stored conversation into the main process so the model continues from it.
-  const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value);
+  const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics);
   renderConversation(saved.conversation);
   updateContextBar(lc.approxTokens, lc.contextLength);
   compactWarned = false; // fresh warning budget for this chat

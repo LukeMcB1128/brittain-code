@@ -4,6 +4,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses } = require('./tools');
 
 const OLLAMA = 'http://127.0.0.1:11434';
@@ -71,13 +72,41 @@ let currentAbort = null;          // AbortController for the in-flight run
 let stopRequested = false;
 
 // ---------- usage accounting (per chat; reset on new session / chat load) ----------
+function freshUsageBucket(withRuns = false) {
+  return {
+    calls: 0,
+    prompt: 0,
+    gen: 0,
+    loadMs: 0,
+    promptEvalMs: 0,
+    generationMs: 0,
+    totalMs: 0,
+    ...(withRuns ? { runs: 0 } : {}),
+  };
+}
+
 function freshUsage() {
   return {
-    main: { calls: 0, prompt: 0, gen: 0 },
-    subagent: { calls: 0, prompt: 0, gen: 0, runs: 0 },
-    coder: { calls: 0, prompt: 0, gen: 0, runs: 0 },
-    verifier: { calls: 0, prompt: 0, gen: 0 },
+    main: freshUsageBucket(),
+    subagent: freshUsageBucket(true),
+    coder: freshUsageBucket(true),
+    verifier: freshUsageBucket(),
     context: { tokens: 0, limit: 0 },
+    metrics: {
+      wallTimeMs: 0,
+      peakContextTokens: 0,
+      peakContextLimit: 0,
+      toolCalls: 0,
+      toolErrors: 0,
+      deniedTools: 0,
+      recoveredToolCalls: 0,
+      compactions: 0,
+      loopIterations: 0,
+      orchestrations: 0,
+      repairs: 0,
+      stoppedRuns: 0,
+      failedRuns: 0,
+    },
   };
 }
 let usage = freshUsage();
@@ -87,6 +116,37 @@ function recordUsage(bucket, stats) {
   usage[bucket].calls += 1;
   usage[bucket].prompt += stats.promptTokens || 0;
   usage[bucket].gen += stats.evalTokens || 0;
+  usage[bucket].loadMs += stats.loadMs || 0;
+  usage[bucket].promptEvalMs += stats.promptEvalMs || 0;
+  usage[bucket].generationMs += stats.generationMs || 0;
+  usage[bucket].totalMs += stats.totalMs || 0;
+}
+
+function finishRunMetrics(startedAt, outcome = 'ok') {
+  usage.metrics.wallTimeMs += Math.max(0, Date.now() - startedAt);
+  if (outcome === 'stopped') usage.metrics.stoppedRuns += 1;
+  if (outcome === 'failed') usage.metrics.failedRuns += 1;
+}
+
+function recordToolTelemetry(result, denied = false) {
+  usage.metrics.toolCalls += 1;
+  if (denied) usage.metrics.deniedTools += 1;
+  if (/error|failed|timed out|exception|traceback/i.test(String(result).slice(0, 500))) {
+    usage.metrics.toolErrors += 1;
+  }
+}
+
+function restoreUsage(saved) {
+  const blank = freshUsage();
+  if (!saved || typeof saved !== 'object') return blank;
+  for (const role of ['main', 'subagent', 'coder', 'verifier']) {
+    if (saved[role] && typeof saved[role] === 'object') {
+      blank[role] = { ...blank[role], ...saved[role] };
+    }
+  }
+  if (saved.context && typeof saved.context === 'object') blank.context = { ...blank.context, ...saved.context };
+  if (saved.metrics && typeof saved.metrics === 'object') blank.metrics = { ...blank.metrics, ...saved.metrics };
+  return blank;
 }
 
 // Keep context reporting consistent across ordinary main-agent turns and the
@@ -95,6 +155,10 @@ function recordUsage(bucket, stats) {
 function publishContextStats(stats, contextLength, scope = 'conversation') {
   if (!stats || !contextLength) return;
   const contextTokens = (stats.promptTokens || 0) + (stats.evalTokens || 0);
+  if (contextTokens > usage.metrics.peakContextTokens) {
+    usage.metrics.peakContextTokens = contextTokens;
+    usage.metrics.peakContextLimit = contextLength;
+  }
   if (scope === 'conversation') usage.context = { tokens: contextTokens, limit: contextLength };
   win.webContents.send('stream:stats', {
     contextTokens,
@@ -184,6 +248,47 @@ async function getCapabilities(model) {
 }
 const supportsThinking = async (model) => (await getCapabilities(model)).includes('thinking');
 const supportsVision = async (model) => (await getCapabilities(model)).includes('vision');
+
+const runtimeMetadataCache = new Map();
+async function runtimeMetadata(model) {
+  if (runtimeMetadataCache.has(model)) return runtimeMetadataCache.get(model);
+  const [tags, show, version, commit] = await Promise.all([
+    ollamaJson('/api/tags').catch(() => ({ models: [] })),
+    model ? ollamaJson('/api/show', { model }).catch(() => ({})) : {},
+    ollamaJson('/api/version').catch(() => ({})),
+    gitRun(['rev-parse', '--short', 'HEAD'], __dirname).catch(() => ({ ok: false })),
+  ]);
+  const tag = (tags.models || []).find((entry) => entry.name === model || entry.model === model) || {};
+  const modelInfo = show.model_info || {};
+  const contextKey = Object.keys(modelInfo).find((key) => key.endsWith('.context_length'));
+  const metadata = {
+    appVersion: require('./package.json').version,
+    appCommit: commit.ok ? commit.out.trim() : null,
+    ollamaVersion: version.version || null,
+    model: {
+      name: model || null,
+      digest: tag.digest || null,
+      sizeBytes: tag.size || null,
+      family: tag.details?.family || show.details?.family || null,
+      parameterSize: tag.details?.parameter_size || show.details?.parameter_size || null,
+      quantization: tag.details?.quantization_level || show.details?.quantization_level || null,
+      nativeContext: contextKey ? modelInfo[contextKey] : null,
+    },
+    settings: {
+      requestedContextCap: NUM_CTX_CAP,
+      temperature: AGENT_TEMPERATURE,
+    },
+    hardware: {
+      platform: process.platform,
+      arch: process.arch,
+      totalMemoryBytes: os.totalmem(),
+      cpu: os.cpus()?.[0]?.model || null,
+      cpuCount: os.cpus()?.length || null,
+    },
+  };
+  runtimeMetadataCache.set(model, metadata);
+  return metadata;
+}
 
 // ---------- approval flow ----------
 const pendingApprovals = new Map();
@@ -284,6 +389,10 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
           promptTokens: chunk.prompt_eval_count || 0,
           evalTokens: chunk.eval_count || 0,
           tokPerSec: chunk.eval_duration ? (chunk.eval_count || 0) / (chunk.eval_duration / 1e9) : 0,
+          loadMs: (chunk.load_duration || 0) / 1e6,
+          promptEvalMs: (chunk.prompt_eval_duration || 0) / 1e6,
+          generationMs: (chunk.eval_duration || 0) / 1e6,
+          totalMs: (chunk.total_duration || 0) / 1e6,
         };
       }
     }
@@ -421,6 +530,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       if (!toolCalls.length) {
         const recovered = parseRawToolCalls(content);
         if (recovered) {
+          usage.metrics.recoveredToolCalls += recovered.calls.length;
           toolCalls = recovered.calls;
           content = recovered.cleaned;
           // the raw markup already streamed to the UI — replace it with the cleaned text
@@ -540,6 +650,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           win.webContents.send('stream:toolresult', { name, result: preview(result) });
         }
 
+        recordToolTelemetry(result, /denied by user/i.test(String(result)));
         conversation.push({ role: 'tool', tool_name: name, content: String(result) });
       }
       if (stopRequested) break;
@@ -594,14 +705,18 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
   conversation.push(userMsg);
   stopRequested = false;
   currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
 
   try {
     await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch);
     return { ok: true };
   } catch (err) {
-    if (err.name === 'AbortError') return { ok: true, stopped: true };
+    if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }
+    runOutcome = 'failed';
     return { ok: false, error: String(err.message || err) };
   } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     currentAbort = null;
     win.webContents.send('stream:done');
   }
@@ -670,6 +785,7 @@ async function runSubagent(task, subModel, cwd) {
       if (!toolCalls.length) {
         const recovered = parseRawToolCalls(content);
         if (recovered) {
+          usage.metrics.recoveredToolCalls += recovered.calls.length;
           toolCalls = recovered.calls;
           content = recovered.cleaned;
         }
@@ -690,6 +806,7 @@ async function runSubagent(task, subModel, cwd) {
         const result = SUBAGENT_TOOL_NAMES.has(name)
           ? await safeExecute(name, args, cwd)
           : `Error: tool "${name}" is not available to subagents. Use your read-only exploration tools.`;
+        recordToolTelemetry(result);
         msgs.push({ role: 'tool', tool_name: name, content: String(result) });
       }
     }
@@ -836,7 +953,12 @@ async function compactScopedMessages(model, msgs, numCtx, role, usageBucket, con
     recordUsage(usageBucket, {
       promptTokens: data.prompt_eval_count || 0,
       evalTokens: data.eval_count || 0,
+      loadMs: (data.load_duration || 0) / 1e6,
+      promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+      generationMs: (data.eval_duration || 0) / 1e6,
+      totalMs: (data.total_duration || 0) / 1e6,
     });
+    usage.metrics.compactions += 1;
     msgs.splice(0, msgs.length,
       ...fixed,
       { role: 'assistant', content: `${role.toUpperCase()} CHECKPOINT:\n${summary}` },
@@ -922,6 +1044,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
     if (!toolCalls.length) {
       const recovered = parseRawToolCalls(content);
       if (recovered) {
+        usage.metrics.recoveredToolCalls += recovered.calls.length;
         toolCalls = recovered.calls;
         content = recovered.cleaned;
       }
@@ -956,7 +1079,10 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
       const name = tc.function?.name;
       let args = tc.function?.arguments || {};
       if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
-      if (name === 'submit_implementation_plan') return normalizeImplementationPlan(args, goal);
+      if (name === 'submit_implementation_plan') {
+        recordToolTelemetry('Plan submitted.');
+        return normalizeImplementationPlan(args, goal);
+      }
 
       let result;
       win.webContents.send('stream:state', `planner: ${name}`);
@@ -970,6 +1096,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
       } else {
         result = `Error: tool "${name}" is not available to the planner.`;
       }
+      recordToolTelemetry(result, /denied/i.test(String(result)));
       msgs.push({ role: 'tool', tool_name: name, content: String(result) });
     }
     const used = Math.max((stats?.promptTokens || 0) + (stats?.evalTokens || 0), estimateTokens(msgs));
@@ -1042,6 +1169,7 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
       if (!toolCalls.length) {
         const recovered = parseRawToolCalls(content);
         if (recovered) {
+          usage.metrics.recoveredToolCalls += recovered.calls.length;
           toolCalls = recovered.calls;
           content = recovered.cleaned;
         }
@@ -1061,6 +1189,7 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
         const result = CODER_TOOL_NAMES.has(name)
           ? await executeWithApproval(name, args, cwd, autoApprove, false)
           : `Error: tool "${name}" is not available to the coding worker.`;
+        recordToolTelemetry(result, /denied/i.test(String(result)));
         evidence.push({ name, args, result: String(result).slice(0, 4000) });
         msgs.push({ role: 'tool', tool_name: name, content: String(result) });
       }
@@ -1193,7 +1322,14 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
         },
       ],
     }, signal);
-    recordUsage('verifier', { promptTokens: data.prompt_eval_count || 0, evalTokens: data.eval_count || 0 });
+    recordUsage('verifier', {
+      promptTokens: data.prompt_eval_count || 0,
+      evalTokens: data.eval_count || 0,
+      loadMs: (data.load_duration || 0) / 1e6,
+      promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+      generationMs: (data.eval_duration || 0) / 1e6,
+      totalMs: (data.total_duration || 0) / 1e6,
+    });
     return (data.message?.content || '').trim() || 'No verifier verdict was returned.';
   } catch (err) {
     return `Verifier unavailable (${err.message}).`;
@@ -1220,7 +1356,14 @@ async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
         },
       ],
     }, signal);
-    recordUsage('verifier', { promptTokens: data.prompt_eval_count || 0, evalTokens: data.eval_count || 0 });
+    recordUsage('verifier', {
+      promptTokens: data.prompt_eval_count || 0,
+      evalTokens: data.eval_count || 0,
+      loadMs: (data.load_duration || 0) / 1e6,
+      promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+      generationMs: (data.eval_duration || 0) / 1e6,
+      totalMs: (data.total_duration || 0) / 1e6,
+    });
     return (data.message?.content || '').trim() || 'No verdict returned — continue working toward the goal.';
   } catch (err) {
     return `Verifier unavailable (${err.message}) — continue working toward the goal.`;
@@ -1230,6 +1373,8 @@ async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
 ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations }) => {
   stopRequested = false;
   currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
   const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
   const info = (t) => win.webContents.send('stream:info', t);
   const state = (t) => win.webContents.send('stream:state', t);
@@ -1246,6 +1391,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
     let feedback = '';
     for (let i = 1; i <= max; i++) {
       if (stopRequested) break;
+      usage.metrics.loopIterations += 1;
       info(`━ Loop iteration ${i}/${max} ━`);
       state(`loop ${i}/${max}`);
 
@@ -1292,9 +1438,11 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
     }
     return { ok: true };
   } catch (err) {
-    if (err.name === 'AbortError') return { ok: true, stopped: true };
+    if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }
+    runOutcome = 'failed';
     return { ok: false, error: String(err.message || err) };
   } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
     currentAbort = null;
     win.webContents.send('stream:done');
@@ -1309,6 +1457,9 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
 
   stopRequested = false;
   currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
+  usage.metrics.orchestrations += 1;
   const verifierModel = subModel || 'qwen3:8b';
   const baseline = await gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd);
   const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
@@ -1335,6 +1486,7 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
 
       while (verdict.trim().toUpperCase() !== 'GOAL_COMPLETE' && repairs < ORCHESTRATOR_MAX_REPAIRS && !stopRequested) {
         repairs++;
+        usage.metrics.repairs += 1;
         win.webContents.send('stream:info', `Verifier requested a repair for “${task.title}”:\n${verdict.slice(0, 2000)}`);
         win.webContents.send('stream:state', `repairing ${index + 1}/${plan.tasks.length} (${coderModel})`);
         const repair = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think, verdict.slice(0, 3000));
@@ -1401,9 +1553,11 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
     conversation.push({ role: 'assistant', content: report });
     return { ok: true, report, complete: allComplete };
   } catch (err) {
-    if (err.name === 'AbortError') return { ok: true, stopped: true };
+    if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }
+    runOutcome = 'failed';
     return { ok: false, error: String(err.message || err) };
   } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
     currentAbort = null;
     win.webContents.send('stream:done');
@@ -1448,14 +1602,16 @@ ipcMain.handle('app:getVersion', () => require('./package.json').version);
 // array lives here — these let it read the current one and swap in a stored one.
 ipcMain.handle('chat:get', () => conversation);
 
-ipcMain.handle('chat:load', async (_e, msgs, model) => {
+ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage) => {
   conversation = Array.isArray(msgs) ? msgs : [];
-  usage = freshUsage();
+  usage = restoreUsage(savedUsage);
   // estimate the loaded context so the bar and /usage aren't blank until the
   // next message (Ollama reports the exact count on the next request)
   const approxTokens = estimateTokens(stripOldImages(conversation));
   const contextLength = model ? await effectiveContext(model) : 0;
   usage.context = { tokens: approxTokens, limit: contextLength };
+  usage.metrics.peakContextTokens = Math.max(usage.metrics.peakContextTokens || 0, approxTokens);
+  usage.metrics.peakContextLimit = Math.max(usage.metrics.peakContextLimit || 0, contextLength);
   return { ok: true, approxTokens, contextLength };
 });
 
@@ -1485,7 +1641,7 @@ function writeChatIndex(list) {
 
 ipcMain.handle('history:list', () => readChatIndex());
 
-ipcMain.handle('history:save', (_e, meta, convo) => {
+ipcMain.handle('history:save', async (_e, meta, convo) => {
   try {
     const id = safeChatId(meta.id);
     if (!id) return { ok: false, error: 'invalid chat id' };
@@ -1498,8 +1654,22 @@ ipcMain.handle('history:save', (_e, meta, convo) => {
       autoApprove: !!meta.autoApprove,
       timestamp: meta.timestamp || new Date().toISOString(),
     };
+    const mainRuntime = await runtimeMetadata(meta.model || '');
+    const roleNames = {
+      main: meta.model || '',
+      coder: meta.coderModel || '',
+      subagent: meta.subModel || '',
+    };
+    const roleEntries = await Promise.all(Object.entries(roleNames).map(async ([role, name]) => [role, (await runtimeMetadata(name)).model]));
+    const detailed = {
+      subModel: meta.subModel || '',
+      coderModel: meta.coderModel || '',
+      onlineResearch: !!meta.onlineResearch,
+      runMetrics: meta.runMetrics || null,
+      runtime: { ...mainRuntime, roles: Object.fromEntries(roleEntries) },
+    };
     fs.mkdirSync(chatsDir(), { recursive: true });
-    fs.writeFileSync(path.join(chatsDir(), id + '.json'), JSON.stringify({ ...entry, conversation: convo || [] }), 'utf8');
+    fs.writeFileSync(path.join(chatsDir(), id + '.json'), JSON.stringify({ ...entry, ...detailed, conversation: convo || [] }), 'utf8');
     const index = readChatIndex().filter((c) => c.id !== id);
     index.push(entry);
     writeChatIndex(index);
@@ -1613,11 +1783,17 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     const summary = (data.message?.content || '').trim();
     if (!summary) return { ok: false, error: 'Model returned an empty summary.' };
 
+    usage.metrics.compactions += 1;
+
     // Record usage for the summarization step
     if (data.prompt_eval_count || data.eval_count) {
       recordUsage('main', {
         promptTokens: data.prompt_eval_count,
-        evalTokens: data.eval_count
+        evalTokens: data.eval_count,
+        loadMs: (data.load_duration || 0) / 1e6,
+        promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+        generationMs: (data.eval_duration || 0) / 1e6,
+        totalMs: (data.total_duration || 0) / 1e6,
       });
     }
 

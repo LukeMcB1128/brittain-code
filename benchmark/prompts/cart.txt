@@ -1,0 +1,5 @@
+This folder is a small shopping-cart module whose tests are failing. Make every test pass.
+
+Run: node test.js
+
+Do not modify test.js or hardcode expected values. Fix the source generally, verify with the real test command, and report the final pass count.

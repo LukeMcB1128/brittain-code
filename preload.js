@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   stop: () => ipcRenderer.send('chat:stop'),
   reset: () => ipcRenderer.invoke('chat:reset'),
   getConversation: () => ipcRenderer.invoke('chat:get'),
-  loadConversation: (msgs, model) => ipcRenderer.invoke('chat:load', msgs, model),
+  loadConversation: (msgs, model, runMetrics) => ipcRenderer.invoke('chat:load', msgs, model, runMetrics),
   gitStatus: (cwd) => ipcRenderer.invoke('git:status', cwd),
   gitDiff: (cwd) => ipcRenderer.invoke('git:diff', cwd),
   gitGraph: (cwd) => ipcRenderer.invoke('git:graph', cwd),

@@ -91,6 +91,10 @@ The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is en
 - Attach images with the **IMG** button or paste them into the text box (vision-capable models only).
 - **Esc** stops a running generation. Speed (tokens/sec) shows in the status bar after each response.
 
+## Model benchmark
+
+The offline benchmark includes versioned bug-fix, feature, debugging, and economy-simulation tasks. It deterministically scores correctness, protected-file safety, verification reliability, and task-normalized efficiency; it also compares solo models with planner/coder/verifier teams using saved per-role telemetry. See [`benchmark/README.md`](benchmark/README.md) for setup, repetition, grading, and report commands.
+
 ## Code layout — where to modify things
 
 | File | What it does |

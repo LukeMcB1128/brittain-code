@@ -239,9 +239,13 @@ test('managed processes can be started, polled, and stopped by opaque id', async
   }, cwd));
   assert.match(started.id, /^[a-f0-9]{16}$/);
   assert.equal(started.running, true);
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  let status;
+  const deadline = Date.now() + 2000;
+  do {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    status = JSON.parse(await executeTool('process_status', { id: started.id }, cwd));
+  } while (!/managed-ready/.test(status.stdout) && Date.now() < deadline);
 
-  const status = JSON.parse(await executeTool('process_status', { id: started.id }, cwd));
   assert.equal(status.running, true);
   assert.match(status.stdout, /managed-ready/);
 
