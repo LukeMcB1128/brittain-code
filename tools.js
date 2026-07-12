@@ -2047,9 +2047,9 @@ async function executeTool(name, args, cwd) {
 }
 
 // ---------- git integration ----------
-function gitRun(args, cwd) {
+function gitRun(args, cwd, env) {
   return new Promise((resolve) => {
-    execFile('git', args, { cwd, timeout: 15_000, maxBuffer: 4_000_000 }, (err, stdout, stderr) => {
+    execFile('git', args, { cwd, timeout: 15_000, maxBuffer: 4_000_000, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
       resolve({ ok: !err, out: stdout || '', err: (stderr || '').trim() });
     });
   });

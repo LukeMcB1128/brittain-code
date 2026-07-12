@@ -11,6 +11,8 @@ const chatList = $('chat-list');
 const sidebar = $('sidebar');
 const thinkToggle = $('think-toggle');
 const onlineResearchToggle = $('online-research');
+const autoBranchToggle = $('auto-branch');
+const undoBtn = $('undo-btn');
 
 let cwd = null;
 let busy = false;
@@ -74,6 +76,7 @@ let currentChatId = null;
 
   thinkToggle.checked = localStorage.getItem('think') === '1';
   autoApprove.checked = localStorage.getItem('autoApprove') === '1';
+  autoBranchToggle.checked = localStorage.getItem('autoBranch') === '1';
   onlineResearchToggle.checked = false; // privacy boundary: never restore online access implicitly
 
   // One-time migration: chats used to live in localStorage; move them to disk.
@@ -99,6 +102,7 @@ let currentChatId = null;
 
 thinkToggle.addEventListener('change', () => localStorage.setItem('think', thinkToggle.checked ? '1' : '0'));
 autoApprove.addEventListener('change', () => localStorage.setItem('autoApprove', autoApprove.checked ? '1' : '0'));
+autoBranchToggle.addEventListener('change', () => localStorage.setItem('autoBranch', autoBranchToggle.checked ? '1' : '0'));
 onlineResearchToggle.addEventListener('change', () => {
   if (!onlineResearchToggle.checked) return;
   const approved = confirm(
@@ -120,8 +124,26 @@ function setCwd(p) {
   const parts = p.split('/');
   $('cwd-label').textContent = parts.slice(-2).join('/') || p;
   $('cwd-btn').title = p;
+  undoBtn.disabled = true; // checkpoints are per-folder; a new DIR has none yet
   refreshGit();
 }
+
+// ---------- run checkpoints / UNDO ----------
+window.api.onCheckpointState(({ available, cwd: ckptCwd }) => {
+  if (available && ckptCwd === cwd) undoBtn.disabled = false;
+});
+
+undoBtn.addEventListener('click', async () => {
+  if (busy || undoBtn.disabled) return;
+  if (!confirm('Restore all files in this folder to the checkpoint taken before the last run?\n\n(The current state is checkpointed first — press UNDO again to re-apply the run.)')) return;
+  const res = await window.api.undoCheckpoint(cwd);
+  if (res.ok) {
+    addInfo(`UNDO: restored working tree to the ${res.restoredFrom} checkpoint (was: ${res.changes}). A pre-undo checkpoint was saved — UNDO again to swap back.`);
+  } else {
+    addError('Undo failed: ' + res.error);
+  }
+  refreshGit();
+});
 
 // ---------- chat history ----------
 async function loadChatHistory() {
@@ -241,6 +263,7 @@ async function saveChat() {
       cwd: cwd || '',
       think: thinkToggle.checked,
       autoApprove: autoApprove.checked,
+      autoBranch: autoBranchToggle.checked,
       onlineResearch: onlineResearchToggle.checked,
       subModel,
       coderModel,
@@ -999,6 +1022,7 @@ async function handleSlash(raw) {
         goal,
         cwd,
         autoApprove: autoApprove.checked,
+        autoBranch: autoBranchToggle.checked,
         onlineResearch: onlineResearchToggle.checked,
         think: thinkToggle.checked,
         maxIterations: iterations,

@@ -24,6 +24,10 @@
       <input type="checkbox" id="auto-approve" />
       <span>AUTO-APPROVE</span>
     </label>
+    <label class="toggle" title="When on, agents work on an auto-created brittain/ git branch instead of your current branch — merge or discard after review">
+      <input type="checkbox" id="auto-branch" />
+      <span>BRANCH</span>
+    </label>
     <button id="new-btn" title="Clear conversation">NEW SESSION</button>
   </header>
 
@@ -84,6 +88,7 @@
         <span id="git-branch" title="Current git branch (± = changed files)"></span>
         <button id="diff-btn" class="mini" title="Show git diff of the working directory">DIFF</button>
         <button id="commit-btn" class="mini" title="Commit all changes (prefills /commit)">COMMIT</button>
+        <button id="undo-btn" class="mini" disabled title="Restore all files to the checkpoint taken before the last run (UNDO again re-applies the run)">UNDO</button>
       </span>
     </div>
   </footer>

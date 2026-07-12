@@ -686,6 +686,94 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   return { lastContent, lastStats, contextLength };
 }
 
+// ---------- run checkpoints (Tier 1 safety) ----------
+// Before every run, snapshot the working tree (tracked + untracked) into a
+// hidden ref under refs/brittain/checkpoints/ — using a TEMPORARY index so the
+// user's real index, branch, and commit history are never touched. UNDO RUN
+// restores the tree to the snapshot even if the user never committed.
+const CHECKPOINT_KEEP = 20;
+let lastCheckpoint = null; // { ref, cwd, at }
+
+async function createCheckpoint(cwd) {
+  try {
+    if (!(await gitRun(['rev-parse', '--git-dir'], cwd)).ok) return null; // not a repo
+    const tmpIndex = path.join(app.getPath('temp'), 'brittain-ckpt-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+    const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+    try {
+      const add = await gitRun(['add', '-A', '--', '.'], cwd, env);
+      if (!add.ok) return null;
+      const tree = await gitRun(['write-tree'], cwd, env);
+      if (!tree.ok) return null;
+      const head = await gitRun(['rev-parse', 'HEAD'], cwd);
+      const parentArgs = head.ok ? ['-p', head.out.trim()] : [];
+      const commit = await gitRun(['commit-tree', tree.out.trim(), ...parentArgs, '-m', 'brittain checkpoint ' + new Date().toISOString()], cwd, env);
+      if (!commit.ok) return null;
+      const ref = 'refs/brittain/checkpoints/' + Date.now();
+      if (!(await gitRun(['update-ref', ref, commit.out.trim()], cwd)).ok) return null;
+      lastCheckpoint = { ref, cwd, at: Date.now() };
+      win.webContents.send('checkpoint:state', { available: true, cwd });
+      pruneCheckpoints(cwd); // fire and forget
+      return lastCheckpoint;
+    } finally {
+      try { fs.unlinkSync(tmpIndex); } catch {}
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function pruneCheckpoints(cwd) {
+  const list = await gitRun(['for-each-ref', '--format=%(refname)', 'refs/brittain/checkpoints/'], cwd);
+  if (!list.ok) return;
+  const refs = list.out.split('\n').filter(Boolean).sort(); // timestamped names sort chronologically
+  for (const ref of refs.slice(0, Math.max(0, refs.length - CHECKPOINT_KEEP))) {
+    await gitRun(['update-ref', '-d', ref], cwd);
+  }
+}
+
+ipcMain.handle('checkpoint:undo', async (_e, cwd) => {
+  const target = lastCheckpoint;
+  if (!target || target.cwd !== cwd) return { ok: false, error: 'No checkpoint for this folder in this session.' };
+  try {
+    const stat = await gitRun(['diff', '--shortstat', target.ref], cwd);
+    // snapshot the CURRENT state first, so UNDO itself is undoable
+    await createCheckpoint(cwd);
+    // restore tracked content (worktree only — the user's index stays theirs)
+    const restore = await gitRun(['restore', '--source=' + target.ref, '--worktree', '--', '.'], cwd);
+    if (!restore.ok) return { ok: false, error: restore.err || 'restore failed' };
+    // delete files that exist now but did not exist at the checkpoint
+    const inRef = await gitRun(['ls-tree', '-r', '--name-only', target.ref], cwd);
+    const nowFiles = await gitRun(['ls-files', '--cached', '--others', '--exclude-standard'], cwd);
+    if (inRef.ok && nowFiles.ok) {
+      const keep = new Set(inRef.out.split('\n').filter(Boolean));
+      for (const f of nowFiles.out.split('\n').filter(Boolean)) {
+        if (!keep.has(f)) { try { fs.unlinkSync(path.join(cwd, f)); } catch {} }
+      }
+    }
+    return { ok: true, restoredFrom: new Date(target.at).toLocaleTimeString(), changes: (stat.out || '').trim() || 'no differences detected' };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+// ---------- auto-branch (Tier 1 safety, toggleable) ----------
+async function maybeAutoBranch(cwd, taskText, enabled) {
+  if (!enabled) return;
+  const cur = await gitRun(['branch', '--show-current'], cwd);
+  if (!cur.ok || cur.out.trim().startsWith('brittain/')) return; // not a repo, or already on an agent branch
+  const slug = String(taskText || 'task').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'task';
+  const d = new Date();
+  let name = `brittain/${d.getMonth() + 1}-${d.getDate()}-${slug}`;
+  let made = await gitRun(['checkout', '-b', name], cwd);
+  if (!made.ok && /already exists/.test(made.err)) {
+    name += '-' + d.getHours() + d.getMinutes();
+    made = await gitRun(['checkout', '-b', name], cwd);
+  }
+  win.webContents.send('stream:info', made.ok
+    ? `BRANCH: created and switched to ${name} — your previous branch is untouched. Merge or discard it when you review.`
+    : 'BRANCH is on but branch creation failed: ' + (made.err || 'unknown error'));
+}
+
 // If the conversation is already over the threshold BEFORE we send (e.g. it
 // grew last session, or was loaded pre-bloated), compact first — otherwise the
 // request context-shifts and the model silently loses its oldest messages.
@@ -704,10 +792,12 @@ async function maybePrecompact(model) {
   }
 }
 
-ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images, imageTypes, subModel, onlineResearch }) => {
+ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images, imageTypes, subModel, onlineResearch, autoBranch }) => {
   if (images?.length && !(await supportsVision(model))) {
     return { ok: false, error: `${model} cannot see images — pick a vision-capable model or remove the attachment.` };
   }
+  await maybeAutoBranch(cwd, text, !!autoBranch);
+  await createCheckpoint(cwd); // silent; enables UNDO RUN
   await maybePrecompact(model);
   const userMsg = { role: 'user', content: text };
   if (images?.length) userMsg.images = images;
@@ -1380,9 +1470,11 @@ async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
   }
 }
 
-ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations }) => {
+ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
   stopRequested = false;
   currentAbort = new AbortController();
+  await maybeAutoBranch(cwd, goal, !!autoBranch);
+  await createCheckpoint(cwd); // silent; enables UNDO RUN for the whole loop
   const runStartedAt = Date.now();
   let runOutcome = 'ok';
   const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);

@@ -592,6 +592,12 @@ button.mini {
   font-size: 10px;
 }
 
+button.mini:disabled {
+  opacity: 0.35;
+  cursor: default;
+  border-color: var(--border);
+}
+
 /* ---------- overlay (diff viewer, memory, etc.) ---------- */
 #overlay {
   position: fixed;
