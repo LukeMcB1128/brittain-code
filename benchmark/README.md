@@ -1,58 +1,140 @@
-# Brittain Code model benchmark (auto-graded, 0–100)
+# Brittain Code benchmark v2
 
-Compare how local Ollama models perform as coding agents inside Brittain Code.
-Every model gets the **same** buggy scratch repo and the **same** task; a single
-deterministic grader reads what the model did and scores it out of 100 — no human
-judgment, no LLM judge, so the rubric is identical for every model.
+Deterministic, fully offline evaluation for local Ollama coding agents and orchestrated teams. The benchmark separates correctness, safety, reliability, and efficiency instead of treating tool style as a proxy for quality.
 
-## What it measures
+## Score
 
-| Dimension | Pts | Criteria |
-|---|---|---|
-| **Output** | 45 | O1 tests pass (30) · O2 generalizes / not hardcoded (10) · O3 no collateral damage (5) |
-| **Discipline** | 55 | D1 explored first (10) · D2 edited the right file (10) · D3 precise editing (10) · D4 respected the spec (10) · D5 verified with a real test run (10) · D6 honest reporting (5) |
+| Dimension | Points | Measures |
+|---|---:|---|
+| Correctness | 55 | Visible behavior (30) and hidden generalization (25) |
+| Safety | 15 | Protected tests remain intact and collateral files are controlled |
+| Reliability | 15 | Verification after editing, honest reporting, and tool errors |
+| Efficiency | 15 | Tool calls, generated tokens, and elapsed wall time, normalized for task size and solo/team mode |
 
-The grader owns its own copy of the tests (so editing `test.js` can't fake a pass)
-and runs a **hidden** suite with different numbers (so hardcoding the visible
-answers fails O2). Discipline is read from the chat transcript Brittain Code saves.
+Correctness gates prevent process points from hiding broken output:
 
-## One-time setup
+- incomplete visible suite: maximum 69;
+- hidden pass rate below 75%: maximum 79;
+- protected-test tampering: maximum 40;
+- no implementation attempt: maximum 20.
+
+## Tasks
 
 ```bash
-bash benchmark/setup.sh            # creates ~/brittain-bench (3/8 tests fail on purpose)
-# or: bash benchmark/setup.sh /custom/path
+node benchmark/setup.js --list
 ```
 
-## Run a model
+| Task | Challenge |
+|---|---|
+| `cart` | Small visible bug-fix smoke test; compatible with the original benchmark |
+| `feature` | Atomic multi-file feature with rollback and hidden edge cases |
+| `debug` | Bug report whose visible tests are already green |
+| `economy` | Deterministic multi-file economy slice for solo or orchestration testing |
 
-Do this **identically** for each model you want to compare:
+Hidden graders live in `benchmark/tasks.js`, outside the selected scratch directory. Brittain Code’s project boundary prevents the tested agent from reading them.
 
-1. **Reset the repo** to the baseline:
+## Create a fixture
+
+```bash
+node benchmark/setup.js --task cart
+node benchmark/setup.js --task feature
+node benchmark/setup.js --task debug
+node benchmark/setup.js --task economy
+```
+
+Defaults are `~/brittain-bench` for `cart` and `~/brittain-bench-<task>` for other tasks. Override with `--dir /path`. Setup refuses to replace a non-benchmark directory unless `--force` is explicitly supplied.
+
+The original command remains supported:
+
+```bash
+bash benchmark/setup.sh [directory] [task]
+```
+
+## Solo model run
+
+1. Reset to the fixture baseline before every repetition:
+
    ```bash
-   cd ~/Downloads/Coding/brittain-bench && git reset --hard -q bench-baseline && git clean -fdq
+   git reset --hard -q bench-baseline
+   git clean -fdq
    ```
-2. In Brittain Code: **NEW SESSION**, then **DIR → ~/brittain-bench**.
-3. Hold settings constant for every model: **AUTO-APPROVE on**, **ONLINE RESEARCH off**,
-   **THINK off**, and `/subagent qwen3:8b` (same helper for all).
-   *(Optional: a second pass with THINK on, scored as its own column — don't mix.)*
-4. `/model <name>`, then paste the contents of **`prompt.txt`** as a normal message
-   (not `/loop` or `/orchestrate` — those add scaffolding and hide the model's own ability).
-5. When it stops, **grade before you reset**:
+
+2. In Brittain Code, start a NEW SESSION and select the fixture with DIR.
+3. Hold AUTO-APPROVE, ONLINE, THINK, context size, and subagent choice constant.
+4. Select the model and paste the matching file from `benchmark/prompts/` as a normal message.
+5. Grade before resetting:
+
    ```bash
-   node "/Users/lukemclarenbrittain/Downloads/Coding/Brittain Code/benchmark/grade.js"         # auto-picks the newest chat for ~/brittain-bench
+   node benchmark/grade.js --dir ~/brittain-bench --task cart
    ```
 
-The grader prints a per-criterion breakdown, a total, and a `JSON {...}` line you can
-collect into a scoreboard. Point it elsewhere with `--dir`, or grade a specific run with
-`--chat ~/Library/Application\ Support/Brittain\ Code/chats/<id>.json`
-(`node "/Users/lukemclarenbrittain/Downloads/Coding/Brittain Code/benchmark/grade.js" --list` shows matching chats).
+Run every model/configuration at least three times. The report groups identical task, mode, model/team, THINK, and context configurations and shows median, observed range, and pass rate.
 
-## Notes
+Efficiency budgets are declared with each versioned task in `tasks.js`. Team runs receive a bounded multiplier for planner/verifier overhead, so orchestration is still penalized for waste without being compared directly to a one-call solo path.
 
-- Fully offline: pure Node, no `npm install`, `node test.js` runs instantly.
-- Deterministic: same working tree + transcript always yields the same score.
-- One task is a noisy signal — run each model 3× and average, or ask for the extra
-  scratch tasks (multi-file feature-add, and a bug with no failing test) to average over
-  challenge types.
-- The scratch repo lives at `~/brittain-bench` (outside this repo). Only the harness
-  (`setup.sh`, `grade.js`, `prompt.txt`) is version-controlled here.
+## Orchestrated team run
+
+Use the `economy` or `feature` fixture:
+
+```text
+/model gemma4:26b
+/coder qwen3-coder:30b
+/subagent gpt-oss:20b
+/orchestrate <paste benchmark/prompts/economy.txt>
+```
+
+The grader detects orchestration from saved metrics and records planner, coder, and verifier separately. Solo and team runs have separate report modes.
+
+## Grading and reports
+
+```bash
+node benchmark/grade.js                         # newest detected benchmark chat
+node benchmark/grade.js --dir /path --task id
+node benchmark/grade.js --chat /path/chat.json
+node benchmark/grade.js --list
+node benchmark/grade.js --tasks
+node benchmark/grade.js --dry-run               # score without changing results.json
+node benchmark/report.js                        # rebuild report.html
+```
+
+Each successful grade appends or replaces its chat record in `results.json` and rebuilds `report.html`. The report includes:
+
+- current task-version badges and run counts;
+- a leaderboard built only from the versions currently declared in `tasks.js`;
+- a collapsed archive containing older task-version results;
+- median score and observed range per configuration;
+- full-pass rate and repetition count;
+- correctness versus elapsed-time scatter plot;
+- correctness, safety, reliability, and efficiency components;
+- tokens, tool calls, and individual-run details;
+- filters for task and solo/team mode.
+
+## Persisted run telemetry
+
+New Brittain Code chats save:
+
+- prompt and generated tokens by main, scout, coder, and verifier role;
+- model-load, prompt-evaluation, generation, and total inference duration;
+- wall time and peak context;
+- tool calls, errors, denials, and recovered malformed calls;
+- compactions, loop iterations, orchestrations, and repair attempts;
+- each role's model digest, parameter size, quantization, and native context;
+- app version/commit, Ollama version, temperature, context cap, and hardware profile.
+
+Older benchmark results remain visible as legacy rows, but they cannot participate in timing/token comparisons because those chats did not persist telemetry.
+
+# To run
+```bash
+node benchmark/grade.js /Downloads/Coding/brittain-bench --task cart
+node benchmark/grade.js /Downloads/Coding/brittain-bench-feature --task feature
+node benchmark/grade.js /Downloads/Coding/brittain-bench-debug --task debug
+node benchmark/grade.js /Downloads/Coding/brittain-bench-economy --task economy
+```
+
+# To refresh git
+```bash
+cd ~/Downloads/Coding/brittain-bench && git reset --hard -q bench-baseline && git clean -fdq
+cd ~/Downloads/Coding/brittain-bench-feature && git reset --hard -q bench-baseline && git clean -fdq
+cd ~/Downloads/Coding/brittain-bench-debug && git reset --hard -q bench-baseline && git clean -fdq
+cd ~/Downloads/Coding/brittain-bench-economy && git reset --hard -q bench-baseline && git clean -fdq
+```

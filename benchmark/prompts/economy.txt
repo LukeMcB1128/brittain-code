@@ -1,0 +1,11 @@
+Build the deterministic headless economy slice described by the existing test.js.
+
+Implement rng.js, ledger.js, and economy.js with:
+- deterministic seeded replay;
+- households and firms represented as accounts;
+- explicit ledger transfers that never create or destroy money;
+- nonnegative finite balances;
+- one finite metrics record per tick;
+- stable long runs, zero-tick support, and no mutation of the options object.
+
+Do not modify test.js. Verify with the repository's declared test check. This task may be run as a normal solo message or with /orchestrate.

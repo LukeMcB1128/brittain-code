@@ -1,125 +1,207 @@
 #!/usr/bin/env node
-/*
- * Builds a self-contained report.html (inline SVG chart + table) from results.json.
- * Used automatically by grade.js, or run standalone to rebuild the chart:
- *   node benchmark/report.js
- */
+/* Builds a self-contained aggregate benchmark report. */
 const fs = require('fs');
 const path = require('path');
+const { TASKS } = require('./tasks');
 
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+const median = (values) => {
+  const sorted = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+
+function normalize(row) {
+  if (row.schemaVersion === 2) return row;
+  return {
+    ...row,
+    schemaVersion: 1,
+    task: 'cart',
+    taskVersion: 1,
+    mode: 'solo',
+    modelLabel: row.model || '(unknown)',
+    correctness: number(row.output),
+    safety: 0,
+    reliability: number(row.discipline),
+    efficiency: 0,
+    visibleTotal: 8,
+    hiddenTotal: 6,
+    fullPass: number(row.visible) === 8 && number(row.hidden) === 6,
+    configKey: `legacy|cart|${row.model || '(unknown)'}`,
+  };
+}
+
+function aggregate(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = row.configKey || [row.task, row.mode, row.modelLabel].join('|');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return [...groups.entries()].map(([key, runs]) => {
+    const totals = runs.map((run) => number(run.total));
+    const settings = runs[0].settings || {};
+    const settingParts = [];
+    if (settings.contextCap) settingParts.push(`${Math.round(settings.contextCap / 1024)}k ctx`);
+    if (settings.think !== undefined) settingParts.push(settings.think ? 'think on' : 'think off');
+    const displayLabel = settingParts.length ? `${runs[0].modelLabel} (${settingParts.join(', ')})` : runs[0].modelLabel;
+    return {
+      key,
+      task: runs[0].task,
+      taskVersion: number(runs[0].taskVersion, 1),
+      mode: runs[0].mode,
+      think: settings.think === undefined ? 'unknown' : settings.think ? 'on' : 'off',
+      label: displayLabel,
+      runs: runs.length,
+      median: median(totals),
+      min: Math.min(...totals),
+      max: Math.max(...totals),
+      passRate: runs.filter((run) => run.fullPass).length / runs.length,
+      wallMs: median(runs.map((run) => run.wallTimeMs).filter(Boolean)),
+      generated: median(runs.map((run) => run.generatedTokens).filter(Boolean)),
+      tools: median(runs.map((run) => run.toolCalls).filter((value) => value !== undefined)),
+      correctness: median(runs.map((run) => run.correctness)),
+      reliability: median(runs.map((run) => run.reliability)),
+      efficiency: median(runs.map((run) => run.efficiency)),
+    };
+  }).sort((a, b) => b.median - a.median || b.passRate - a.passRate || a.label.localeCompare(b.label));
+}
+
+const mean = (values) => {
+  const usable = values.map(Number).filter(Number.isFinite);
+  return usable.length ? Math.round((usable.reduce((sum, value) => sum + value, 0) / usable.length) * 10) / 10 : null;
+};
+
+function averageAcrossTasks(groups, totalTaskCount) {
+  const configs = new Map();
+  for (const group of groups) {
+    const key = [group.mode, group.think, group.label].join('|');
+    if (!configs.has(key)) configs.set(key, []);
+    configs.get(key).push(group);
+  }
+  return [...configs.values()].map((entries) => ({
+    ...entries[0],
+    task: 'all',
+    taskCount: new Set(entries.map((entry) => entry.task)).size,
+    totalTaskCount,
+    runs: entries.reduce((sum, entry) => sum + entry.runs, 0),
+    median: mean(entries.map((entry) => entry.median)),
+    min: Math.min(...entries.map((entry) => entry.min)),
+    max: Math.max(...entries.map((entry) => entry.max)),
+    passRate: entries.reduce((sum, entry) => sum + entry.passRate * entry.runs, 0) / entries.reduce((sum, entry) => sum + entry.runs, 0),
+    wallMs: mean(entries.map((entry) => entry.wallMs).filter(Boolean)),
+    generated: mean(entries.map((entry) => entry.generated).filter((value) => value !== null)),
+    tools: mean(entries.map((entry) => entry.tools).filter((value) => value !== null)),
+    correctness: mean(entries.map((entry) => entry.correctness)),
+    reliability: mean(entries.map((entry) => entry.reliability)),
+    efficiency: mean(entries.map((entry) => entry.efficiency)),
+  })).sort((a, b) => b.median - a.median || b.taskCount - a.taskCount || b.passRate - a.passRate || a.label.localeCompare(b.label));
+}
+
+function scoreChart(groups, averaging = false) {
+  if (!groups.length) return '<p class="muted empty-view">No matching results yet.</p>';
+  const chartW = 1100, labelW = 360, plotRight = 1060, rowH = 46, chartTop = 34;
+  const chartH = Math.max(90, chartTop + groups.length * rowH + 12);
+  const scoreX = (value) => labelW + (number(value) / 100) * (plotRight - labelW);
+  const grid = [0, 25, 50, 75, 100].map((value) =>
+    `<line x1="${scoreX(value)}" y1="24" x2="${scoreX(value)}" y2="${chartH - 8}" class="grid"/><text x="${scoreX(value)}" y="15" class="top-tick">${value}</text>`
+  ).join('');
+  const bars = groups.map((group, index) => {
+    const y = chartTop + index * rowH;
+    const end = scoreX(group.median);
+    const rangeStart = scoreX(group.min);
+    const rangeEnd = scoreX(group.max);
+    const coverage = averaging ? ` · tasks ${group.taskCount}/${group.totalTaskCount}` : '';
+    const title = `${averaging ? 'current-suite average' : `${group.task} v${group.taskVersion}`} · ${group.mode}\n${group.label}\nscore ${group.median}/100, observed range ${group.min}–${group.max}, pass ${(group.passRate * 100).toFixed(0)}%, n=${group.runs}${coverage}`;
+    return `<g><title>${esc(title)}</title>` +
+      `<text x="${labelW - 16}" y="${y + 17}" class="bar-label">${esc(group.label)}</text>` +
+      `<text x="${labelW - 16}" y="${y + 34}" class="bar-meta">${esc(`${averaging ? 'current-suite average' : `${group.task} v${group.taskVersion}`} · ${group.mode} · n=${group.runs} · pass ${(group.passRate * 100).toFixed(0)}%${coverage}`)}</text>` +
+      `<rect x="${labelW}" y="${y + 8}" width="${Math.max(1, end - labelW)}" height="25" rx="4" class="bar"/>` +
+      `<line x1="${rangeStart}" y1="${y + 37}" x2="${rangeEnd}" y2="${y + 37}" class="error"/>` +
+      `<line x1="${rangeStart}" y1="${y + 33}" x2="${rangeStart}" y2="${y + 41}" class="error"/><line x1="${rangeEnd}" y1="${y + 33}" x2="${rangeEnd}" y2="${y + 41}" class="error"/>` +
+      `<text x="${Math.min(end + 9, chartW - 24)}" y="${y + 26}" class="bar-score">${group.median}</text></g>`;
+  }).join('');
+  return `<svg class="score-chart" viewBox="0 0 ${chartW} ${chartH}" role="img" aria-label="${averaging ? 'Average' : 'Median'} benchmark scores">${grid}${bars}</svg>`;
+}
+
+function scatterChart(groups, averaging = false) {
+  const scatterGroups = groups.filter((group) => group.wallMs);
+  if (!scatterGroups.length) return '<p class="muted empty-view">No matching telemetry-backed results yet.</p>';
+  const maxWall = Math.max(1, ...scatterGroups.map((group) => group.wallMs || 0));
+  const scatterW = 1100, scatterH = 390, sL = 70, sT = 28, sB = 55;
+  const sx = (ms) => sL + (number(ms) / maxWall) * (scatterW - sL - 30);
+  const sy = (score) => sT + (1 - number(score) / 55) * (scatterH - sT - sB);
+  const scatterGrid = [0, 11, 22, 33, 44, 55].map((value) => `<line x1="${sL}" y1="${sy(value)}" x2="${scatterW - 20}" y2="${sy(value)}" class="grid"/><text x="${sL - 12}" y="${sy(value) + 4}" class="tick">${value}</text>`).join('');
+  const dots = scatterGroups.map((group, index) => {
+    const color = `hsl(${(index * 47 + 130) % 360} 62% 52%)`;
+    return `<g><title>${esc(`${group.label}\n${group.correctness}/55 correctness · ${(group.wallMs / 1000).toFixed(1)}s ${averaging ? 'average' : 'median'}`)}</title><circle cx="${sx(group.wallMs)}" cy="${sy(group.correctness)}" r="12" style="fill:${color}"/><text x="${sx(group.wallMs)}" y="${sy(group.correctness) + 4}" class="dot-number">${index + 1}</text></g>`;
+  }).join('');
+  const legend = scatterGroups.map((group, index) => `<div class="legend-item"><span class="legend-number" style="background:hsl(${(index * 47 + 130) % 360} 62% 52%)">${index + 1}</span><span><b>${esc(group.label)}</b><small>${group.correctness}/55 · ${(group.wallMs / 1000).toFixed(1)}s · ${averaging ? `${group.taskCount}/${group.totalTaskCount} tasks` : `${esc(group.task)} ${esc(group.mode)}`}</small></span></div>`).join('');
+  return `<svg class="scatter-chart" viewBox="0 0 ${scatterW} ${scatterH}" role="img" aria-label="Correctness versus elapsed time">${scatterGrid}<line x1="${sL}" y1="${sT}" x2="${sL}" y2="${scatterH - sB}" class="axis"/><line x1="${sL}" y1="${scatterH - sB}" x2="${scatterW - 20}" y2="${scatterH - sB}" class="axis"/><text x="${scatterW / 2}" y="${scatterH - 10}" class="axislabel">${averaging ? 'average' : 'median'} wall time (max ${(maxWall / 1000).toFixed(0)}s)</text><text x="18" y="${scatterH / 2}" transform="rotate(-90 18 ${scatterH / 2})" class="axislabel">correctness /55</text>${dots}</svg><div class="legend">${legend}</div>`;
+}
 
 function writeReport(resultsPath, htmlPath) {
-  let rows = [];
-  try { rows = JSON.parse(fs.readFileSync(resultsPath, 'utf8')); } catch {}
-  rows = rows.slice().sort((a, b) => b.total - a.total || String(a.model).localeCompare(String(b.model)));
+  let raw = [];
+  try { raw = JSON.parse(fs.readFileSync(resultsPath, 'utf8')); } catch {}
+  const rows = raw.map(normalize);
+  const currentVersion = Object.fromEntries(Object.entries(TASKS).map(([id, task]) => [id, task.version]));
+  const currentRows = rows.filter((row) => number(row.taskVersion, 1) === currentVersion[row.task]);
+  const archivedRows = rows.filter((row) => number(row.taskVersion, 1) !== currentVersion[row.task]);
+  const groups = aggregate(currentRows);
+  const archivedGroups = aggregate(archivedRows);
+  const tasks = Object.keys(TASKS).sort();
+  const modes = [...new Set(currentRows.map((row) => row.mode))].sort();
+  const thinks = [...new Set(groups.map((group) => group.think))].sort();
 
-  // disambiguate repeated model names for the axis labels
-  const counts = {};
-  rows.forEach((r) => { counts[r.model] = (counts[r.model] || 0) + 1; });
-  const seen = {};
-  rows.forEach((r) => { seen[r.model] = (seen[r.model] || 0) + 1; r._label = counts[r.model] > 1 ? `${r.model} ·${seen[r.model]}` : r.model; });
+  const taskChoices = ['all', ...tasks];
+  const modeChoices = ['all', ...modes];
+  const thinkChoices = ['all', ...thinks];
+  const views = [];
+  for (const taskChoice of taskChoices) {
+    for (const modeChoice of modeChoices) {
+      for (const thinkChoice of thinkChoices) {
+        const matching = groups.filter((group) =>
+          (taskChoice === 'all' || group.task === taskChoice)
+          && (modeChoice === 'all' || group.mode === modeChoice)
+          && (thinkChoice === 'all' || group.think === thinkChoice));
+        const displayed = taskChoice === 'all' ? averageAcrossTasks(matching, tasks.length) : matching;
+        const key = [taskChoice, modeChoice, thinkChoice].join('|');
+        views.push({ key, score: scoreChart(displayed, taskChoice === 'all'), scatter: scatterChart(displayed, taskChoice === 'all') });
+      }
+    }
+  }
+  const chart = views.map((view) => `<div class="chart-view" data-view-key="${esc(view.key)}">${view.score}</div>`).join('');
+  const scatter = views.map((view) => `<div class="chart-view" data-view-key="${esc(view.key)}">${view.scatter}</div>`).join('');
 
-  // ---- chart geometry ----
-  const padL = 44, padT = 28, padB = 104, chartH = 300;
-  const bw = 52, gap = 26;
-  const width = Math.max(360, padL + rows.length * (bw + gap) + gap);
-  const height = padT + chartH + padB;
-  const y = (v) => padT + (1 - v / 100) * chartH;
-
-  const gridlines = [0, 25, 50, 75, 100].map((v) =>
-    `<line x1="${padL}" y1="${y(v).toFixed(1)}" x2="${width - 10}" y2="${y(v).toFixed(1)}" class="grid"/>` +
-    `<text x="${padL - 8}" y="${(y(v) + 4).toFixed(1)}" class="ytick">${v}</text>`
-  ).join('');
-
-  const bars = rows.map((r, i) => {
-    const x = padL + gap + i * (bw + gap);
-    const oH = (r.output / 100) * chartH;
-    const dH = (r.discipline / 100) * chartH;
-    const oY = y(r.output);
-    const dY = y(r.output + r.discipline);
-    const title = `${r.model}\nTotal ${r.total}/100  (output ${r.output}/45, discipline ${r.discipline}/55)\n` +
-      `O1 ${r.O1} O2 ${r.O2} O3 ${r.O3} | D1 ${r.D1} D2 ${r.D2} D3 ${r.D3} D4 ${r.D4} D5 ${r.D5} D6 ${r.D6}\n` +
-      `${r.visible}/8 visible, ${r.hidden}/6 hidden, ${r.toolCalls} tool calls`;
-    return `<g><title>${esc(title)}</title>` +
-      `<rect x="${x}" y="${oY.toFixed(1)}" width="${bw}" height="${oH.toFixed(1)}" class="seg-out"/>` +
-      `<rect x="${x}" y="${dY.toFixed(1)}" width="${bw}" height="${dH.toFixed(1)}" class="seg-dis"/>` +
-      `<text x="${x + bw / 2}" y="${(dY - 8).toFixed(1)}" class="total">${r.total}</text>` +
-      `<text x="${x + bw / 2}" y="${padT + chartH + 16}" transform="rotate(-35 ${x + bw / 2} ${padT + chartH + 16})" class="xlabel">${esc(r._label)}</text>` +
-      `</g>`;
+  const aggregateRow = (group, filterable = false) => `<tr${filterable ? ` data-task="${esc(group.task)}" data-mode="${esc(group.mode)}" data-think="${group.think}"` : ''}><td>${esc(group.task)}</td><td>v${group.taskVersion}</td><td>${esc(group.mode)}</td><td class="left">${esc(group.label)}</td><td><b>${group.median}</b></td><td>${group.min}–${group.max}</td><td>${group.runs}</td><td>${(group.passRate * 100).toFixed(0)}%</td><td>${group.correctness}</td><td>${group.reliability}</td><td>${group.efficiency}</td><td>${group.wallMs ? (group.wallMs / 1000).toFixed(1) + 's' : '—'}</td><td>${group.generated ?? '—'}</td><td>${group.tools ?? '—'}</td></tr>`;
+  const runRow = (row, filterable = false) => `<tr${filterable ? ` data-task="${esc(row.task)}" data-mode="${esc(row.mode)}" data-think="${row.settings?.think === undefined ? 'unknown' : row.settings.think ? 'on' : 'off'}"` : ''}><td>${esc(row.task)}</td><td>v${number(row.taskVersion, 1)}</td><td>${esc(row.mode)}</td><td class="left">${esc(row.modelLabel)}</td><td><b>${row.total}</b></td><td>${row.correctness}</td><td>${row.safety}</td><td>${row.reliability}</td><td>${row.efficiency}</td><td>${row.visible}/${row.visibleTotal}</td><td>${row.hidden}/${row.hiddenTotal}</td><td>${row.wallTimeMs ? (row.wallTimeMs / 1000).toFixed(1) + 's' : '—'}</td><td>${row.generatedTokens || '—'}</td><td>${row.toolCalls ?? '—'}</td><td>${esc((row.gradedAt || '').slice(0, 16).replace('T', ' '))}</td></tr>`;
+  const aggregateRows = groups.map((group) => aggregateRow(group, true)).join('');
+  const runRows = currentRows.slice().sort((a, b) => String(b.gradedAt).localeCompare(String(a.gradedAt))).map((row) => runRow(row, true)).join('');
+  const archivedAggregateRows = archivedGroups.map((group) => aggregateRow(group)).join('');
+  const archivedRunRows = archivedRows.slice().sort((a, b) => String(b.gradedAt).localeCompare(String(a.gradedAt))).map((row) => runRow(row)).join('');
+  const versionBadges = tasks.map((task) => {
+    const count = currentRows.filter((row) => row.task === task).length;
+    return `<span class="version-badge"><b>${esc(task)} v${currentVersion[task]}</b><small>${count} current run${count === 1 ? '' : 's'}</small></span>`;
   }).join('');
 
-  const svg = rows.length
-    ? `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" role="img">
-        ${gridlines}
-        <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + chartH}" class="axis"/>
-        ${bars}
-      </svg>`
-    : `<p class="empty">No results yet. Run <code>node benchmark/grade.js</code> after a model finishes.</p>`;
-
-  const cols = ['O1', 'O2', 'O3', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6'];
-  const tableRows = rows.map((r) =>
-    `<tr><td class="l">${esc(r._label)}</td><td class="n b">${r.total}</td><td class="n">${r.output}</td><td class="n">${r.discipline}</td>` +
-    cols.map((c) => `<td class="n">${r[c]}</td>`).join('') +
-    `<td class="n">${r.visible}/8</td><td class="n">${r.hidden}/6</td><td class="n">${r.toolCalls}</td>` +
-    `<td class="d">${esc((r.gradedAt || '').slice(0, 16).replace('T', ' '))}</td></tr>`
-  ).join('');
-
-  const html = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Brittain Code — model benchmark</title>
-<style>
-  :root { --bg:#ffffff; --fg:#1b1f24; --muted:#6a737d; --grid:#e3e6ea; --card:#f6f8fa; --out:#2da44e; --dis:#0969da; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --grid:#21262d; --card:#161b22; --out:#3fb950; --dis:#58a6ff; } }
-  * { box-sizing: border-box; }
-  body { margin:0; padding:28px; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-  h1 { font-size:19px; margin:0 0 2px; }
-  .sub { color:var(--muted); margin:0 0 22px; font-size:13px; }
-  .card { background:var(--card); border:1px solid var(--grid); border-radius:10px; padding:16px; margin-bottom:22px; overflow-x:auto; }
-  .legend { display:flex; gap:18px; margin:2px 0 14px; font-size:13px; color:var(--muted); }
-  .sw { display:inline-block; width:12px; height:12px; border-radius:3px; vertical-align:-1px; margin-right:6px; }
-  .grid { stroke:var(--grid); stroke-width:1; }
-  .axis { stroke:var(--muted); stroke-width:1; }
-  .ytick { fill:var(--muted); font-size:11px; text-anchor:end; }
-  .xlabel { fill:var(--fg); font-size:12px; text-anchor:end; }
-  .total { fill:var(--fg); font-size:12px; font-weight:600; text-anchor:middle; }
-  .seg-out { fill:var(--out); } .seg-dis { fill:var(--dis); }
-  .empty { color:var(--muted); }
-  table { border-collapse:collapse; width:100%; font-size:12.5px; white-space:nowrap; }
-  th,td { padding:6px 9px; border-bottom:1px solid var(--grid); text-align:center; }
-  th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--card); }
-  td.l { text-align:left; font-weight:600; } td.n { text-align:right; font-variant-numeric:tabular-nums; }
-  td.b { font-weight:700; } td.d { color:var(--muted); text-align:left; }
-  thead .grp { font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
-</style></head>
-<body>
-  <h1>Brittain Code — model benchmark</h1>
-  <p class="sub">Auto-graded 0–100. ${rows.length} run${rows.length === 1 ? '' : 's'} · generated ${new Date().toISOString().slice(0, 16).replace('T', ' ')}</p>
-  <div class="card">
-    <div class="legend"><span><span class="sw" style="background:var(--out)"></span>Output /45</span><span><span class="sw" style="background:var(--dis)"></span>Discipline /55</span><span>hover a bar for the full breakdown</span></div>
-    ${svg}
-  </div>
-  <div class="card">
-    <table>
-      <thead>
-        <tr><th class="l">Model</th><th>Total</th><th>Out /45</th><th>Disc /55</th>
-        <th title="tests pass">O1</th><th title="generalizes">O2</th><th title="no collateral">O3</th>
-        <th title="explored first">D1</th><th title="right file">D2</th><th title="precise edits">D3</th><th title="respected spec">D4</th><th title="verified">D5</th><th title="honest">D6</th>
-        <th>Vis</th><th>Hid</th><th>Tools</th><th class="d">Graded</th></tr>
-      </thead>
-      <tbody>${tableRows || '<tr><td colspan="17" class="d">no data</td></tr>'}</tbody>
-    </table>
-  </div>
-</body></html>`;
-
+  const options = (values) => '<option value="all">all</option>' + values.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Brittain Code benchmark v2</title><style>
+  :root{--bg:#fff;--fg:#1f2328;--muted:#656d76;--card:#f6f8fa;--line:#d0d7de;--accent:#0969da;--dot:#2da44e} @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--card:#161b22;--line:#30363d;--accent:#58a6ff;--dot:#3fb950}}
+  *{box-sizing:border-box}body{margin:0;padding:30px;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}h1{font-size:22px;margin:0}.muted,.sub{color:var(--muted)}.sub{margin:3px 0 16px}.version-strip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}.version-badge{display:flex;align-items:baseline;gap:7px;padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:var(--card);font-size:11px}.version-badge small{color:var(--muted)}.filters{display:flex;flex-wrap:wrap;gap:12px 18px;margin-bottom:20px}.filters label{display:flex;align-items:center;gap:7px;font-weight:600}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin-bottom:22px;overflow:auto}h2{font-size:15px;margin:0 0 16px}.chart-view{display:none}.score-chart,.scatter-chart{display:block;width:100%;height:auto;min-width:720px}.empty-view{padding:18px 2px}.grid{stroke:var(--line);stroke-width:1}.top-tick{fill:var(--muted);font-size:11px;text-anchor:middle}.tick{fill:var(--muted);font-size:11px;text-anchor:end}.bar{fill:var(--accent);opacity:.9}.error{stroke:var(--fg);stroke-width:1.5}.bar-label{fill:var(--fg);font-size:13px;font-weight:650;text-anchor:end}.bar-meta{fill:var(--muted);font-size:10px;text-anchor:end}.bar-score{fill:var(--fg);font-size:13px;font-weight:750}.axis{stroke:var(--muted);stroke-width:1.3}.axislabel{fill:var(--muted);font-size:11px;text-anchor:middle}.dot-number{fill:white;font-size:10px;font-weight:750;text-anchor:middle;pointer-events:none}.legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:9px 22px;padding:8px 10px 2px}.legend-item{display:flex;gap:9px;align-items:flex-start;min-width:0}.legend-item>span:last-child{min-width:0}.legend-item b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.legend-item small{display:block;color:var(--muted);font-size:10px}.legend-number{flex:0 0 22px;height:22px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:10px;font-weight:750}details.archive{padding:0}details.archive>summary{cursor:pointer;padding:18px 20px;font-weight:700;list-style-position:inside}details.archive>.archive-body{padding:0 20px 20px}.archive h3{font-size:13px;margin:18px 0 8px}table{border-collapse:collapse;width:100%;white-space:nowrap;font-size:12px}th,td{padding:7px 9px;border-bottom:1px solid var(--line);text-align:right}th{color:var(--muted);position:sticky;top:0;background:var(--card)}td.left,th.left{text-align:left}select{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 9px}@media(max-width:760px){body{padding:16px}.card{padding:14px}.score-chart,.scatter-chart{min-width:650px}}
+  </style></head><body><h1>Brittain Code benchmark v2</h1><p class="sub">${currentRows.length} current runs · ${archivedRows.length} archived runs · leaderboard uses current task versions only</p><div class="version-strip">${versionBadges}</div><div class="filters"><label>Task <select id="task">${options(tasks)}</select></label><label>Mode <select id="mode">${options(modes)}</select></label><label>Thinking <select id="think">${options(thinks)}</select></label></div>
+  <div class="card"><h2 id="score-heading">Average total score across tasks</h2>${chart}</div><div class="card"><h2 id="scatter-heading">Average correctness versus elapsed time</h2>${scatter}</div>
+  <div class="card"><h2>Current configuration aggregates</h2><table><thead><tr><th>Task</th><th>Version</th><th>Mode</th><th class="left">Model/team</th><th>Median</th><th>Range</th><th>n</th><th>Pass</th><th>Correct</th><th>Reliable</th><th>Efficient</th><th>Time</th><th>Gen tok</th><th>Tools</th></tr></thead><tbody>${aggregateRows}</tbody></table></div>
+  <div class="card"><h2>Current individual runs</h2><table><thead><tr><th>Task</th><th>Version</th><th>Mode</th><th class="left">Model/team</th><th>Total</th><th>Correct</th><th>Safe</th><th>Reliable</th><th>Efficient</th><th>Visible</th><th>Hidden</th><th>Time</th><th>Gen tok</th><th>Tools</th><th>Graded</th></tr></thead><tbody>${runRows}</tbody></table></div>
+  <details class="card archive"><summary>Archived test versions (${archivedRows.length} runs)</summary><div class="archive-body">${archivedRows.length ? `<p class="muted">Historical runs are preserved for reference and never contribute to the current leaderboard.</p><h3>Archived configurations</h3><table><thead><tr><th>Task</th><th>Version</th><th>Mode</th><th class="left">Model/team</th><th>Median</th><th>Range</th><th>n</th><th>Pass</th><th>Correct</th><th>Reliable</th><th>Efficient</th><th>Time</th><th>Gen tok</th><th>Tools</th></tr></thead><tbody>${archivedAggregateRows}</tbody></table><h3>Archived individual runs</h3><table><thead><tr><th>Task</th><th>Version</th><th>Mode</th><th class="left">Model/team</th><th>Total</th><th>Correct</th><th>Safe</th><th>Reliable</th><th>Efficient</th><th>Visible</th><th>Hidden</th><th>Time</th><th>Gen tok</th><th>Tools</th><th>Graded</th></tr></thead><tbody>${archivedRunRows}</tbody></table>` : '<p class="muted">No archived runs.</p>'}</div></details>
+  <script>const task=document.getElementById('task'),mode=document.getElementById('mode'),think=document.getElementById('think');function filter(){const key=[task.value,mode.value,think.value].join('|');document.querySelectorAll('[data-view-key]').forEach(el=>{el.style.display=el.dataset.viewKey===key?'block':'none'});document.querySelectorAll('[data-task]').forEach(el=>{el.style.display=(task.value==='all'||el.dataset.task===task.value)&&(mode.value==='all'||el.dataset.mode===mode.value)&&(think.value==='all'||el.dataset.think===think.value)?'':'none'});document.getElementById('score-heading').textContent=task.value==='all'?'Average total score across tasks':'Median total score for '+task.value;document.getElementById('scatter-heading').textContent=(task.value==='all'?'Average':'Median')+' correctness versus elapsed time'}task.onchange=mode.onchange=think.onchange=filter;filter();</script></body></html>`;
   fs.writeFileSync(htmlPath, html);
   return htmlPath;
 }
 
-module.exports = { writeReport };
-
+module.exports = { writeReport, aggregate, normalize };
 if (require.main === module) {
-  const dir = __dirname;
-  const out = writeReport(path.join(dir, 'results.json'), path.join(dir, 'report.html'));
+  const out = writeReport(path.join(__dirname, 'results.json'), path.join(__dirname, 'report.html'));
   console.log('Wrote ' + out);
 }

@@ -4,6 +4,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, executeTool, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses } = require('./tools');
 
 const OLLAMA = 'http://127.0.0.1:11434';
@@ -15,7 +16,7 @@ const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user mess
 // maximum because KV-cache RAM grows with the window. 64k sized for gemma4:26b
 // on a 36GB Mac WITH Ollama's q8_0 KV cache enabled (OLLAMA_FLASH_ATTENTION=1,
 // OLLAMA_KV_CACHE_TYPE=q8_0 via launchctl setenv); drop to 32_768 without it.
-const NUM_CTX_CAP = 65_536;
+const NUM_CTX_CAP = 131_072; // sized for heavy use
 // Low temperature for agent work: model defaults (~0.7-0.8) suit chat, but for
 // code generation they invite near-miss token glitches — the '\．' and
 // byte-fallback junk seen in long runs (fablereview.md).
@@ -71,13 +72,41 @@ let currentAbort = null;          // AbortController for the in-flight run
 let stopRequested = false;
 
 // ---------- usage accounting (per chat; reset on new session / chat load) ----------
+function freshUsageBucket(withRuns = false) {
+  return {
+    calls: 0,
+    prompt: 0,
+    gen: 0,
+    loadMs: 0,
+    promptEvalMs: 0,
+    generationMs: 0,
+    totalMs: 0,
+    ...(withRuns ? { runs: 0 } : {}),
+  };
+}
+
 function freshUsage() {
   return {
-    main: { calls: 0, prompt: 0, gen: 0 },
-    subagent: { calls: 0, prompt: 0, gen: 0, runs: 0 },
-    coder: { calls: 0, prompt: 0, gen: 0, runs: 0 },
-    verifier: { calls: 0, prompt: 0, gen: 0 },
+    main: freshUsageBucket(),
+    subagent: freshUsageBucket(true),
+    coder: freshUsageBucket(true),
+    verifier: freshUsageBucket(),
     context: { tokens: 0, limit: 0 },
+    metrics: {
+      wallTimeMs: 0,
+      peakContextTokens: 0,
+      peakContextLimit: 0,
+      toolCalls: 0,
+      toolErrors: 0,
+      deniedTools: 0,
+      recoveredToolCalls: 0,
+      compactions: 0,
+      loopIterations: 0,
+      orchestrations: 0,
+      repairs: 0,
+      stoppedRuns: 0,
+      failedRuns: 0,
+    },
   };
 }
 let usage = freshUsage();
@@ -87,6 +116,37 @@ function recordUsage(bucket, stats) {
   usage[bucket].calls += 1;
   usage[bucket].prompt += stats.promptTokens || 0;
   usage[bucket].gen += stats.evalTokens || 0;
+  usage[bucket].loadMs += stats.loadMs || 0;
+  usage[bucket].promptEvalMs += stats.promptEvalMs || 0;
+  usage[bucket].generationMs += stats.generationMs || 0;
+  usage[bucket].totalMs += stats.totalMs || 0;
+}
+
+function finishRunMetrics(startedAt, outcome = 'ok') {
+  usage.metrics.wallTimeMs += Math.max(0, Date.now() - startedAt);
+  if (outcome === 'stopped') usage.metrics.stoppedRuns += 1;
+  if (outcome === 'failed') usage.metrics.failedRuns += 1;
+}
+
+function recordToolTelemetry(result, denied = false) {
+  usage.metrics.toolCalls += 1;
+  if (denied) usage.metrics.deniedTools += 1;
+  if (/error|failed|timed out|exception|traceback/i.test(String(result).slice(0, 500))) {
+    usage.metrics.toolErrors += 1;
+  }
+}
+
+function restoreUsage(saved) {
+  const blank = freshUsage();
+  if (!saved || typeof saved !== 'object') return blank;
+  for (const role of ['main', 'subagent', 'coder', 'verifier']) {
+    if (saved[role] && typeof saved[role] === 'object') {
+      blank[role] = { ...blank[role], ...saved[role] };
+    }
+  }
+  if (saved.context && typeof saved.context === 'object') blank.context = { ...blank.context, ...saved.context };
+  if (saved.metrics && typeof saved.metrics === 'object') blank.metrics = { ...blank.metrics, ...saved.metrics };
+  return blank;
 }
 
 // Keep context reporting consistent across ordinary main-agent turns and the
@@ -95,6 +155,10 @@ function recordUsage(bucket, stats) {
 function publishContextStats(stats, contextLength, scope = 'conversation') {
   if (!stats || !contextLength) return;
   const contextTokens = (stats.promptTokens || 0) + (stats.evalTokens || 0);
+  if (contextTokens > usage.metrics.peakContextTokens) {
+    usage.metrics.peakContextTokens = contextTokens;
+    usage.metrics.peakContextLimit = contextLength;
+  }
   if (scope === 'conversation') usage.context = { tokens: contextTokens, limit: contextLength };
   win.webContents.send('stream:stats', {
     contextTokens,
@@ -119,8 +183,8 @@ async function publishPersistedConversationContext(model) {
 // ---------- window ----------
 function createWindow() {
   win = new BrowserWindow({
-    width: 1100,
-    height: 760,
+    width: 1250,
+    height: 850,
     minWidth: 700,
     minHeight: 500,
     backgroundColor: '#111214',
@@ -132,6 +196,16 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+}
+
+// Packaged apps launched from Finder inherit launchd's minimal PATH — node,
+// npm, and other Homebrew tools are invisible to run_command (seen live in a
+// benchmark: "node: command not found", after which the model fabricated its
+// results). Make the packaged app's PATH match a normal terminal's.
+for (const extra of ['/opt/homebrew/bin', '/usr/local/bin', process.env.HOME + '/.local/bin']) {
+  if (!(process.env.PATH || '').split(':').includes(extra)) {
+    process.env.PATH = extra + ':' + (process.env.PATH || '');
+  }
 }
 
 app.whenReady().then(() => {
@@ -184,6 +258,47 @@ async function getCapabilities(model) {
 }
 const supportsThinking = async (model) => (await getCapabilities(model)).includes('thinking');
 const supportsVision = async (model) => (await getCapabilities(model)).includes('vision');
+
+const runtimeMetadataCache = new Map();
+async function runtimeMetadata(model) {
+  if (runtimeMetadataCache.has(model)) return runtimeMetadataCache.get(model);
+  const [tags, show, version, commit] = await Promise.all([
+    ollamaJson('/api/tags').catch(() => ({ models: [] })),
+    model ? ollamaJson('/api/show', { model }).catch(() => ({})) : {},
+    ollamaJson('/api/version').catch(() => ({})),
+    gitRun(['rev-parse', '--short', 'HEAD'], __dirname).catch(() => ({ ok: false })),
+  ]);
+  const tag = (tags.models || []).find((entry) => entry.name === model || entry.model === model) || {};
+  const modelInfo = show.model_info || {};
+  const contextKey = Object.keys(modelInfo).find((key) => key.endsWith('.context_length'));
+  const metadata = {
+    appVersion: require('./package.json').version,
+    appCommit: commit.ok ? commit.out.trim() : null,
+    ollamaVersion: version.version || null,
+    model: {
+      name: model || null,
+      digest: tag.digest || null,
+      sizeBytes: tag.size || null,
+      family: tag.details?.family || show.details?.family || null,
+      parameterSize: tag.details?.parameter_size || show.details?.parameter_size || null,
+      quantization: tag.details?.quantization_level || show.details?.quantization_level || null,
+      nativeContext: contextKey ? modelInfo[contextKey] : null,
+    },
+    settings: {
+      requestedContextCap: NUM_CTX_CAP,
+      temperature: AGENT_TEMPERATURE,
+    },
+    hardware: {
+      platform: process.platform,
+      arch: process.arch,
+      totalMemoryBytes: os.totalmem(),
+      cpu: os.cpus()?.[0]?.model || null,
+      cpuCount: os.cpus()?.length || null,
+    },
+  };
+  runtimeMetadataCache.set(model, metadata);
+  return metadata;
+}
 
 // ---------- approval flow ----------
 const pendingApprovals = new Map();
@@ -284,6 +399,10 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
           promptTokens: chunk.prompt_eval_count || 0,
           evalTokens: chunk.eval_count || 0,
           tokPerSec: chunk.eval_duration ? (chunk.eval_count || 0) / (chunk.eval_duration / 1e9) : 0,
+          loadMs: (chunk.load_duration || 0) / 1e6,
+          promptEvalMs: (chunk.prompt_eval_duration || 0) / 1e6,
+          generationMs: (chunk.eval_duration || 0) / 1e6,
+          totalMs: (chunk.total_duration || 0) / 1e6,
         };
       }
     }
@@ -409,6 +528,8 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   // omitting the param makes Ollama think by default, ignoring the toggle.
   const useThink = (await supportsThinking(model)) ? !!think : undefined;
   let lastContent = '';
+  let emptyNudges = 0;
+  const runLog = { mutations: new Set(), commands: [], verified: false };
   let lastStats = null;
   let exhaustedWithToolCalls = false;
 
@@ -420,6 +541,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       if (!toolCalls.length) {
         const recovered = parseRawToolCalls(content);
         if (recovered) {
+          usage.metrics.recoveredToolCalls += recovered.calls.length;
           toolCalls = recovered.calls;
           content = recovered.cleaned;
           // the raw markup already streamed to the UI — replace it with the cleaned text
@@ -440,7 +562,27 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       if (content) lastContent = content;
       if (stats) lastStats = stats;
 
-      if (!toolCalls.length || stopRequested) break;
+      if (stopRequested) break;
+      if (!toolCalls.length) {
+        // Thinking models sometimes emit EOS right after their reasoning —
+        // no content, no tool call (seen live: "Let's verify part of file
+        // after edit." then silence). Don't mistake a stall for completion:
+        // nudge up to twice, visibly, then give up honestly.
+        const stalled = !content || !content.trim();
+        if (stalled && emptyNudges < 2) {
+          emptyNudges++;
+          win.webContents.send('stream:info', `Model stopped without output or a tool call — nudging it to continue (${emptyNudges}/2)…`);
+          conversation.push({
+            role: 'user',
+            content: 'You stopped without any visible output or tool call. Continue the task now: make your next tool call, or write your final summary if the task is complete.',
+          });
+          continue;
+        }
+        if (stalled) {
+          win.webContents.send('stream:info', 'Model produced no output after 2 nudges — giving up on this turn. Send a message to continue.');
+        }
+        break;
+      }
 
       for (const tc of toolCalls) {
         const name = tc.function?.name;
@@ -501,6 +643,13 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
               : 'The user denied this destructive operation. Do not retry it unless the user explicitly asks.';
             win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(destructive operation denied by user)', denied: !approved });
           }
+        } else if (name === 'run_command' && isDestructiveCommand(args.command)) {
+          // destructive shell patterns bypass AUTO-APPROVE — always ask
+          const approved = await requestApproval({ name, args, destructive: true });
+          result = approved
+            ? await safeExecute(name, args, cwd)
+            : 'The user denied this destructive command. Do not retry it or any variation of it unless the user explicitly asks.';
+          win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(destructive command denied by user)', denied: !approved });
         } else if (isSensitiveToolCall(name, args)) {
           const approved = await requestApproval({ name, args, sensitive: true });
           result = approved
@@ -519,6 +668,15 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           win.webContents.send('stream:toolresult', { name, result: preview(result) });
         }
 
+        recordToolTelemetry(result, /denied by user/i.test(String(result)));
+        if (!String(result).startsWith('Error:') && !/denied by user/.test(String(result))) {
+          if (RISKY_TOOLS.has(name) && name !== 'run_command' && args?.path) runLog.mutations.add(String(args.path));
+          if (name === 'move_file' || name === 'copy_file') runLog.mutations.add(String(args.destination || ''));
+          if (name === 'run_command' && args?.command) {
+            runLog.commands.push(String(args.command));
+            if (/\b(test|spec|--check|tsc|lint|pytest|vitest|jest)\b/.test(String(args.command))) runLog.verified = true;
+          }
+        }
         conversation.push({ role: 'tool', tool_name: name, content: String(result) });
       }
       if (stopRequested) break;
@@ -541,7 +699,115 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   if (exhaustedWithToolCalls && !stopRequested) {
     win.webContents.send('stream:info', `Agent stopped after reaching the ${MAX_AGENT_STEPS}-step safety cap.`);
   }
-  return { lastContent, lastStats, contextLength };
+  return { lastContent, lastStats, contextLength, runLog };
+}
+
+// ---------- run checkpoints (Tier 1 safety) ----------
+// Before every run, snapshot the working tree (tracked + untracked) into a
+// hidden ref under refs/brittain/checkpoints/ — using a TEMPORARY index so the
+// user's real index, branch, and commit history are never touched. UNDO RUN
+// restores the tree to the snapshot even if the user never committed.
+const CHECKPOINT_KEEP = 20;
+let lastCheckpoint = null; // { ref, cwd, at }
+
+async function createCheckpoint(cwd) {
+  try {
+    if (!(await gitRun(['rev-parse', '--git-dir'], cwd)).ok) return null; // not a repo
+    const tmpIndex = path.join(app.getPath('temp'), 'brittain-ckpt-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+    const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+    try {
+      const add = await gitRun(['add', '-A', '--', '.'], cwd, env);
+      if (!add.ok) return null;
+      const tree = await gitRun(['write-tree'], cwd, env);
+      if (!tree.ok) return null;
+      const head = await gitRun(['rev-parse', 'HEAD'], cwd);
+      const parentArgs = head.ok ? ['-p', head.out.trim()] : [];
+      const commit = await gitRun(['commit-tree', tree.out.trim(), ...parentArgs, '-m', 'brittain checkpoint ' + new Date().toISOString()], cwd, env);
+      if (!commit.ok) return null;
+      const ref = 'refs/brittain/checkpoints/' + Date.now();
+      if (!(await gitRun(['update-ref', ref, commit.out.trim()], cwd)).ok) return null;
+      lastCheckpoint = { ref, cwd, at: Date.now() };
+      win.webContents.send('checkpoint:state', { available: true, cwd });
+      pruneCheckpoints(cwd); // fire and forget
+      return lastCheckpoint;
+    } finally {
+      try { fs.unlinkSync(tmpIndex); } catch {}
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function pruneCheckpoints(cwd) {
+  const list = await gitRun(['for-each-ref', '--format=%(refname)', 'refs/brittain/checkpoints/'], cwd);
+  if (!list.ok) return;
+  const refs = list.out.split('\n').filter(Boolean).sort(); // timestamped names sort chronologically
+  for (const ref of refs.slice(0, Math.max(0, refs.length - CHECKPOINT_KEEP))) {
+    await gitRun(['update-ref', '-d', ref], cwd);
+  }
+}
+
+ipcMain.handle('checkpoint:undo', async (_e, cwd) => {
+  const target = lastCheckpoint;
+  if (!target || target.cwd !== cwd) return { ok: false, error: 'No checkpoint for this folder in this session.' };
+  try {
+    const stat = await gitRun(['diff', '--shortstat', target.ref], cwd);
+    // snapshot the CURRENT state first, so UNDO itself is undoable
+    await createCheckpoint(cwd);
+    // restore tracked content (worktree only — the user's index stays theirs)
+    const restore = await gitRun(['restore', '--source=' + target.ref, '--worktree', '--', '.'], cwd);
+    if (!restore.ok) return { ok: false, error: restore.err || 'restore failed' };
+    // delete files that exist now but did not exist at the checkpoint
+    const inRef = await gitRun(['ls-tree', '-r', '--name-only', target.ref], cwd);
+    const nowFiles = await gitRun(['ls-files', '--cached', '--others', '--exclude-standard'], cwd);
+    if (inRef.ok && nowFiles.ok) {
+      const keep = new Set(inRef.out.split('\n').filter(Boolean));
+      for (const f of nowFiles.out.split('\n').filter(Boolean)) {
+        if (!keep.has(f)) { try { fs.unlinkSync(path.join(cwd, f)); } catch {} }
+      }
+    }
+    return { ok: true, restoredFrom: new Date(target.at).toLocaleTimeString(), changes: (stat.out || '').trim() || 'no differences detected' };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+// ---------- auto-branch (Tier 1 safety, toggleable) ----------
+async function maybeAutoBranch(cwd, taskText, enabled) {
+  if (!enabled) return;
+  const cur = await gitRun(['branch', '--show-current'], cwd);
+  if (!cur.ok || cur.out.trim().startsWith('brittain/')) return; // not a repo, or already on an agent branch
+  const slug = String(taskText || 'task').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'task';
+  const d = new Date();
+  let name = `brittain/${d.getMonth() + 1}-${d.getDate()}-${slug}`;
+  let made = await gitRun(['checkout', '-b', name], cwd);
+  if (!made.ok && /already exists/.test(made.err)) {
+    name += '-' + d.getHours() + d.getMinutes();
+    made = await gitRun(['checkout', '-b', name], cwd);
+  }
+  win.webContents.send('stream:info', made.ok
+    ? `BRANCH: created and switched to ${name} — your previous branch is untouched. Merge or discard it when you review.`
+    : 'BRANCH is on but branch creation failed: ' + (made.err || 'unknown error'));
+}
+
+// ---------- end-of-run report card (Tier 3) ----------
+async function emitRunReport(cwd, runLog) {
+  if (!runLog || (!runLog.mutations.size && !runLog.commands.length)) return; // read-only turns stay quiet
+  const lines = ['\u2501 RUN REPORT \u2501'];
+  let diffPart = '';
+  if (lastCheckpoint && lastCheckpoint.cwd === cwd) {
+    const stat = await gitRun(['diff', '--stat', lastCheckpoint.ref], cwd);
+    if (stat.ok && stat.out.trim()) diffPart = stat.out.trim().split('\n').slice(-11).join('\n');
+  }
+  if (diffPart) lines.push(diffPart);
+  else if (runLog.mutations.size) lines.push('files touched: ' + [...runLog.mutations].slice(0, 10).join(', '));
+  if (runLog.commands.length) {
+    lines.push(`commands (${runLog.commands.length}): ` + runLog.commands.slice(0, 3).map((c) => (c.length > 60 ? c.slice(0, 60) + '\u2026' : c)).join('  \u00b7  '));
+  }
+  lines.push(runLog.verified ? '\u2713 a verification command was run' : '\u26a0 NOT VERIFIED \u2014 no test/check command ran this turn');
+  if (runLog.mutations.size) lines.push('UNDO is available in the status bar.');
+  win.webContents.send('stream:info', lines.join('\n'));
+  win.webContents.send('run:report', { cwd, mutations: runLog.mutations.size });
 }
 
 // If the conversation is already over the threshold BEFORE we send (e.g. it
@@ -562,10 +828,12 @@ async function maybePrecompact(model) {
   }
 }
 
-ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images, imageTypes, subModel, onlineResearch }) => {
+ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, images, imageTypes, subModel, onlineResearch, autoBranch }) => {
   if (images?.length && !(await supportsVision(model))) {
     return { ok: false, error: `${model} cannot see images — pick a vision-capable model or remove the attachment.` };
   }
+  await maybeAutoBranch(cwd, text, !!autoBranch);
+  await createCheckpoint(cwd); // silent; enables UNDO RUN
   await maybePrecompact(model);
   const userMsg = { role: 'user', content: text };
   if (images?.length) userMsg.images = images;
@@ -573,14 +841,19 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
   conversation.push(userMsg);
   stopRequested = false;
   currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
 
   try {
-    await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch);
+    const { runLog } = await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch);
+    await emitRunReport(cwd, runLog);
     return { ok: true };
   } catch (err) {
-    if (err.name === 'AbortError') return { ok: true, stopped: true };
+    if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }
+    runOutcome = 'failed';
     return { ok: false, error: String(err.message || err) };
   } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     currentAbort = null;
     win.webContents.send('stream:done');
   }
@@ -649,6 +922,7 @@ async function runSubagent(task, subModel, cwd) {
       if (!toolCalls.length) {
         const recovered = parseRawToolCalls(content);
         if (recovered) {
+          usage.metrics.recoveredToolCalls += recovered.calls.length;
           toolCalls = recovered.calls;
           content = recovered.cleaned;
         }
@@ -669,6 +943,7 @@ async function runSubagent(task, subModel, cwd) {
         const result = SUBAGENT_TOOL_NAMES.has(name)
           ? await safeExecute(name, args, cwd)
           : `Error: tool "${name}" is not available to subagents. Use your read-only exploration tools.`;
+        recordToolTelemetry(result);
         msgs.push({ role: 'tool', tool_name: name, content: String(result) });
       }
     }
@@ -815,7 +1090,12 @@ async function compactScopedMessages(model, msgs, numCtx, role, usageBucket, con
     recordUsage(usageBucket, {
       promptTokens: data.prompt_eval_count || 0,
       evalTokens: data.eval_count || 0,
+      loadMs: (data.load_duration || 0) / 1e6,
+      promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+      generationMs: (data.eval_duration || 0) / 1e6,
+      totalMs: (data.total_duration || 0) / 1e6,
     });
+    usage.metrics.compactions += 1;
     msgs.splice(0, msgs.length,
       ...fixed,
       { role: 'assistant', content: `${role.toUpperCase()} CHECKPOINT:\n${summary}` },
@@ -901,6 +1181,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
     if (!toolCalls.length) {
       const recovered = parseRawToolCalls(content);
       if (recovered) {
+        usage.metrics.recoveredToolCalls += recovered.calls.length;
         toolCalls = recovered.calls;
         content = recovered.cleaned;
       }
@@ -935,7 +1216,10 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
       const name = tc.function?.name;
       let args = tc.function?.arguments || {};
       if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
-      if (name === 'submit_implementation_plan') return normalizeImplementationPlan(args, goal);
+      if (name === 'submit_implementation_plan') {
+        recordToolTelemetry('Plan submitted.');
+        return normalizeImplementationPlan(args, goal);
+      }
 
       let result;
       win.webContents.send('stream:state', `planner: ${name}`);
@@ -949,6 +1233,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
       } else {
         result = `Error: tool "${name}" is not available to the planner.`;
       }
+      recordToolTelemetry(result, /denied/i.test(String(result)));
       msgs.push({ role: 'tool', tool_name: name, content: String(result) });
     }
     const used = Math.max((stats?.promptTokens || 0) + (stats?.evalTokens || 0), estimateTokens(msgs));
@@ -1021,6 +1306,7 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
       if (!toolCalls.length) {
         const recovered = parseRawToolCalls(content);
         if (recovered) {
+          usage.metrics.recoveredToolCalls += recovered.calls.length;
           toolCalls = recovered.calls;
           content = recovered.cleaned;
         }
@@ -1040,6 +1326,7 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
         const result = CODER_TOOL_NAMES.has(name)
           ? await executeWithApproval(name, args, cwd, autoApprove, false)
           : `Error: tool "${name}" is not available to the coding worker.`;
+        recordToolTelemetry(result, /denied/i.test(String(result)));
         evidence.push({ name, args, result: String(result).slice(0, 4000) });
         msgs.push({ role: 'tool', tool_name: name, content: String(result) });
       }
@@ -1072,25 +1359,88 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
 
 async function collectOrchestrationGitEvidence(cwd) {
   const [status, staged, unstaged, untracked] = await Promise.all([
-    gitRun(['status', '--porcelain'], cwd),
-    gitRun(['diff', '--cached', '--no-ext-diff'], cwd),
-    gitRun(['diff', '--no-ext-diff'], cwd),
-    gitRun(['ls-files', '--others', '--exclude-standard'], cwd),
+    gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd),
+    gitRun(['diff', '--cached', '--no-ext-diff', '--', '.'], cwd),
+    gitRun(['diff', '--no-ext-diff', '--', '.'], cwd),
+    gitRun(['ls-files', '--others', '--exclude-standard', '--directory', '--', '.'], cwd),
   ]);
+  const capLines = (text, maxLines) => {
+    const lines = String(text || '').split('\n').filter(Boolean);
+    return lines.length > maxLines
+      ? lines.slice(0, maxLines).join('\n') + `\n…[${lines.length - maxLines} more entries omitted]`
+      : lines.join('\n');
+  };
   return [
-    'STATUS:\n' + (status.ok ? status.out || '(clean)' : '(not a Git repository)'),
-    'STAGED DIFF:\n' + (staged.ok ? staged.out || '(none)' : '(unavailable)'),
-    'UNSTAGED DIFF:\n' + (unstaged.ok ? unstaged.out || '(none)' : '(unavailable)'),
-    'UNTRACKED FILES:\n' + (untracked.ok ? untracked.out || '(none)' : '(unavailable)'),
-  ].join('\n\n').slice(0, 30_000);
+    'STATUS:\n' + (status.ok ? capLines(status.out, 80) || '(clean)' : '(not a Git repository)'),
+    'STAGED DIFF:\n' + (staged.ok ? String(staged.out || '').slice(0, 9000) || '(none)' : '(unavailable)'),
+    'UNSTAGED DIFF:\n' + (unstaged.ok ? String(unstaged.out || '').slice(0, 9000) || '(none)' : '(unavailable)'),
+    'UNTRACKED PATHS (directories collapsed):\n' + (untracked.ok ? capLines(untracked.out, 80) || '(none)' : '(unavailable)'),
+  ].join('\n\n').slice(0, 22_000);
+}
+
+const ORCHESTRATION_MUTATING_TOOLS = new Set([
+  'write_file', 'edit_file', 'edit_files', 'append_file', 'create_directory',
+  'delete_file', 'copy_file', 'move_file', 'replace_in_file',
+]);
+
+function evidencePaths(entry) {
+  const paths = [];
+  if (entry.args?.path) paths.push(String(entry.args.path));
+  if (entry.args?.source) paths.push(String(entry.args.source));
+  if (entry.args?.destination) paths.push(String(entry.args.destination));
+  if (Array.isArray(entry.args?.edits)) {
+    for (const edit of entry.args.edits) if (edit?.path) paths.push(String(edit.path));
+  }
+  return paths;
+}
+
+function conciseTaskResult(result, index) {
+  const changed = [...new Set(result.coderResult.evidence
+    .filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name))
+    .flatMap(evidencePaths))].slice(0, 12);
+  const checkEntries = result.coderResult.evidence
+    .filter((entry) => entry.name === 'run_project_check' || entry.name === 'run_command')
+    .slice(-5);
+  const checks = checkEntries.map((entry) => {
+    const label = entry.args?.check || entry.args?.command || entry.name;
+    let failed = /error|failed|timed out|denied|exit code [1-9]/i.test(entry.result);
+    try {
+      const parsed = JSON.parse(entry.result);
+      if (typeof parsed.exit_code === 'number') failed = parsed.exit_code !== 0;
+    } catch {}
+    return `${String(label).slice(0, 100)} — ${failed ? 'issue reported' : 'completed'}`;
+  });
+  const lines = [
+    `### ${index + 1}. ${result.task.title} — ${result.complete ? 'verified' : 'incomplete'}`,
+    `Changed: ${changed.length ? changed.join(', ') : 'no modified paths recorded by coding tools'}`,
+    `Checks: ${checks.length ? checks.join('; ') : 'no verification command recorded'}`,
+  ];
+  if (result.repairs) lines.push(`Repair attempts: ${result.repairs}`);
+  if (!result.complete) lines.push(`Remaining: ${String(result.verdict || 'Verifier did not return a verdict.').slice(0, 900)}`);
+  lines.push('');
+  return lines;
+}
+
+function conciseWorkingTree(gitEvidence) {
+  const match = String(gitEvidence || '').match(/STATUS:\n([\s\S]*?)\n\nSTAGED DIFF:/);
+  const lines = (match?.[1] || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  if (!lines.length || lines[0] === '(clean)') return 'clean';
+  if (lines[0] === '(not a Git repository)') return 'not a Git repository';
+  const shown = lines.slice(0, 10);
+  return `${lines.length} scoped status entr${lines.length === 1 ? 'y' : 'ies'}: ${shown.join(', ')}${lines.length > shown.length ? `, +${lines.length - shown.length} more` : ''}`;
 }
 
 async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, gitEvidence, baselineStatus, signal) {
   const relevantEvidence = coderResult.evidence
-    .filter((entry) => entry.name === 'run_project_check' || entry.name === 'run_command' || entry.name === 'read_file' || entry.name === 'read_git_diff')
-    .map((entry) => `${entry.name} ${JSON.stringify(entry.args)}\n${entry.result}`)
+    .filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name) || entry.name === 'run_project_check' || entry.name === 'run_command' || entry.name === 'read_file' || entry.name === 'read_git_diff')
+    .map((entry) => {
+      const args = ORCHESTRATION_MUTATING_TOOLS.has(entry.name)
+        ? { paths: evidencePaths(entry) }
+        : entry.args;
+      return `${entry.name} ${JSON.stringify(args)}\n${entry.result}`;
+    })
     .join('\n\n')
-    .slice(0, 12_000);
+    .slice(0, 9000);
   try {
     const useThink = (await supportsThinking(verifierModel)) ? false : undefined;
     const data = await ollamaJson('/api/chat', {
@@ -1105,11 +1455,18 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
         },
         {
           role: 'user',
-          content: `OVERALL GOAL:\n${goal}\n\nTASK:\n${JSON.stringify(task, null, 2)}\n\nWORKING TREE BEFORE ORCHESTRATION:\n${baselineStatus || '(clean or unavailable)'}\n\nCODER REPORT:\n${coderResult.report}\n\nRECORDED TOOL EVIDENCE:\n${relevantEvidence || '(no verification commands were recorded)'}\n\nCURRENT GIT EVIDENCE:\n${gitEvidence}`,
+          content: `OVERALL GOAL:\n${goal}\n\nTASK:\n${JSON.stringify(task, null, 2)}\n\nWORKING TREE BEFORE ORCHESTRATION:\n${baselineStatus || '(clean or unavailable)'}\n\nCODER REPORT:\n${String(coderResult.report || '').slice(0, 3500)}\n\nRECORDED TOOL EVIDENCE:\n${relevantEvidence || '(no verification commands were recorded)'}\n\nCURRENT GIT EVIDENCE:\n${gitEvidence}`,
         },
       ],
     }, signal);
-    recordUsage('verifier', { promptTokens: data.prompt_eval_count || 0, evalTokens: data.eval_count || 0 });
+    recordUsage('verifier', {
+      promptTokens: data.prompt_eval_count || 0,
+      evalTokens: data.eval_count || 0,
+      loadMs: (data.load_duration || 0) / 1e6,
+      promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+      generationMs: (data.eval_duration || 0) / 1e6,
+      totalMs: (data.total_duration || 0) / 1e6,
+    });
     return (data.message?.content || '').trim() || 'No verifier verdict was returned.';
   } catch (err) {
     return `Verifier unavailable (${err.message}).`;
@@ -1136,16 +1493,27 @@ async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
         },
       ],
     }, signal);
-    recordUsage('verifier', { promptTokens: data.prompt_eval_count || 0, evalTokens: data.eval_count || 0 });
+    recordUsage('verifier', {
+      promptTokens: data.prompt_eval_count || 0,
+      evalTokens: data.eval_count || 0,
+      loadMs: (data.load_duration || 0) / 1e6,
+      promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+      generationMs: (data.eval_duration || 0) / 1e6,
+      totalMs: (data.total_duration || 0) / 1e6,
+    });
     return (data.message?.content || '').trim() || 'No verdict returned — continue working toward the goal.';
   } catch (err) {
     return `Verifier unavailable (${err.message}) — continue working toward the goal.`;
   }
 }
 
-ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations }) => {
+ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
   stopRequested = false;
   currentAbort = new AbortController();
+  await maybeAutoBranch(cwd, goal, !!autoBranch);
+  await createCheckpoint(cwd); // silent; enables UNDO RUN for the whole loop
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
   const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
   const info = (t) => win.webContents.send('stream:info', t);
   const state = (t) => win.webContents.send('stream:state', t);
@@ -1159,9 +1527,11 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
 
   try {
     await maybePrecompact(model); // a loop may start on an already-bloated chat
+    const loopLog = { mutations: new Set(), commands: [], verified: false };
     let feedback = '';
     for (let i = 1; i <= max; i++) {
       if (stopRequested) break;
+      usage.metrics.loopIterations += 1;
       info(`━ Loop iteration ${i}/${max} ━`);
       state(`loop ${i}/${max}`);
 
@@ -1173,7 +1543,10 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
         ) + driftReminder,
       });
 
-      const { lastContent, lastStats, contextLength } = await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch);
+      const { lastContent, lastStats, contextLength, runLog } = await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch);
+      for (const m of runLog.mutations) loopLog.mutations.add(m);
+      loopLog.commands.push(...runLog.commands);
+      loopLog.verified = loopLog.verified || runLog.verified;
       if (stopRequested) break;
 
       state(`verifying ${i}/${max} (${subModel || 'qwen3:8b'})…`);
@@ -1206,11 +1579,14 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
         }
       }
     }
+    await emitRunReport(cwd, loopLog);
     return { ok: true };
   } catch (err) {
-    if (err.name === 'AbortError') return { ok: true, stopped: true };
+    if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }
+    runOutcome = 'failed';
     return { ok: false, error: String(err.message || err) };
   } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
     currentAbort = null;
     win.webContents.send('stream:done');
@@ -1225,8 +1601,11 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
 
   stopRequested = false;
   currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
+  usage.metrics.orchestrations += 1;
   const verifierModel = subModel || 'qwen3:8b';
-  const baseline = await gitRun(['status', '--porcelain'], cwd);
+  const baseline = await gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd);
   const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
   conversation.push({ role: 'user', content: `ORCHESTRATE: ${goal.trim()}` });
 
@@ -1251,6 +1630,7 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
 
       while (verdict.trim().toUpperCase() !== 'GOAL_COMPLETE' && repairs < ORCHESTRATOR_MAX_REPAIRS && !stopRequested) {
         repairs++;
+        usage.metrics.repairs += 1;
         win.webContents.send('stream:info', `Verifier requested a repair for “${task.title}”:\n${verdict.slice(0, 2000)}`);
         win.webContents.send('stream:state', `repairing ${index + 1}/${plan.tasks.length} (${coderModel})`);
         const repair = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think, verdict.slice(0, 3000));
@@ -1303,31 +1683,25 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
     const report = [
       allComplete ? '## Orchestration complete' : '## Orchestration stopped with remaining work',
       '',
-      `Planner: ${model}`,
-      `Coder: ${coderModel}`,
-      `Verifier: ${verifierModel}`,
-      `Online research: ${onlineResearch ? 'enabled for the planner only' : 'disabled; all roles stayed offline'}`,
+      `Models: ${model} planner → ${coderModel} coder → ${verifierModel} verifier`,
+      `Online research: ${onlineResearch ? 'planner only' : 'off'}`,
       '',
       `Plan: ${plan.summary}`,
       '',
-      ...results.flatMap((result, index) => [
-        `### ${index + 1}. ${result.task.title} — ${result.complete ? 'verified' : 'incomplete'}`,
-        result.coderResult.report,
-        result.complete ? `Verifier: GOAL_COMPLETE${result.repairs ? ` after ${result.repairs} repair` : ''}.` : `Verifier:\n${result.verdict}`,
-        '',
-      ]),
-      '### Final verifier',
-      finalVerdict,
+      ...results.flatMap(conciseTaskResult),
+      `Final verification: ${allComplete ? 'GOAL_COMPLETE' : String(finalVerdict).slice(0, 1000)}`,
       '',
-      '### Final working tree evidence',
-      finalEvidence,
-    ].join('\n').slice(0, 40_000);
+      `Working tree: ${conciseWorkingTree(finalEvidence)}`,
+      'Open DIFF to inspect the full patch and untracked paths.',
+    ].join('\n').slice(0, 6000);
     conversation.push({ role: 'assistant', content: report });
     return { ok: true, report, complete: allComplete };
   } catch (err) {
-    if (err.name === 'AbortError') return { ok: true, stopped: true };
+    if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }
+    runOutcome = 'failed';
     return { ok: false, error: String(err.message || err) };
   } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
     currentAbort = null;
     win.webContents.send('stream:done');
@@ -1372,14 +1746,16 @@ ipcMain.handle('app:getVersion', () => require('./package.json').version);
 // array lives here — these let it read the current one and swap in a stored one.
 ipcMain.handle('chat:get', () => conversation);
 
-ipcMain.handle('chat:load', async (_e, msgs, model) => {
+ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage) => {
   conversation = Array.isArray(msgs) ? msgs : [];
-  usage = freshUsage();
+  usage = restoreUsage(savedUsage);
   // estimate the loaded context so the bar and /usage aren't blank until the
   // next message (Ollama reports the exact count on the next request)
   const approxTokens = estimateTokens(stripOldImages(conversation));
   const contextLength = model ? await effectiveContext(model) : 0;
   usage.context = { tokens: approxTokens, limit: contextLength };
+  usage.metrics.peakContextTokens = Math.max(usage.metrics.peakContextTokens || 0, approxTokens);
+  usage.metrics.peakContextLimit = Math.max(usage.metrics.peakContextLimit || 0, contextLength);
   return { ok: true, approxTokens, contextLength };
 });
 
@@ -1409,7 +1785,7 @@ function writeChatIndex(list) {
 
 ipcMain.handle('history:list', () => readChatIndex());
 
-ipcMain.handle('history:save', (_e, meta, convo) => {
+ipcMain.handle('history:save', async (_e, meta, convo) => {
   try {
     const id = safeChatId(meta.id);
     if (!id) return { ok: false, error: 'invalid chat id' };
@@ -1422,8 +1798,22 @@ ipcMain.handle('history:save', (_e, meta, convo) => {
       autoApprove: !!meta.autoApprove,
       timestamp: meta.timestamp || new Date().toISOString(),
     };
+    const mainRuntime = await runtimeMetadata(meta.model || '');
+    const roleNames = {
+      main: meta.model || '',
+      coder: meta.coderModel || '',
+      subagent: meta.subModel || '',
+    };
+    const roleEntries = await Promise.all(Object.entries(roleNames).map(async ([role, name]) => [role, (await runtimeMetadata(name)).model]));
+    const detailed = {
+      subModel: meta.subModel || '',
+      coderModel: meta.coderModel || '',
+      onlineResearch: !!meta.onlineResearch,
+      runMetrics: meta.runMetrics || null,
+      runtime: { ...mainRuntime, roles: Object.fromEntries(roleEntries) },
+    };
     fs.mkdirSync(chatsDir(), { recursive: true });
-    fs.writeFileSync(path.join(chatsDir(), id + '.json'), JSON.stringify({ ...entry, conversation: convo || [] }), 'utf8');
+    fs.writeFileSync(path.join(chatsDir(), id + '.json'), JSON.stringify({ ...entry, ...detailed, conversation: convo || [] }), 'utf8');
     const index = readChatIndex().filter((c) => c.id !== id);
     index.push(entry);
     writeChatIndex(index);
@@ -1537,11 +1927,17 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     const summary = (data.message?.content || '').trim();
     if (!summary) return { ok: false, error: 'Model returned an empty summary.' };
 
+    usage.metrics.compactions += 1;
+
     // Record usage for the summarization step
     if (data.prompt_eval_count || data.eval_count) {
       recordUsage('main', {
         promptTokens: data.prompt_eval_count,
-        evalTokens: data.eval_count
+        evalTokens: data.eval_count,
+        loadMs: (data.load_duration || 0) / 1e6,
+        promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+        generationMs: (data.eval_duration || 0) / 1e6,
+        totalMs: (data.total_duration || 0) / 1e6,
       });
     }
 

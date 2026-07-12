@@ -1,0 +1,9 @@
+Implement atomic order placement across inventory.js and orders.js.
+
+Requirements:
+- Add Inventory.reserveBatch(lines).
+- Validate the entire batch before changing stock; any invalid or insufficient line must leave all stock unchanged.
+- Duplicate SKU lines count toward the same total demand.
+- placeOrder must use the atomic batch operation, reject missing prices, preserve integer-cent totals, and return a receipt detached from caller input.
+- Do not modify test.js.
+- Verify with the repository's declared test check.
