@@ -26,14 +26,15 @@ function runCases(cases) {
 
 const TASKS = {
   cart: {
-    version: 2,
+    version: 3,
     title: 'Basic bug fix',
     promptFile: 'prompts/cart.txt',
     targetFiles: ['cart.js'],
-    protectedFiles: ['test.js'],
+    protectedFiles: ['test.js', 'package.json'],
     allowedFiles: ['cart.js', 'config.js'],
     efficiencyBudget: { toolCalls: 12, generatedTokens: 4000, wallTimeMs: 120000 },
     files: {
+      'package.json': `{"name":"brittain-bench-cart","private":true,"scripts":{"test":"node test.js"}}\n`,
       'config.js': `module.exports = { taxRate: 0.08, currency: 'USD', freeShippingThreshold: 50 };\n`,
       'cart.js': `const config = require('./config');
 
@@ -100,14 +101,15 @@ process.exit(pass === tests.length ? 0 : 1);\n`,
   },
 
   feature: {
-    version: 1,
+    version: 2,
     title: 'Atomic multi-file feature',
     promptFile: 'prompts/feature.txt',
     targetFiles: ['inventory.js', 'orders.js'],
-    protectedFiles: ['test.js'],
+    protectedFiles: ['test.js', 'package.json'],
     allowedFiles: ['inventory.js', 'orders.js'],
     efficiencyBudget: { toolCalls: 20, generatedTokens: 6500, wallTimeMs: 240000 },
     files: {
+      'package.json': `{"name":"brittain-bench-feature","private":true,"scripts":{"test":"node test.js"}}\n`,
       'inventory.js': `class Inventory {
   constructor(stock = {}) { this.stock = { ...stock }; }
   available(sku) { return this.stock[sku] || 0; }
@@ -161,14 +163,15 @@ console.log(pass + '/4 passed.'); process.exit(pass === 4 ? 0 : 1);\n`,
   },
 
   debug: {
-    version: 1,
+    version: 2,
     title: 'Bug report without a failing visible test',
     promptFile: 'prompts/debug.txt',
     targetFiles: ['cache.js'],
-    protectedFiles: ['test.js'],
+    protectedFiles: ['test.js', 'package.json'],
     allowedFiles: ['cache.js'],
     efficiencyBudget: { toolCalls: 12, generatedTokens: 4000, wallTimeMs: 180000 },
     files: {
+      'package.json': `{"name":"brittain-bench-debug","private":true,"scripts":{"test":"node test.js"}}\n`,
       'cache.js': `class TTLCache {
   constructor(now = () => Date.now()) { this.now = now; this.values = new Map(); }
   set(key, value, ttlSeconds) { this.values.set(key, { value, expiresAt: this.now() + ttlSeconds }); }
@@ -205,14 +208,15 @@ console.log('2/2 passed.');\n`,
   },
 
   economy: {
-    version: 1,
+    version: 2,
     title: 'Deterministic economy simulation slice',
     promptFile: 'prompts/economy.txt',
     targetFiles: ['rng.js', 'ledger.js', 'economy.js'],
-    protectedFiles: ['test.js'],
+    protectedFiles: ['test.js', 'package.json'],
     allowedFiles: ['rng.js', 'ledger.js', 'economy.js'],
     efficiencyBudget: { toolCalls: 30, generatedTokens: 10000, wallTimeMs: 480000 },
     files: {
+      'package.json': `{"name":"brittain-bench-economy","private":true,"scripts":{"test":"node test.js"}}\n`,
       'rng.js': `function createRng(seed) { throw new Error('TODO'); }\nmodule.exports = { createRng };\n`,
       'ledger.js': `class Ledger { constructor(balances) { this.balances = { ...balances }; } transfer() { throw new Error('TODO'); } total() { return Object.values(this.balances).reduce((a,b) => a+b, 0); } }\nmodule.exports = { Ledger };\n`,
       'economy.js': `function simulate(options) { throw new Error('TODO'); }\nmodule.exports = { simulate };\n`,

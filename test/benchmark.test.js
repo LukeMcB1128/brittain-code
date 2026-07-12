@@ -19,6 +19,9 @@ test('benchmark task fixtures are versioned, protected, and intentionally incomp
     assert.equal(manifest.task, id);
     assert.equal(manifest.version, task.version);
     assert.equal(task.protectedFiles.includes('test.js'), true);
+    assert.equal(task.protectedFiles.includes('package.json'), true);
+    const packageJson = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.equal(packageJson.scripts.test, 'node test.js');
 
     const result = task.evaluate(dir);
     assert.equal(result.visible.total > 0, true);

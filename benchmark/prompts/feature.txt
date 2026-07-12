@@ -6,5 +6,4 @@ Requirements:
 - Duplicate SKU lines count toward the same total demand.
 - placeOrder must use the atomic batch operation, reject missing prices, preserve integer-cent totals, and return a receipt detached from caller input.
 - Do not modify test.js.
-
-Run node test.js and report the final pass count.
+- Verify with the repository's declared test check.

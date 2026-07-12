@@ -119,3 +119,19 @@ New Brittain Code chats save:
 - app version/commit, Ollama version, temperature, context cap, and hardware profile.
 
 Older benchmark results remain visible as legacy rows, but they cannot participate in timing/token comparisons because those chats did not persist telemetry.
+
+# To run
+```bash
+node benchmark/grade.js /Downloads/Coding/brittain-bench --task cart
+node benchmark/grade.js /Downloads/Coding/brittain-bench-feature --task feature
+node benchmark/grade.js /Downloads/Coding/brittain-bench-debug --task debug
+node benchmark/grade.js /Downloads/Coding/brittain-bench-economy --task economy
+```
+
+# To refresh git
+```bash
+cd ~/Downloads/Coding/brittain-bench && git reset --hard -q bench-baseline && git clean -fdq
+cd ~/Downloads/Coding/brittain-bench-feature && git reset --hard -q bench-baseline && git clean -fdq
+cd ~/Downloads/Coding/brittain-bench-debug && git reset --hard -q bench-baseline && git clean -fdq
+cd ~/Downloads/Coding/brittain-bench-economy && git reset --hard -q bench-baseline && git clean -fdq
+```

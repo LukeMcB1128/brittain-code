@@ -1,8 +1,0 @@
-This folder is a small shopping-cart module whose tests are failing. Your job is to make the test suite pass — every case green.
-
-Run the suite with: node test.js
-
-Rules:
-- test.js is the specification. Do not modify it, and do not change what the functions are supposed to return.
-- Fix the source so the logic is correct and general — do not hardcode the expected test values.
-- Verify by actually running node test.js before you tell me you're done, and report the final pass count.
