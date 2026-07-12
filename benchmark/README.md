@@ -99,6 +99,9 @@ node benchmark/report.js                        # rebuild report.html
 
 Each successful grade appends or replaces its chat record in `results.json` and rebuilds `report.html`. The report includes:
 
+- current task-version badges and run counts;
+- a leaderboard built only from the versions currently declared in `tasks.js`;
+- a collapsed archive containing older task-version results;
 - median score and observed range per configuration;
 - full-pass rate and repetition count;
 - correctness versus elapsed-time scatter plot;

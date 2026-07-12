@@ -62,6 +62,7 @@ test('benchmark report uses readable charts and task, mode, and thinking filters
     schemaVersion: 2,
     configKey: 'cart|solo|model-a|think=false',
     task: 'cart',
+    taskVersion: TASKS.cart.version,
     mode: 'solo',
     modelLabel: 'model-a',
     settings: { think: false, contextCap: 131072 },
@@ -75,6 +76,7 @@ test('benchmark report uses readable charts and task, mode, and thinking filters
     schemaVersion: 2,
     configKey: 'feature|solo|model-a|think=false',
     task: 'feature',
+    taskVersion: TASKS.feature.version,
     mode: 'solo',
     modelLabel: 'model-a',
     settings: { think: false, contextCap: 131072 },
@@ -90,7 +92,26 @@ test('benchmark report uses readable charts and task, mode, and thinking filters
   assert.match(html, /class="score-chart"/);
   assert.match(html, /class="legend-item"/);
   assert.match(html, /<select id="think">/);
-  assert.match(html, /tasks 2\/2/);
+  assert.match(html, /tasks 2\/4/);
   assert.match(html, /data-view-key="feature\|all\|all"/);
+  assert.match(html, new RegExp(`cart v${TASKS.cart.version}`));
+  assert.match(html, /Archived test versions \(0 runs\)/);
   assert.doesNotMatch(html, /rotate\(-35/);
+});
+
+test('benchmark report excludes older task versions from the current leaderboard', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-benchmark-archive-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const results = path.join(dir, 'results.json');
+  const report = path.join(dir, 'report.html');
+  fs.writeFileSync(results, JSON.stringify([
+    { schemaVersion: 2, configKey: 'old', task: 'cart', taskVersion: TASKS.cart.version - 1, mode: 'solo', modelLabel: 'old-model', total: 99, correctness: 55, reliability: 15, efficiency: 15, settings: { think: false } },
+    { schemaVersion: 2, configKey: 'new', task: 'cart', taskVersion: TASKS.cart.version, mode: 'solo', modelLabel: 'new-model', total: 80, correctness: 50, reliability: 12, efficiency: 10, settings: { think: false } },
+  ]));
+  writeReport(results, report);
+  const html = fs.readFileSync(report, 'utf8');
+  assert.match(html, /1 current runs · 1 archived runs/);
+  assert.match(html, /Archived test versions \(1 runs\)/);
+  assert.match(html, /Historical runs are preserved for reference/);
+  assert.match(html, /old-model/);
 });
