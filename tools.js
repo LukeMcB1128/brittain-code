@@ -192,6 +192,66 @@ function trackRewrite(name, p) {
   return '';
 }
 
+// ---------- destructive-command classifier (Tier 2) ----------
+// Commands matching these patterns ALWAYS require user approval, even when
+// AUTO-APPROVE is on. File tools are fenced to the project directory, but the
+// shell is not — this is the gate on the one unfenced door.
+const DESTRUCTIVE_COMMAND_PATTERNS = [
+  /\brm\b[^|;&]*\s-\w*[rf]/,                    // rm with -r or -f anywhere
+  /\bsudo\b/,
+  /\bgit\s+push\b.*(--force|-f\b)/,             // force push
+  /\bgit\s+push\b/,                              // any push touches a remote
+  /\bgit\s+reset\s+--hard\b/,
+  /\bgit\s+clean\b/,
+  /\bgit\s+checkout\s+\.\B/,                     // discard all working changes
+  /\bchmod\b\s+-\w*R/,
+  /\bchown\b/,
+  /\b(curl|wget)\b[^|;&]*\|\s*(ba|z|da)?sh\b/,   // pipe a download into a shell
+  /\bmkfs\b|\bdiskutil\b|\bdd\s+if=/,
+  /\b(shutdown|reboot|halt)\b/,
+  /\bkill(all)?\b\s+-9\s+-1\b/,
+  /\blaunchctl\b|\bcrontab\b/,
+  /\bnpm\s+(publish|unpublish)\b/,
+  />\s*\/(?:etc|usr|bin|sbin|dev|System|Library)\//, // redirect into system paths
+  /\b(?:mv|cp|rm|rmdir|touch|tee)\b[^|;&]*\s(?:\/(?!tmp\/)|~\/(?!$))/, // mutate absolute/home paths outside the project
+];
+
+function isDestructiveCommand(command) {
+  const c = String(command || '');
+  return DESTRUCTIVE_COMMAND_PATTERNS.some((re) => re.test(c));
+}
+
+// ---------- protected paths (Tier 2) ----------
+// Defaults always apply; a `.brittainprotect` file in the project root adds
+// project-specific globs (one per line, # comments). Mutation tools refuse
+// matches; reads are unaffected (sensitive reads are gated separately).
+const DEFAULT_PROTECTED_GLOBS = ['.git/**', '.env', '.env.*', '*.pem', '*.key', '.brittainprotect'];
+
+function loadProtectedGlobs(cwd) {
+  const globs = [...DEFAULT_PROTECTED_GLOBS];
+  try {
+    for (const line of fs.readFileSync(path.join(cwd, '.brittainprotect'), 'utf8').split('\n')) {
+      const g = line.trim();
+      if (g && !g.startsWith('#')) globs.push(g);
+    }
+  } catch {}
+  return globs;
+}
+
+// Like resolveInside, but additionally refuses protected paths. Used by every
+// tool that mutates the filesystem.
+function resolveForWrite(cwd, p) {
+  const abs = resolveInside(cwd, p);
+  const rel = path.relative(fs.realpathSync(cwd), abs).split(path.sep).join('/');
+  for (const glob of loadProtectedGlobs(cwd)) {
+    const re = globToRegex(glob);
+    if (re.test(rel) || re.test(path.basename(rel))) {
+      throw new Error(`"${rel}" is protected (matched "${glob}" — defaults + .brittainprotect). Ask the user to change it themselves if it truly needs modification.`);
+    }
+  }
+  return abs;
+}
+
 // Recursively visit files, skipping .git and node_modules; unreadable dirs are skipped.
 function walkDir(dir, onFile) {
   let entries;
@@ -1107,7 +1167,7 @@ async function executeTool(name, args, cwd) {
       return truncate(fs.readFileSync(p, 'utf8'));
     }
     case 'write_file': {
-      const p = resolveInside(cwd, args.path);
+      const p = resolveForWrite(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       const content = args.content ?? '';
       let oldLen = 0;
@@ -1283,7 +1343,7 @@ async function executeTool(name, args, cwd) {
       return 'Remembered for this project. This will be available in future chats that use the same directory.';
     }
     case 'append_file': {
-      const p = resolveInside(cwd, args.path);
+      const p = resolveForWrite(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       const addition = args.content ?? '';
       const updated = (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '') + addition;
@@ -1299,12 +1359,12 @@ async function executeTool(name, args, cwd) {
       return `Appended ${addition.length} chars to ${p}\nSyntax check: OK` + selfTalkNote(addition);
     }
     case 'create_directory': {
-      const p = resolveInside(cwd, args.path);
+      const p = resolveForWrite(cwd, args.path);
       fs.mkdirSync(p, { recursive: true });
       return `Created directory ${p}`;
     }
     case 'delete_file': {
-      const p = resolveInside(cwd, args.path);
+      const p = resolveForWrite(cwd, args.path);
       if (!fs.existsSync(p)) return `File not found: ${p}`;
       fs.unlinkSync(p);
       return `Deleted file ${p}`;
@@ -1332,14 +1392,14 @@ async function executeTool(name, args, cwd) {
     }
     case 'copy_file': {
       const source = resolveInside(cwd, args.source);
-      const dest = resolveInside(cwd, args.destination);
+      const dest = resolveForWrite(cwd, args.destination);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(source, dest);
       return `Copied ${source} to ${dest}`;
     }
     case 'move_file': {
-      const source = resolveInside(cwd, args.source);
-      const dest = resolveInside(cwd, args.destination);
+      const source = resolveForWrite(cwd, args.source);
+      const dest = resolveForWrite(cwd, args.destination);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.renameSync(source, dest);
       return `Moved ${source} to ${dest}`;
@@ -1362,7 +1422,7 @@ async function executeTool(name, args, cwd) {
       return truncate(lines.slice(start, end).join('\n')) || '(no lines found)';
     }
     case 'edit_file': {
-      const p = resolveInside(cwd, args.path);
+      const p = resolveForWrite(cwd, args.path);
       const content = fs.readFileSync(p, 'utf8');
       const oldS = String(args.old_string ?? '');
       const newS = String(args.new_string ?? '');
@@ -1466,7 +1526,7 @@ async function executeTool(name, args, cwd) {
         + '\nSyntax checks: OK' + notes;
     }
     case 'replace_in_file': {
-      const p = resolveInside(cwd, args.path);
+      const p = resolveForWrite(cwd, args.path);
       const content = fs.readFileSync(p, 'utf8');
       const pat = String(args.pattern ?? '');
       const rep = String(args.replacement ?? '');
@@ -2147,6 +2207,8 @@ module.exports = {
   SENSITIVE_TOOLS,
   DESTRUCTIVE_TOOLS,
   executeTool,
+  isDestructiveCommand,
+  resolveForWrite,
   gitRun,
   memoryPath,
   readMemory,

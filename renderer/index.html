@@ -28,6 +28,10 @@
       <input type="checkbox" id="auto-branch" />
       <span>BRANCH</span>
     </label>
+    <label class="toggle" title="When on, every run that changes files ends with a KEEP / DISCARD review — nothing sticks until you accept it">
+      <input type="checkbox" id="review-mode" />
+      <span>REVIEW</span>
+    </label>
     <button id="new-btn" title="Clear conversation">NEW SESSION</button>
   </header>
 
@@ -40,6 +44,18 @@
     <!-- Startup message overlay — lives outside #chat so chat.innerHTML wipes can't destroy it -->
     <div id="startup-message" class="hidden">
       <div id="startup-message-content"></div>
+    </div>
+  </div>
+
+  <div id="review-bar" class="hidden">
+    <div class="review-text">
+      <span class="review-title">REVIEW THIS RUN</span>
+      <span id="review-detail"></span>
+    </div>
+    <div class="review-actions">
+      <button id="review-diff-btn">VIEW DIFF</button>
+      <button id="review-keep-btn" class="approve">KEEP</button>
+      <button id="review-discard-btn" class="deny">DISCARD</button>
     </div>
   </div>
 

@@ -183,8 +183,8 @@ async function publishPersistedConversationContext(model) {
 // ---------- window ----------
 function createWindow() {
   win = new BrowserWindow({
-    width: 1100,
-    height: 760,
+    width: 1250,
+    height: 850,
     minWidth: 700,
     minHeight: 500,
     backgroundColor: '#111214',
@@ -529,6 +529,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   const useThink = (await supportsThinking(model)) ? !!think : undefined;
   let lastContent = '';
   let emptyNudges = 0;
+  const runLog = { mutations: new Set(), commands: [], verified: false };
   let lastStats = null;
   let exhaustedWithToolCalls = false;
 
@@ -642,6 +643,13 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
               : 'The user denied this destructive operation. Do not retry it unless the user explicitly asks.';
             win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(destructive operation denied by user)', denied: !approved });
           }
+        } else if (name === 'run_command' && isDestructiveCommand(args.command)) {
+          // destructive shell patterns bypass AUTO-APPROVE — always ask
+          const approved = await requestApproval({ name, args, destructive: true });
+          result = approved
+            ? await safeExecute(name, args, cwd)
+            : 'The user denied this destructive command. Do not retry it or any variation of it unless the user explicitly asks.';
+          win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(destructive command denied by user)', denied: !approved });
         } else if (isSensitiveToolCall(name, args)) {
           const approved = await requestApproval({ name, args, sensitive: true });
           result = approved
@@ -661,6 +669,14 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
         }
 
         recordToolTelemetry(result, /denied by user/i.test(String(result)));
+        if (!String(result).startsWith('Error:') && !/denied by user/.test(String(result))) {
+          if (RISKY_TOOLS.has(name) && name !== 'run_command' && args?.path) runLog.mutations.add(String(args.path));
+          if (name === 'move_file' || name === 'copy_file') runLog.mutations.add(String(args.destination || ''));
+          if (name === 'run_command' && args?.command) {
+            runLog.commands.push(String(args.command));
+            if (/\b(test|spec|--check|tsc|lint|pytest|vitest|jest)\b/.test(String(args.command))) runLog.verified = true;
+          }
+        }
         conversation.push({ role: 'tool', tool_name: name, content: String(result) });
       }
       if (stopRequested) break;
@@ -683,7 +699,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   if (exhaustedWithToolCalls && !stopRequested) {
     win.webContents.send('stream:info', `Agent stopped after reaching the ${MAX_AGENT_STEPS}-step safety cap.`);
   }
-  return { lastContent, lastStats, contextLength };
+  return { lastContent, lastStats, contextLength, runLog };
 }
 
 // ---------- run checkpoints (Tier 1 safety) ----------
@@ -774,6 +790,26 @@ async function maybeAutoBranch(cwd, taskText, enabled) {
     : 'BRANCH is on but branch creation failed: ' + (made.err || 'unknown error'));
 }
 
+// ---------- end-of-run report card (Tier 3) ----------
+async function emitRunReport(cwd, runLog) {
+  if (!runLog || (!runLog.mutations.size && !runLog.commands.length)) return; // read-only turns stay quiet
+  const lines = ['\u2501 RUN REPORT \u2501'];
+  let diffPart = '';
+  if (lastCheckpoint && lastCheckpoint.cwd === cwd) {
+    const stat = await gitRun(['diff', '--stat', lastCheckpoint.ref], cwd);
+    if (stat.ok && stat.out.trim()) diffPart = stat.out.trim().split('\n').slice(-11).join('\n');
+  }
+  if (diffPart) lines.push(diffPart);
+  else if (runLog.mutations.size) lines.push('files touched: ' + [...runLog.mutations].slice(0, 10).join(', '));
+  if (runLog.commands.length) {
+    lines.push(`commands (${runLog.commands.length}): ` + runLog.commands.slice(0, 3).map((c) => (c.length > 60 ? c.slice(0, 60) + '\u2026' : c)).join('  \u00b7  '));
+  }
+  lines.push(runLog.verified ? '\u2713 a verification command was run' : '\u26a0 NOT VERIFIED \u2014 no test/check command ran this turn');
+  if (runLog.mutations.size) lines.push('UNDO is available in the status bar.');
+  win.webContents.send('stream:info', lines.join('\n'));
+  win.webContents.send('run:report', { cwd, mutations: runLog.mutations.size });
+}
+
 // If the conversation is already over the threshold BEFORE we send (e.g. it
 // grew last session, or was loaded pre-bloated), compact first — otherwise the
 // request context-shifts and the model silently loses its oldest messages.
@@ -809,7 +845,8 @@ ipcMain.handle('chat:send', async (_e, { model, text, cwd, autoApprove, think, i
   let runOutcome = 'ok';
 
   try {
-    await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch);
+    const { runLog } = await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch);
+    await emitRunReport(cwd, runLog);
     return { ok: true };
   } catch (err) {
     if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }
@@ -1490,6 +1527,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
 
   try {
     await maybePrecompact(model); // a loop may start on an already-bloated chat
+    const loopLog = { mutations: new Set(), commands: [], verified: false };
     let feedback = '';
     for (let i = 1; i <= max; i++) {
       if (stopRequested) break;
@@ -1505,7 +1543,10 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
         ) + driftReminder,
       });
 
-      const { lastContent, lastStats, contextLength } = await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch);
+      const { lastContent, lastStats, contextLength, runLog } = await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch);
+      for (const m of runLog.mutations) loopLog.mutations.add(m);
+      loopLog.commands.push(...runLog.commands);
+      loopLog.verified = loopLog.verified || runLog.verified;
       if (stopRequested) break;
 
       state(`verifying ${i}/${max} (${subModel || 'qwen3:8b'})…`);
@@ -1538,6 +1579,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
         }
       }
     }
+    await emitRunReport(cwd, loopLog);
     return { ok: true };
   } catch (err) {
     if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }

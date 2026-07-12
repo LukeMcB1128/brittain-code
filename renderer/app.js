@@ -12,6 +12,7 @@ const sidebar = $('sidebar');
 const thinkToggle = $('think-toggle');
 const onlineResearchToggle = $('online-research');
 const autoBranchToggle = $('auto-branch');
+const reviewToggle = $('review-mode');
 const undoBtn = $('undo-btn');
 
 let cwd = null;
@@ -77,6 +78,7 @@ let currentChatId = null;
   thinkToggle.checked = localStorage.getItem('think') === '1';
   autoApprove.checked = localStorage.getItem('autoApprove') === '1';
   autoBranchToggle.checked = localStorage.getItem('autoBranch') === '1';
+  reviewToggle.checked = localStorage.getItem('reviewMode') === '1';
   onlineResearchToggle.checked = false; // privacy boundary: never restore online access implicitly
 
   // One-time migration: chats used to live in localStorage; move them to disk.
@@ -103,6 +105,7 @@ let currentChatId = null;
 thinkToggle.addEventListener('change', () => localStorage.setItem('think', thinkToggle.checked ? '1' : '0'));
 autoApprove.addEventListener('change', () => localStorage.setItem('autoApprove', autoApprove.checked ? '1' : '0'));
 autoBranchToggle.addEventListener('change', () => localStorage.setItem('autoBranch', autoBranchToggle.checked ? '1' : '0'));
+reviewToggle.addEventListener('change', () => localStorage.setItem('reviewMode', reviewToggle.checked ? '1' : '0'));
 onlineResearchToggle.addEventListener('change', () => {
   if (!onlineResearchToggle.checked) return;
   const approved = confirm(
@@ -142,6 +145,36 @@ undoBtn.addEventListener('click', async () => {
   } else {
     addError('Undo failed: ' + res.error);
   }
+  refreshGit();
+});
+
+// ---------- REVIEW mode: keep/discard a run ----------
+window.api.onRunReport(({ cwd: runCwd, mutations }) => {
+  if (!reviewToggle.checked || !mutations || runCwd !== cwd) return;
+  $('review-detail').textContent = `${mutations} file${mutations === 1 ? '' : 's'} changed — keep this run's changes, or discard to restore the pre-run checkpoint.`;
+  $('review-bar').classList.remove('hidden');
+  setState('awaiting review');
+});
+
+function hideReview() {
+  $('review-bar').classList.add('hidden');
+}
+
+$('review-keep-btn').addEventListener('click', () => {
+  hideReview();
+  addInfo('REVIEW: changes kept.');
+  setState('idle');
+});
+
+$('review-diff-btn').addEventListener('click', showDiff);
+
+$('review-discard-btn').addEventListener('click', async () => {
+  if (!confirm('Discard this run? All files return to the pre-run checkpoint.')) return;
+  const res = await window.api.undoCheckpoint(cwd);
+  hideReview();
+  if (res.ok) addInfo('REVIEW: run discarded — files restored to the pre-run checkpoint (UNDO again re-applies it).');
+  else addError('Discard failed: ' + res.error);
+  setState('idle');
   refreshGit();
 });
 
@@ -485,6 +518,7 @@ async function send() {
 function startRun() {
   busy = true;
   hideStartupMessage(); // slash commands (/loop etc.) start runs without a normal send
+  hideReview();
   sendBtn.classList.add('hidden');
   stopBtn.classList.remove('hidden');
   setState('working');
