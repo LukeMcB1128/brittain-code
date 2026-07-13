@@ -187,8 +187,61 @@ test('run_project_check lists and executes only declared verification scripts', 
   assert.match(result.stdout, /checks-ok/);
 
   const refused = await executeTool('run_project_check', { check: 'deploy' }, cwd);
-  assert.match(refused, /not an allowed declared verification script/);
+  assert.match(refused, /not an allowed discovered verification check/);
   assert.doesNotMatch(refused, /must-not-run/);
+});
+
+test('run_project_check discovers native project checks without a package.json', async (t) => {
+  const root = tempProject();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixtures = {
+    cmake: ['CMakeLists.txt', 'cmake_minimum_required(VERSION 3.10)\nproject(sample)\nenable_testing()\n'],
+    cargo: ['Cargo.toml', '[package]\nname="sample"\nversion="0.1.0"\n'],
+    go: ['go.mod', 'module example.invalid/sample\n\ngo 1.22\n'],
+    python: ['pyproject.toml', '[tool.pytest.ini_options]\ntestpaths=["tests"]\n'],
+    make: ['Makefile', 'check:\n\t@echo checked\nbuild:\n\t@echo built\ndeploy:\n\t@echo forbidden\n'],
+  };
+
+  const expected = {
+    cmake: ['configure', 'build', 'check', 'test'],
+    cargo: ['check', 'test', 'build'],
+    go: ['check', 'test', 'build', 'lint'],
+    python: ['check', 'test'],
+    make: ['build', 'check'],
+  };
+  for (const [type, [manifest, content]] of Object.entries(fixtures)) {
+    const dir = path.join(root, type);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, manifest), content);
+    const listed = JSON.parse(await executeTool('run_project_check', { path: type }, root));
+    assert.equal(listed.project_type, type);
+    assert.equal(listed.manifest, manifest);
+    assert.deepEqual(listed.checks.map((entry) => entry.name), expected[type]);
+    assert.equal(listed.checks.every((entry) => entry.command && entry.description), true);
+  }
+});
+
+test('run_project_check reports unsupported projects as unavailable rather than failed', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const result = await executeTool('run_project_check', {}, cwd);
+  assert.match(result, /^Project checks unavailable:/);
+  assert.match(result, /not evidence that the project failed to compile or test/);
+  assert.doesNotMatch(result, /^Error:/);
+});
+
+test('run_project_check can select a native manifest in a mixed repository', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: {} }));
+  fs.writeFileSync(path.join(cwd, 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.10)\nproject(sample)\n');
+
+  const fallback = JSON.parse(await executeTool('run_project_check', {}, cwd));
+  assert.equal(fallback.project_type, 'cmake');
+  const explicit = JSON.parse(await executeTool('run_project_check', { path: 'CMakeLists.txt' }, cwd));
+  assert.equal(explicit.project_type, 'cmake');
+  const explicitPackage = await executeTool('run_project_check', { path: 'package.json' }, cwd);
+  assert.match(explicitPackage, /No allowed verification checks found in package\.json/);
 });
 
 test('edit_files applies a validated multi-file batch and rejects partial changes', async (t) => {

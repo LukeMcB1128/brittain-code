@@ -1300,7 +1300,7 @@ function coderSystemPrompt(cwd) {
     'You are always offline. Do not attempt network access or delegate to other agents.',
     'Preserve pre-existing user changes. Do not commit, revert, or rewrite unrelated code.',
     'Use edit_file/edit_files for existing files and write_file only for new files or files you have fully read.',
-    'Run available declared project checks. Never claim a check passed unless its tool result proves it.',
+    'Use run_project_check without a check name first to discover verification for package, CMake, Cargo, Go, Python, or Make projects, then run the most relevant discovered check. Never claim a check passed unless its tool result proves it.',
     'When finished, return a concise report listing changed files, checks run, and any unresolved issue.',
     scopedProjectContext(cwd),
   ].filter(Boolean).join('\n');
@@ -1478,7 +1478,7 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
       messages: [
         {
           role: 'system',
-          content: 'You are the strict offline verifier for an orchestrated coding task. Judge the TASK and its acceptance criteria; the overall goal is context unless this is explicitly the final whole-goal verification. Use only actual Git evidence and recorded tool results. Reply with exactly GOAL_COMPLETE only when every acceptance criterion is implemented and adequately verified. Otherwise return a short numbered list of concrete deficiencies. Never accept claims in the coder report without supporting evidence.',
+          content: 'You are the strict offline verifier for an orchestrated coding task. Judge the TASK and its acceptance criteria; the overall goal is context unless this is explicitly the final whole-goal verification. Use only actual Git evidence and recorded tool results. Reply with exactly GOAL_COMPLETE only when every acceptance criterion is implemented and adequately verified. Otherwise return a short numbered list of concrete deficiencies. Never accept claims in the coder report without supporting evidence. A missing or unsupported project-check manifest is not evidence of compilation errors; distinguish unavailable verification from an executed check whose exit code or output proves failure. Never include GOAL_COMPLETE anywhere in a deficiency response.',
         },
         {
           role: 'user',

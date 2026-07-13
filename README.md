@@ -31,7 +31,7 @@ To give it a custom icon: put an `icon.icns` in a `build/` folder, add `"icon": 
 2. Click **DIR** and choose the project folder the agent should work in.
 3. Type a task and hit Enter.
 
-The agent can inspect and edit files, search source and locally installed documentation, run declared project checks, inspect Git state, manage local development processes, verify loopback HTTP servers, and run shell commands. File tools are confined to the selected project directory. It asks before writes, commands, and other risky operations. **AUTO-APPROVE** can make ordinary risky tools unattended, but online requests and sensitive reads always require explicit approval.
+The agent can inspect and edit files, search source and locally installed documentation, run allowlisted project checks, inspect Git state, manage local development processes, verify loopback HTTP servers, and run shell commands. `run_project_check` discovers npm-compatible scripts, CMake configure/build/CTest flows, Cargo, Go, Python/pytest, and safe Make targets; every command runs without a shell. File tools are confined to the selected project directory. It asks before writes, commands, and other risky operations. **AUTO-APPROVE** can make ordinary risky tools unattended, but online requests and sensitive reads always require explicit approval.
 
 If Ollama rejects malformed tool-call JSON, Brittain Code discards that call and retries generation once with strict formatting and THINK disabled. A second rejection stops safely with a concise model-format error; malformed arguments are never reconstructed or executed.
 
