@@ -248,6 +248,7 @@ const record = {
   generatedTokens,
   wallTimeMs,
   recoveredToolCalls: Number(metrics.recoveredToolCalls) || 0,
+  toolCallRetries: Number(metrics.toolCallRetries) || 0,
   compactions: Number(metrics.compactions) || 0,
   repairs: Number(metrics.repairs) || 0,
   peakContextTokens: Number(metrics.peakContextTokens) || 0,

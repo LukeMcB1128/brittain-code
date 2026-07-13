@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses } = require('./tools');
+const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
 
 const OLLAMA = 'http://127.0.0.1:11434';
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
@@ -100,6 +101,7 @@ function freshUsage() {
       toolErrors: 0,
       deniedTools: 0,
       recoveredToolCalls: 0,
+      toolCallRetries: 0,
       compactions: 0,
       loopIterations: 0,
       orchestrations: 0,
@@ -349,7 +351,7 @@ ipcMain.on('question:response', (_e, { id, answer }) => {
 });
 
 // ---------- streaming chat with ollama ----------
-async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS) {
+async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS, recovery = { toolCallRetries: 0 }) {
   const res = await fetch(OLLAMA + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -363,7 +365,27 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
     }),
     signal,
   });
-  if (!res.ok) throw new Error(`Ollama chat failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    const errorBody = await res.text();
+    if (toolset && isToolCallParseError(res.status, errorBody)) {
+      if ((recovery.toolCallRetries || 0) < 1) {
+        usage.metrics.toolCallRetries += 1;
+        win?.webContents.send('stream:info', `Model ${model} emitted malformed tool JSON. Retrying once with strict formatting and THINK disabled…`);
+        return streamChat(
+          model,
+          withToolCallRetryInstruction(messages),
+          signal,
+          think === undefined ? undefined : false,
+          silent,
+          numCtx,
+          toolset,
+          { toolCallRetries: 1 },
+        );
+      }
+      throw new Error(toolCallFailureMessage(model));
+    }
+    throw new Error(`Ollama chat failed: ${res.status} ${errorBody}`);
+  }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -599,10 +621,15 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           let qs = Array.isArray(args.questions) ? args.questions
             : args.question ? [{ question: args.question, options: args.options }]
             : [];
-          qs = qs.slice(0, 4).map((q) => ({
-            question: String(q.question || q || ''),
-            options: Array.isArray(q.options) ? q.options.map(String).slice(0, 4) : [],
-          })).filter((q) => q.question);
+          // models emit several shapes: proper objects, plain strings, and
+          // gpt-oss's flattened arrays ["question", "opt1", "opt2", ...]
+          qs = qs.slice(0, 4).map((q) => {
+            if (Array.isArray(q)) return { question: String(q[0] || ''), options: q.slice(1, 5).map(String) };
+            if (typeof q === 'string') return { question: q, options: [] };
+            let opts = q.options;
+            if (typeof opts === 'string') { try { opts = JSON.parse(opts); } catch { opts = [opts]; } }
+            return { question: String(q.question || ''), options: Array.isArray(opts) ? opts.map(String).slice(0, 4) : [] };
+          }).filter((q) => q.question);
 
           if (!qs.length) {
             result = 'Error: ask_user requires a "questions" array of {question, options} objects.';

@@ -16,6 +16,7 @@
     "productName": "Brittain Code",
     "files": [
       "main.js",
+      "ollama-recovery.js",
       "tools.js",
       "preload.js",
       "renderer/**"
