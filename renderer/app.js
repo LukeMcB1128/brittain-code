@@ -984,7 +984,7 @@ const SLASH_HELP = [
   '/diff — show the git diff for the working directory',
   '/commit <message> — stage all changes and commit',
   '/graph — show a visual tree of the git commit history',
-  '/loop [n] <goal> — work toward a goal for up to n iterations (default 8); a verifier subagent judges completion after each pass',
+  '/loop [--coder] [n] <goal> — repeat until verified; --coder delegates planned implementation and repairs to the selected coder model',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
   '/model <for name> — switch model (partial match ok)',
   '/coder [name] — show or set the writable coding-worker model (partial match ok)',
@@ -1041,28 +1041,43 @@ async function handleSlash(raw) {
       if (busy) return;
       if (!modelSelect.value) return addError('No model selected.');
       if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      let useCoder = false;
       let iterations = 8;
       let goal = arg;
-      const m = arg.match(/^(\d+)\s+([\s\S]+)/);
+      const coderFlag = goal.match(/^--coder(?:\s+|$)/i);
+      if (coderFlag) {
+        useCoder = true;
+        goal = goal.slice(coderFlag[0].length).trim();
+      }
+      const m = goal.match(/^(\d+)\s+([\s\S]+)/);
       if (m) { iterations = parseInt(m[1], 10); goal = m[2].trim(); }
-      if (!goal) return addError('Usage: /loop [iterations] <goal> — e.g. /loop 10 make all tests pass');
+      if (!goal) return addError('Usage: /loop [--coder] [iterations] <goal> — e.g. /loop --coder 10 make all tests pass');
+      if (useCoder && !coderModel) return addError('No coder model selected. Use /coder <name>.');
       if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the loop will pause for every risky tool call. Turn it on for unattended runs.');
 
-      addMessage('user', `LOOP (max ${iterations}): ${goal}`);
+      addMessage('user', `${useCoder ? 'CODER LOOP' : 'LOOP'} (max ${iterations}): ${goal}`);
       startRun();
-      const res = await window.api.loop({
-        model: modelSelect.value,
-        subModel,
-        goal,
-        cwd,
-        autoApprove: autoApprove.checked,
-        autoBranch: autoBranchToggle.checked,
-        onlineResearch: onlineResearchToggle.checked,
-        think: thinkToggle.checked,
-        maxIterations: iterations,
-      });
-      if (!res.ok) addError(res.error);
-      endRun();
+      try {
+        const res = await window.api.loop({
+          model: modelSelect.value,
+          coderModel,
+          useCoder,
+          subModel,
+          goal,
+          cwd,
+          autoApprove: autoApprove.checked,
+          autoBranch: autoBranchToggle.checked,
+          onlineResearch: onlineResearchToggle.checked,
+          think: thinkToggle.checked,
+          maxIterations: iterations,
+        });
+        if (!res.ok) addError(res.error);
+        else if (res.report) renderMarkdown(addMessage('assistant', res.report), res.report);
+      } catch (err) {
+        addError('Loop failed: ' + (err.message || err));
+      } finally {
+        endRun();
+      }
       return saveChat();
     }
 

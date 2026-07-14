@@ -104,6 +104,7 @@ function freshUsage() {
       toolCallRetries: 0,
       compactions: 0,
       loopIterations: 0,
+      coderLoopIterations: 0,
       orchestrations: 0,
       repairs: 0,
       stoppedRuns: 0,
@@ -1168,13 +1169,16 @@ async function executeWithApproval(name, args, cwd, autoApprove, onlineResearch)
   return safeExecute(name, args, cwd);
 }
 
-function orchestratorSystemPrompt(cwd, onlineResearch) {
+function orchestratorSystemPrompt(cwd, onlineResearch, taskBudget = 0) {
   return [
     'You are the planning orchestrator inside Brittain Code, a local-first coding agent.',
     `Working directory: ${cwd} — use project-relative paths.`,
     'Your job is to inspect the project, delegate read-only exploration when useful, and produce a small ordered implementation plan for a separate coding model.',
     'You cannot modify files or run shell commands. Do not write implementation code in prose.',
     'Each task must be self-contained, observable, and large enough to avoid unnecessary model swaps. Prefer 1-3 tasks; never exceed 6.',
+    taskBudget
+      ? `This coder loop has at most ${taskBudget} implementation iterations total. Submit no more than ${taskBudget} tasks and prefer fewer so verifier-guided repairs fit within the budget.`
+      : '',
     'Preserve pre-existing user changes. Include exact acceptance criteria, likely relevant files, and important constraints.',
     'When planning is complete, call submit_implementation_plan exactly once. That call ends your work.',
     onlineResearch
@@ -1184,17 +1188,17 @@ function orchestratorSystemPrompt(cwd, onlineResearch) {
   ].filter(Boolean).join('\n');
 }
 
-async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, think, baselineStatus) {
+async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, think, baselineStatus, taskBudget = 0) {
   const activeTools = onlineResearch
     ? ORCHESTRATOR_TOOLS
     : ORCHESTRATOR_TOOLS.filter((definition) => !NETWORK_TOOLS.has(definition.function.name));
   const numCtx = await effectiveContext(model);
   const useThink = (await supportsThinking(model)) ? !!think : undefined;
   const msgs = [
-    { role: 'system', content: orchestratorSystemPrompt(cwd, onlineResearch) },
+    { role: 'system', content: orchestratorSystemPrompt(cwd, onlineResearch, taskBudget) },
     {
       role: 'user',
-      content: `GOAL:\n${goal}\n\nWORKING TREE AT START:\n${baselineStatus || '(clean or not a Git repository)'}\n\nInspect the project and submit the implementation plan.`,
+      content: `GOAL:\n${goal}\n\nWORKING TREE AT START:\n${baselineStatus || '(clean or not a Git repository)'}${taskBudget ? `\n\nCODER LOOP BUDGET:\nAt most ${taskBudget} implementation or repair iterations.` : ''}\n\nInspect the project and submit the implementation plan.`,
     },
   ];
   let lastContent = '';
@@ -1457,8 +1461,18 @@ function conciseWorkingTree(gitEvidence) {
   return `${lines.length} scoped status entr${lines.length === 1 ? 'y' : 'ies'}: ${shown.join(', ')}${lines.length > shown.length ? `, +${lines.length - shown.length} more` : ''}`;
 }
 
+function capWorkflowText(value, maxChars) {
+  const text = String(value || '');
+  if (text.length <= maxChars) return text;
+  const marker = '\n…[middle omitted; latest iteration follows]…\n';
+  const contentChars = Math.max(0, maxChars - marker.length);
+  const headChars = Math.floor(contentChars * 0.35);
+  const tailChars = contentChars - headChars;
+  return `${text.slice(0, headChars)}${marker}${text.slice(-tailChars)}`;
+}
+
 async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, gitEvidence, baselineStatus, signal) {
-  const relevantEvidence = coderResult.evidence
+  const relevantEvidence = capWorkflowText(coderResult.evidence
     .filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name) || entry.name === 'run_project_check' || entry.name === 'run_command' || entry.name === 'read_file' || entry.name === 'read_git_diff')
     .map((entry) => {
       const args = ORCHESTRATION_MUTATING_TOOLS.has(entry.name)
@@ -1466,8 +1480,7 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
         : entry.args;
       return `${entry.name} ${JSON.stringify(args)}\n${entry.result}`;
     })
-    .join('\n\n')
-    .slice(0, 9000);
+    .join('\n\n'), 9000);
   try {
     const useThink = (await supportsThinking(verifierModel)) ? false : undefined;
     const data = await ollamaJson('/api/chat', {
@@ -1482,7 +1495,7 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
         },
         {
           role: 'user',
-          content: `OVERALL GOAL:\n${goal}\n\nTASK:\n${JSON.stringify(task, null, 2)}\n\nWORKING TREE BEFORE ORCHESTRATION:\n${baselineStatus || '(clean or unavailable)'}\n\nCODER REPORT:\n${String(coderResult.report || '').slice(0, 3500)}\n\nRECORDED TOOL EVIDENCE:\n${relevantEvidence || '(no verification commands were recorded)'}\n\nCURRENT GIT EVIDENCE:\n${gitEvidence}`,
+          content: `OVERALL GOAL:\n${goal}\n\nTASK:\n${JSON.stringify(task, null, 2)}\n\nWORKING TREE BEFORE ORCHESTRATION:\n${baselineStatus || '(clean or unavailable)'}\n\nCODER REPORT:\n${capWorkflowText(coderResult.report, 3500)}\n\nRECORDED TOOL EVIDENCE:\n${relevantEvidence || '(no verification commands were recorded)'}\n\nCURRENT GIT EVIDENCE:\n${gitEvidence}`,
         },
       ],
     }, signal);
@@ -1534,7 +1547,182 @@ async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
   }
 }
 
-ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
+function absorbCoderEvidence(runLog, evidence) {
+  for (const entry of evidence || []) {
+    if (ORCHESTRATION_MUTATING_TOOLS.has(entry.name)) {
+      for (const changedPath of evidencePaths(entry)) runLog.mutations.add(changedPath);
+    }
+    if (entry.name === 'run_command' && entry.args?.command) {
+      const command = String(entry.args.command);
+      runLog.commands.push(command);
+      if (/\b(test|spec|--check|tsc|lint|pytest|vitest|jest)\b/.test(command)) runLog.verified = true;
+    }
+    if (entry.name === 'run_project_check' && entry.args?.check) {
+      runLog.commands.push(`project check: ${entry.args.check}`);
+      runLog.verified = true;
+    }
+  }
+}
+
+function mergeCoderAttempt(existing, attempt) {
+  if (!existing) return attempt;
+  return {
+    report: `${existing.report}\n\nNEXT ITERATION:\n${attempt.report}`,
+    evidence: [...existing.evidence, ...attempt.evidence],
+    steps: existing.steps + attempt.steps,
+  };
+}
+
+function wholeGoalVerificationTask(goal, plan) {
+  return {
+    id: 'final-goal',
+    title: 'Finish the whole goal',
+    objective: goal,
+    acceptance_criteria: [
+      'The original overall goal is fully achieved, including requirements omitted from individual planned tasks.',
+      'The implementation is supported by the current Git diff and recorded verification evidence.',
+    ],
+    planned_tasks: plan.tasks.map((task) => ({
+      title: task.title,
+      acceptance_criteria: task.acceptance_criteria,
+    })),
+  };
+}
+
+async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, loopLog }) {
+  const info = (text) => win.webContents.send('stream:info', text);
+  const state = (text) => win.webContents.send('stream:state', text);
+  const verifierModel = subModel || 'qwen3:8b';
+  const baseline = await gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd);
+  const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
+
+  conversation.push({ role: 'user', content: `CODER LOOP (max ${max}): ${goal}` });
+  state(`planning coder loop (${model})`);
+  info(`Supervisor ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
+  const submittedPlan = await runOrchestratorPlan(model, goal, cwd, verifierModel, !!onlineResearch, !!think, baselineStatus, max);
+  const plan = { ...submittedPlan, tasks: submittedPlan.tasks.slice(0, max) };
+  info(`Plan: ${plan.summary}\n${plan.tasks.map((task, index) => `${index + 1}. ${task.title}`).join('\n')}`);
+
+  const results = [];
+  let taskIndex = 0;
+  let task = plan.tasks[0];
+  let feedback = '';
+  let complete = false;
+  let finalVerdict = 'The loop did not reach final verification.';
+  let iterationsUsed = 0;
+
+  for (let iteration = 1; iteration <= max && !stopRequested; iteration++) {
+    iterationsUsed = iteration;
+    usage.metrics.loopIterations += 1;
+    usage.metrics.coderLoopIterations += 1;
+    const isRepair = !!feedback;
+    if (isRepair) usage.metrics.repairs += 1;
+    info(`━ Coder loop iteration ${iteration}/${max}: ${task.title}${isRepair ? ' (repair)' : ''} ━`);
+    state(`coder loop ${iteration}/${max} (${coderModel})`);
+
+    const attempt = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think, feedback);
+    absorbCoderEvidence(loopLog, attempt.evidence);
+    if (stopRequested) break;
+
+    let result = results.find((entry) => entry.task.id === task.id);
+    if (!result) {
+      result = { task, complete: false, repairs: 0, verdict: '', coderResult: null };
+      results.push(result);
+    }
+    result.coderResult = mergeCoderAttempt(result.coderResult, attempt);
+    if (isRepair) result.repairs += 1;
+
+    const gitEvidence = await collectOrchestrationGitEvidence(cwd);
+    state(`verifying coder loop ${iteration}/${max} (${verifierModel})`);
+    const verdict = await runOrchestrationVerifier(
+      verifierModel,
+      goal,
+      task,
+      result.coderResult,
+      gitEvidence,
+      baselineStatus,
+      currentAbort.signal,
+    );
+    if (stopRequested) break;
+    finalVerdict = verdict;
+    result.verdict = verdict;
+    result.complete = verdict.trim().toUpperCase() === 'GOAL_COMPLETE';
+
+    if (!result.complete) {
+      feedback = verdict.slice(0, 3000);
+      info(`Verifier requested another coder iteration for “${task.title}”:\n${feedback}`);
+      continue;
+    }
+
+    info(`✔ ${task.title}: verified complete.`);
+    feedback = '';
+    if (task.id === 'final-goal') {
+      complete = true;
+      break;
+    }
+
+    taskIndex += 1;
+    if (taskIndex < plan.tasks.length) {
+      task = plan.tasks[taskIndex];
+      continue;
+    }
+
+    const finalTask = wholeGoalVerificationTask(goal, plan);
+    const combined = {
+      report: results.map((entry) => `${entry.task.title}:\n${entry.coderResult.report}`).join('\n\n'),
+      evidence: results.flatMap((entry) => entry.coderResult.evidence),
+    };
+    const finalEvidence = await collectOrchestrationGitEvidence(cwd);
+    state(`final coder-loop verification (${verifierModel})`);
+    finalVerdict = await runOrchestrationVerifier(
+      verifierModel,
+      goal,
+      finalTask,
+      combined,
+      finalEvidence,
+      baselineStatus,
+      currentAbort.signal,
+    );
+    if (stopRequested) break;
+    if (finalVerdict.trim().toUpperCase() === 'GOAL_COMPLETE') {
+      info(`✔ Final verifier: goal complete after ${iteration} coder iteration${iteration === 1 ? '' : 's'}.`);
+      complete = true;
+      break;
+    }
+
+    info(`Final verifier found remaining whole-goal work:\n${finalVerdict.slice(0, 3000)}`);
+    task = finalTask;
+    feedback = finalVerdict.slice(0, 3000);
+  }
+
+  if (!complete && !stopRequested) {
+    info(`Coder loop ended: reached the ${max}-iteration cap without GOAL_COMPLETE.`);
+  }
+  const finalEvidence = await collectOrchestrationGitEvidence(cwd);
+  const report = capWorkflowText([
+    complete ? '## Coder loop complete' : '## Coder loop stopped with remaining work',
+    '',
+    `Models: ${model} supervisor → ${coderModel} coder → ${verifierModel} verifier`,
+    `Iterations: ${iterationsUsed}/${max}`,
+    `Online research: ${onlineResearch ? 'supervisor only' : 'off'}`,
+    '',
+    `Plan: ${plan.summary}`,
+    '',
+    ...results.flatMap(conciseTaskResult),
+    `Final verification: ${complete ? 'GOAL_COMPLETE' : String(finalVerdict).slice(0, 1000)}`,
+    '',
+    `Working tree: ${conciseWorkingTree(finalEvidence)}`,
+    'Open DIFF to inspect the full patch and untracked paths.',
+  ].join('\n'), 6000);
+  conversation.push({ role: 'assistant', content: report });
+  return { ok: true, report, complete };
+}
+
+ipcMain.handle('chat:loop', async (_e, { model, coderModel, useCoder, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
+  if (!model) return { ok: false, error: 'Select a model first.' };
+  if (useCoder && !coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
+  if (!goal?.trim()) return { ok: false, error: 'A loop goal is required.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
   stopRequested = false;
   currentAbort = new AbortController();
   await maybeAutoBranch(cwd, goal, !!autoBranch);
@@ -1544,6 +1732,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
   const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
   const info = (t) => win.webContents.send('stream:info', t);
   const state = (t) => win.webContents.send('stream:state', t);
+  const loopLog = { mutations: new Set(), commands: [], verified: false };
 
   // Drifting models (seen with devstral) obey the system prompt early, then
   // revert to trained habits as tool results bury it thousands of tokens back.
@@ -1553,8 +1742,23 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
     : '';
 
   try {
+    if (useCoder) {
+      const result = await runCoderGoalLoop({
+        model,
+        coderModel,
+        subModel,
+        goal: goal.trim(),
+        cwd,
+        autoApprove,
+        think,
+        onlineResearch,
+        max,
+        loopLog,
+      });
+      await emitRunReport(cwd, loopLog);
+      return result;
+    }
     await maybePrecompact(model); // a loop may start on an already-bloated chat
-    const loopLog = { mutations: new Set(), commands: [], verified: false };
     let feedback = '';
     for (let i = 1; i <= max; i++) {
       if (stopRequested) break;

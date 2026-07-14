@@ -22,7 +22,11 @@ contextBridge.exposeInMainWorld('api', {
   onRunReport: (cb) => ipcRenderer.on('run:report', (_e, d) => cb(d)),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   compact: (payload) => ipcRenderer.invoke('chat:compact', payload),
-  loop: (payload) => ipcRenderer.invoke('chat:loop', payload),
+  loop: (payload = {}) => ipcRenderer.invoke('chat:loop', {
+    ...payload,
+    useCoder: !!payload.useCoder,
+    coderModel: payload.coderModel || '',
+  }),
   orchestrate: (payload) => ipcRenderer.invoke('chat:orchestrate', payload),
   exportChat: () => ipcRenderer.invoke('chat:export'),
   historyList: () => ipcRenderer.invoke('history:list'),

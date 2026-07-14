@@ -117,7 +117,7 @@ New Brittain Code chats save:
 - model-load, prompt-evaluation, generation, and total inference duration;
 - wall time and peak context;
 - tool calls, errors, denials, and recovered malformed calls;
-- compactions, loop iterations, orchestrations, and repair attempts;
+- compactions, solo/coder loop iterations, orchestrations, and repair attempts;
 - each role's model digest, parameter size, quantization, and native context;
 - app version/commit, Ollama version, temperature, context cap, and hardware profile.
 
