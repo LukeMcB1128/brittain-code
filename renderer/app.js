@@ -26,7 +26,7 @@ let elapsedTimer = null;
 let toolCount = 0;
 let currentChatId = null;
 
-setAppMode(appMode, false);
+setAppMode(appMode, false, false);
 
 // ---------- boot ----------
 (async function boot() {
@@ -123,7 +123,7 @@ modelSelect.addEventListener('change', () => localStorage.setItem('model', model
 codeModeBtn.addEventListener('click', () => chooseAppMode('code'));
 chatModeBtn.addEventListener('click', () => chooseAppMode('chat'));
 
-function setAppMode(mode, persist = true) {
+function setAppMode(mode, persist = true, refreshHistory = true) {
   appMode = mode === 'chat' ? 'chat' : 'code';
   document.body.dataset.mode = appMode;
   codeModeBtn.classList.toggle('active', appMode === 'code');
@@ -131,6 +131,7 @@ function setAppMode(mode, persist = true) {
   codeModeBtn.setAttribute('aria-pressed', appMode === 'code' ? 'true' : 'false');
   chatModeBtn.setAttribute('aria-pressed', appMode === 'chat' ? 'true' : 'false');
   $('composer-mode').textContent = appMode.toUpperCase();
+  $('sidebar-head').textContent = appMode === 'chat' ? 'CHAT HISTORY' : 'CODE HISTORY';
   $('composer-context').textContent = appMode === 'chat'
     ? 'No folder access. Enable RESEARCH when you want to search the web.'
     : 'Project tools are restricted to the selected directory.';
@@ -139,6 +140,7 @@ function setAppMode(mode, persist = true) {
     : 'Describe a task... (Enter to send, Shift+Enter for newline)';
   if (persist) localStorage.setItem('appMode', appMode);
   refreshGit();
+  if (refreshHistory) loadChatHistory();
 }
 
 async function chooseAppMode(mode) {
@@ -214,7 +216,10 @@ $('review-discard-btn').addEventListener('click', async () => {
 
 // ---------- chat history ----------
 async function loadChatHistory() {
-  const chats = await window.api.historyList();
+  const allChats = await window.api.historyList();
+  const chats = allChats.filter((chatEntry) => appMode === 'chat'
+    ? chatEntry.mode === 'chat'
+    : chatEntry.mode !== 'chat');
   chats.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)); // newest first
   chatList.innerHTML = '';
 
