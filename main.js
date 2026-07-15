@@ -1491,7 +1491,7 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
       messages: [
         {
           role: 'system',
-          content: 'You are the strict offline verifier for an orchestrated coding task. Judge the TASK and its acceptance criteria; the overall goal is context unless this is explicitly the final whole-goal verification. Use only actual Git evidence and recorded tool results. Reply with exactly GOAL_COMPLETE only when every acceptance criterion is implemented and adequately verified. Otherwise return a short numbered list of concrete deficiencies. Never accept claims in the coder report without supporting evidence. A missing or unsupported project-check manifest is not evidence of compilation errors; distinguish unavailable verification from an executed check whose exit code or output proves failure. Never include GOAL_COMPLETE anywhere in a deficiency response.',
+          content: 'You are the strict offline verifier for an orchestrated coding task. Judge the TASK and its acceptance criteria; the overall goal is context unless this is explicitly the final whole-goal verification. Use only actual Git evidence and recorded tool results. Reply with exactly GOAL_COMPLETE only when every acceptance criterion is implemented and adequately verified. Otherwise return a short numbered list of concrete deficiencies. Never accept claims in the coder report without supporting evidence. A missing or unsupported project-check manifest is not evidence of compilation errors; distinguish unavailable verification from an executed check whose exit code or output proves failure. Never include GOAL_COMPLETE anywhere in a deficiency response. Your entire reply must be either the single word GOAL_COMPLETE, or a numbered list, never both.',
         },
         {
           role: 'user',
@@ -1525,7 +1525,7 @@ async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
       messages: [
         {
           role: 'system',
-          content: 'You are a strict completion verifier for a coding agent. Judge only from the evidence given. If the goal is FULLY achieved, reply with exactly: GOAL_COMPLETE. Otherwise reply with a short numbered list of the concrete steps that remain — no praise, no restating what was done. Never reply GOAL_COMPLETE if any part of the goal is unfinished or unverified.',
+          content: 'You are a strict completion verifier for a coding agent. Judge only from the evidence given. If the goal is FULLY achieved, reply with exactly: GOAL_COMPLETE. Otherwise reply with a short numbered list of the concrete steps that remain — no praise, no restating what was done. Never reply GOAL_COMPLETE if any part of the goal is unfinished or unverified. Your entire reply must be either the single word GOAL_COMPLETE or a numbered list, never both.',
         },
         {
           role: 'user',
