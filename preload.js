@@ -36,7 +36,7 @@ contextBridge.exposeInMainWorld('api', {
   respondApproval: (id, approved) => ipcRenderer.send('approval:response', { id, approved }),
   respondQuestion: (id, answer) => ipcRenderer.send('question:response', { id, answer }),
   generateChatTitle: (conversationContent, model) => ipcRenderer.invoke('chat:generateTitle', conversationContent, model),
-  toolsList: () => ipcRenderer.invoke('tools:list'),
+  toolsList: (mode) => ipcRenderer.invoke('tools:list', mode),
 
   onToken: (cb) => ipcRenderer.on('stream:token', (_e, t) => cb(t)),
   onThinking: (cb) => ipcRenderer.on('stream:thinking', (_e, t) => cb(t)),

@@ -1,6 +1,6 @@
 # Brittain Code
 
-A local-first coding agent desktop app, in the style of Claude Code / Codex, powered by your local Ollama models. Inference, chats, project memory, and ordinary tools stay on your Mac; optional online research is disabled by default. No backend server or model API key is required — the app talks directly to Ollama at `localhost:11434`.
+A local-first coding agent and general chat desktop app powered by your local Ollama models. Inference, chats, project memory, and ordinary tools stay on your Mac; optional online research is disabled by default. No backend server or model API key is required — the app talks directly to Ollama at `localhost:11434`.
 
 ## Run it
 
@@ -27,9 +27,10 @@ To give it a custom icon: put an `icon.icns` in a `build/` folder, add `"icon": 
 
 ## Using it
 
-1. Pick a model from the dropdown (top left). Models that support tool calling work best — **qwen3.6:27b** and **gemma4:26b** are the strongest for agent tasks, **qwen3:8b** and **gemma4:latest** are fast fallbacks. qwen3-coder:30b sometimes emits malformed tool calls; tiny models (qwen2.5-coder:1.5b) are chat-only.
-2. Click **DIR** and choose the project folder the agent should work in.
-3. Type a task and hit Enter.
+1. Choose **CODE** for project work or **CHAT** for folder-free conversation and research.
+2. Pick a model from the dropdown. Models that support tool calling work best — **qwen3.6:27b** and **gemma4:26b** are the strongest for agent tasks, **qwen3:8b** and **gemma4:latest** are fast fallbacks. qwen3-coder:30b sometimes emits malformed tool calls; tiny models (qwen2.5-coder:1.5b) are chat-only.
+3. In Code mode, click **DIR** and choose the project folder the agent should work in. Chat mode deliberately has no directory or project tools.
+4. Type a task or question and hit Enter.
 
 The agent can inspect and edit files, search source and locally installed documentation, run allowlisted project checks, inspect Git state, manage local development processes, verify loopback HTTP servers, and run shell commands. `run_project_check` discovers npm-compatible scripts, CMake configure/build/CTest flows, Cargo, Go, Python/pytest, and safe Make targets; every command runs without a shell. File tools are confined to the selected project directory. It asks before writes, commands, and other risky operations. **AUTO-APPROVE** can make ordinary risky tools unattended, but online requests and sensitive reads always require explicit approval.
 
@@ -43,7 +44,7 @@ The status bar shows: current state, context usage (tokens used vs the model's c
 
 **NEW SESSION** clears the conversation (context resets to zero).
 
-Chats are saved automatically as individual JSON files in `~/Library/Application Support/Brittain Code/chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar groups chats by project folder. Loading a chat restores its model, directory, THINK, and AUTO-APPROVE states, but never restores ONLINE RESEARCH.
+Chats are saved automatically as individual JSON files in `~/Library/Application Support/Brittain Code/chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar puts folder-free conversations under **GENERAL** and groups Code chats by project folder. Loading a chat restores its mode, model, directory, THINK, and AUTO-APPROVE states, but never restores RESEARCH.
 
 ## Online research
 

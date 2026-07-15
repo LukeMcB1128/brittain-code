@@ -14,14 +14,19 @@ const onlineResearchToggle = $('online-research');
 const autoBranchToggle = $('auto-branch');
 const reviewToggle = $('review-mode');
 const undoBtn = $('undo-btn');
+const codeModeBtn = $('mode-code');
+const chatModeBtn = $('mode-chat');
 
 let cwd = null;
+let appMode = localStorage.getItem('appMode') === 'chat' ? 'chat' : 'code';
 let busy = false;
 let subModel = localStorage.getItem('subModel') || 'qwen3:8b'; // set via /subagent
 let coderModel = localStorage.getItem('coderModel') || 'qwen3-coder:30b'; // set via /coder
 let elapsedTimer = null;
 let toolCount = 0;
 let currentChatId = null;
+
+setAppMode(appMode, false);
 
 // ---------- boot ----------
 (async function boot() {
@@ -115,6 +120,35 @@ onlineResearchToggle.addEventListener('change', () => {
 });
 
 modelSelect.addEventListener('change', () => localStorage.setItem('model', modelSelect.value));
+codeModeBtn.addEventListener('click', () => chooseAppMode('code'));
+chatModeBtn.addEventListener('click', () => chooseAppMode('chat'));
+
+function setAppMode(mode, persist = true) {
+  appMode = mode === 'chat' ? 'chat' : 'code';
+  document.body.dataset.mode = appMode;
+  codeModeBtn.classList.toggle('active', appMode === 'code');
+  chatModeBtn.classList.toggle('active', appMode === 'chat');
+  codeModeBtn.setAttribute('aria-pressed', appMode === 'code' ? 'true' : 'false');
+  chatModeBtn.setAttribute('aria-pressed', appMode === 'chat' ? 'true' : 'false');
+  $('composer-mode').textContent = appMode.toUpperCase();
+  $('composer-context').textContent = appMode === 'chat'
+    ? 'No folder access. Enable RESEARCH when you want to search the web.'
+    : 'Project tools are restricted to the selected directory.';
+  input.placeholder = appMode === 'chat'
+    ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
+    : 'Describe a task... (Enter to send, Shift+Enter for newline)';
+  if (persist) localStorage.setItem('appMode', appMode);
+  refreshGit();
+}
+
+async function chooseAppMode(mode) {
+  if (busy || mode === appMode) return;
+  const conversation = await window.api.getConversation();
+  if (conversation.length && !confirm(`Switch to ${mode.toUpperCase()} and start a new session?\n\nYour current chat is already saved in History.`)) return;
+  setAppMode(mode);
+  if (conversation.length) await newSession();
+  else showStartupMessage();
+}
 
 $('cwd-btn').addEventListener('click', async () => {
   const res = await window.api.pickCwd();
@@ -191,19 +225,27 @@ async function loadChatHistory() {
     chatList.appendChild(noChats);
     return;
   }
-  // group chats by project folder (newest group first; chats are already newest-first)
+  // General Chat conversations live outside projects; Code chats stay grouped by folder.
   const groups = new Map();
   for (const c of chats) {
-    const key = c.cwd || '';
+    const key = c.mode === 'chat' ? '__general__' : c.cwd || '__legacy__';
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(c);
   }
 
-  for (const [dir, items] of groups) {
+  for (const [group, items] of groups) {
     const head = document.createElement('div');
     head.className = 'chat-group';
-    head.textContent = dir ? dir.split('/').filter(Boolean).pop().toUpperCase() : 'NO FOLDER';
-    head.title = dir || 'Chats saved before folders were tracked';
+    if (group === '__general__') {
+      head.textContent = 'GENERAL';
+      head.title = 'Folder-free Chat conversations';
+    } else if (group === '__legacy__') {
+      head.textContent = 'OLDER CHATS';
+      head.title = 'Chats saved before modes and folders were tracked';
+    } else {
+      head.textContent = group.split('/').filter(Boolean).pop().toUpperCase();
+      head.title = group;
+    }
     chatList.appendChild(head);
     for (const c of items) renderChatItem(c);
   }
@@ -293,7 +335,8 @@ async function saveChat() {
       id: currentChatId,
       title,
       model: modelSelect.value,
-      cwd: cwd || '',
+      mode: appMode,
+      cwd: appMode === 'code' ? cwd || '' : '',
       think: thinkToggle.checked,
       autoApprove: autoApprove.checked,
       autoBranch: autoBranchToggle.checked,
@@ -315,6 +358,7 @@ async function loadChat(chatId) {
   if (!res.ok) return addError('Could not load chat: ' + res.error);
   const saved = res.chat;
   onlineResearchToggle.checked = false; // loading history must never restore network access
+  setAppMode(saved.mode === 'chat' ? 'chat' : 'code');
 
   // Push the stored conversation into the main process so the model continues from it.
   const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics);
@@ -332,7 +376,7 @@ async function loadChat(chatId) {
 
   // Restore the working directory this chat was using, if it still exists.
   let cwdChanged = false;
-  if (saved.cwd && saved.cwd !== cwd) {
+  if (appMode === 'code' && saved.cwd && saved.cwd !== cwd) {
     if (await window.api.dirExists(saved.cwd)) {
       setCwd(saved.cwd);
       cwdChanged = true;
@@ -477,7 +521,7 @@ async function send() {
     return handleSlash(text);
   }
   if (!modelSelect.value) return addError('No model selected — is Ollama running?');
-  if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+  if (appMode === 'code' && !cwd) return addError('Pick a working directory first (DIR button, top left).');
 
   // Ollama wants raw base64 without the data-URL prefix
   const images = pendingImages.map((d) => d.split(',')[1]);
@@ -495,8 +539,10 @@ async function send() {
     model: modelSelect.value,
     subModel,
     text,
-    cwd,
-    autoApprove: autoApprove.checked,
+    mode: appMode,
+    cwd: appMode === 'code' ? cwd : null,
+    autoApprove: appMode === 'code' && autoApprove.checked,
+    autoBranch: appMode === 'code' && autoBranchToggle.checked,
     onlineResearch: onlineResearchToggle.checked,
     think: thinkToggle.checked,
     images,
@@ -924,8 +970,7 @@ function hideQuestion() {
   pendingQuestionId = null;
 }
 
-// Array of startup messages
-const startupMessages = [
+const codeStartupMessages = [
   "Welcome to Brittain Code!",
   "Ready to help with your coding tasks",
   "Start by describing what you'd like to build",
@@ -936,12 +981,20 @@ const startupMessages = [
   "Ask questions, get answers, build amazing things"
 ];
 
+const chatStartupMessages = [
+  'What would you like to explore?',
+  'Chat locally, or enable Research to search the web',
+  'Ask a question without choosing a folder',
+  'Ready when you are',
+];
+
 // Show a random startup message
 function showStartupMessage() {
   const contentElement = $('startup-message-content');
   contentElement.innerHTML = '';
 
-  const randomMessage = startupMessages[Math.floor(Math.random() * startupMessages.length)];
+  const messages = appMode === 'chat' ? chatStartupMessages : codeStartupMessages;
+  const randomMessage = messages[Math.floor(Math.random() * messages.length)];
   const p = document.createElement('p');
   p.textContent = randomMessage;
   contentElement.appendChild(p);
@@ -995,13 +1048,28 @@ const SLASH_HELP = [
   '/tools — list all available tools',
 ].join('\n');
 
+const CHAT_SLASH_HELP = [
+  '/help — show this list',
+  '/clear — start a new session',
+  '/compact — summarize the conversation to free up context',
+  '/model <name> — switch model (partial match ok)',
+  '/usage — show context and token usage',
+  '/export — save this chat as a markdown file',
+  '/tools — list tools available to the app',
+].join('\n');
+
 async function handleSlash(raw) {
   const [cmd, ...rest] = raw.slice(1).split(' ');
   const arg = rest.join(' ').trim();
+  const normalizedCmd = cmd.toLowerCase();
+  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'orchestrate', 'commit', 'coder', 'subagent', 'memory']);
+  if (appMode === 'chat' && codeOnlyCommands.has(normalizedCmd)) {
+    return addError(`/${normalizedCmd} is only available in Code mode.`);
+  }
 
-  switch (cmd.toLowerCase()) {
+  switch (normalizedCmd) {
     case 'help':
-      return addInfo(SLASH_HELP);
+      return addInfo(appMode === 'chat' ? CHAT_SLASH_HELP : SLASH_HELP);
 
     case 'clear':
       return newSession();
@@ -1198,7 +1266,7 @@ async function handleSlash(raw) {
     }
 
     case 'tools': {
-      const res = await window.api.toolsList();
+      const res = await window.api.toolsList(appMode);
       if (!res.ok) return addError('Failed to fetch tools: ' + res.error);
       const toolLines = res.tools.map(t => (t.isNetwork ? '[NET] ' : t.isSensitive ? '[SEC] ' : t.isDestructive ? '[DEST]' : t.isRisky ? '[!]   ' : '      ') + ' ' + t.name);
       return showOverlay('AVAILABLE TOOLS', toolLines.join('\n'));
@@ -1212,7 +1280,7 @@ async function handleSlash(raw) {
 // ---------- git ----------
 async function refreshGit() {
   const info = $('git-info');
-  if (!cwd) return info.classList.add('hidden');
+  if (appMode !== 'code' || !cwd) return info.classList.add('hidden');
   const res = await window.api.gitStatus(cwd);
   if (!res.ok) return info.classList.add('hidden');
   $('git-branch').textContent = res.branch + (res.changed ? ' ±' + res.changed : ' ✓');

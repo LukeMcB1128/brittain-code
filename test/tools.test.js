@@ -16,6 +16,8 @@ const {
   ORCHESTRATOR_TOOL_NAMES,
   CODER_TOOLS,
   CODER_TOOL_NAMES,
+  CHAT_TOOLS,
+  CHAT_TOOL_NAMES,
   executeTool,
   memoryPath,
   readMemory,
@@ -76,6 +78,15 @@ test('orchestration roles receive deliberately scoped toolsets', () => {
   assert.equal(coderNames.has('get_environment_variables'), false);
   assert.equal(coderNames.has('revert_to_last_commit'), false);
   assert.deepEqual(coderNames, CODER_TOOL_NAMES);
+});
+
+test('folder-free Chat mode receives only conversation and research tools', () => {
+  const names = new Set(CHAT_TOOLS.map((definition) => definition.function.name));
+  assert.deepEqual(names, CHAT_TOOL_NAMES);
+  assert.deepEqual([...names].sort(), ['ask_user', 'web_fetch', 'web_search']);
+  assert.equal(names.has('read_file'), false);
+  assert.equal(names.has('run_command'), false);
+  assert.equal(names.has('remember'), false);
 });
 
 test('git_status and read_git_diff distinguish staged and unstaged changes', async (t) => {

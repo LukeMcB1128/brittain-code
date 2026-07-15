@@ -2,14 +2,18 @@
 <html>
 <head>
   <meta charset="UTF-8" />
-  <title>Brittain Code</title>
+  <title>Brittain</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header id="topbar">
-    <span class="brand">BRITTAIN CODE</span>
+    <span class="brand">BRITTAIN</span>
+    <div id="mode-switch" aria-label="App mode">
+      <button id="mode-code" class="mode-btn active" aria-pressed="true" title="Work with files in a project directory">CODE</button>
+      <button id="mode-chat" class="mode-btn" aria-pressed="false" title="Chat and research without access to a project directory">CHAT</button>
+    </div>
     <select id="model-select" title="Model"></select>
-    <button id="cwd-btn" title="Choose working directory">DIR: <span id="cwd-label">not set</span></button>
+    <button id="cwd-btn" class="code-only" title="Choose working directory">DIR: <span id="cwd-label">not set</span></button>
     <button id="history-btn" title="Show/hide chat history">HISTORY</button>
     <span class="spacer"></span>
     <label class="toggle" title="Ask models that support it to reason before answering (slower, shows thinking)">
@@ -18,17 +22,17 @@
     </label>
     <label class="toggle online-toggle" title="Opt in to external web search and page retrieval. Queries and URLs leave this Mac; every online call still asks for approval.">
       <input type="checkbox" id="online-research" />
-      <span>ONLINE</span>
+      <span>RESEARCH</span>
     </label>
-    <label class="toggle" title="When on, file writes and shell commands run without asking">
+    <label class="toggle code-only" title="When on, file writes and shell commands run without asking">
       <input type="checkbox" id="auto-approve" />
       <span>AUTO-APPROVE</span>
     </label>
-    <label class="toggle" title="When on, agents work on an auto-created brittain/ git branch instead of your current branch — merge or discard after review">
+    <label class="toggle code-only" title="When on, agents work on an auto-created brittain/ git branch instead of your current branch — merge or discard after review">
       <input type="checkbox" id="auto-branch" />
       <span>BRANCH</span>
     </label>
-    <label class="toggle" title="When on, every run that changes files ends with a KEEP / DISCARD review — nothing sticks until you accept it">
+    <label class="toggle code-only" title="When on, every run that changes files ends with a KEEP / DISCARD review — nothing sticks until you accept it">
       <input type="checkbox" id="review-mode" />
       <span>REVIEW</span>
     </label>
@@ -36,7 +40,7 @@
   </header>
 
   <div id="main-row">
-    <aside id="sidebar" class="hidden">
+    <aside id="sidebar">
       <div id="sidebar-head">CHATS</div>
       <div id="chat-list"></div>
     </aside>
@@ -79,6 +83,10 @@
 
   <footer>
     <div id="img-preview" class="hidden"></div>
+    <div id="composer-head">
+      <span id="composer-mode">CODE</span>
+      <span id="composer-context">Project tools are restricted to the selected directory.</span>
+    </div>
     <div id="input-row">
       <textarea id="input" rows="3" placeholder="Describe a task... (Enter to send, Shift+Enter for newline)"></textarea>
       <button id="img-btn" title="Attach an image (or paste one into the text box)">IMG</button>

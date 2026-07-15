@@ -27,3 +27,18 @@ test('coder loop is wired through renderer, preload, main workflow, and benchmar
   assert.match(grader, /metrics\.coderLoopIterations/);
   assert.match(grader, /ORCHESTRATE\|CODER LOOP/);
 });
+
+test('Code and Chat modes are wired through UI, persistence, and the agent boundary', () => {
+  const html = source('renderer/index.html');
+  const renderer = source('renderer/app.js');
+  const main = source('main.js');
+
+  assert.match(html, /id="mode-code"/);
+  assert.match(html, /id="mode-chat"/);
+  assert.match(renderer, /mode: appMode/);
+  assert.match(renderer, /appMode === 'code' && !cwd/);
+  assert.match(main, /mode: meta\.mode === 'chat' \? 'chat' : 'code'/);
+  assert.match(main, /const runMode = mode === 'chat' \? 'chat' : 'code'/);
+  assert.match(main, /const modeTools = chatMode \? CHAT_TOOLS : TOOL_DEFS/);
+  assert.match(main, /if \(!activeToolNames\.has\(name\)\)/);
+});
