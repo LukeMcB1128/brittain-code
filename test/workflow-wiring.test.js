@@ -59,3 +59,22 @@ test('general attachments are wired from the picker through local extraction and
   assert.equal(packageJson.build.files.includes('attachments.js'), true);
   assert.equal(packageJson.dependencies.unpdf, '^1.6.2');
 });
+
+test('settings are wired through the modal, bridge, persistence, and inference runtime', () => {
+  const html = source('renderer/index.html');
+  const renderer = source('renderer/app.js');
+  const preload = source('preload.js');
+  const main = source('main.js');
+  const packageJson = JSON.parse(source('package.json'));
+
+  assert.match(html, /id="settings-modal"/);
+  assert.match(html, /id="setting-endpoint"/);
+  assert.match(html, /id="setting-main-context"/);
+  assert.match(renderer, /window\.api\.settingsSave\(next\)/);
+  assert.match(renderer, /defaultLoopIterations \|\| 8/);
+  assert.match(preload, /settingsTestEndpoint/);
+  assert.match(main, /ipcMain\.handle\('settings:save'/);
+  assert.match(main, /fetch\(inferenceEndpoint\(\) \+ '\/api\/chat'/);
+  assert.match(main, /keep_alive: runtimeSettings\.keepAlive/);
+  assert.equal(packageJson.build.files.includes('settings.js'), true);
+});

@@ -37,6 +37,7 @@
       <span>REVIEW</span>
     </label>
     <button id="new-btn" title="Clear conversation">NEW SESSION</button>
+    <button id="settings-btn" title="Settings">SETTINGS</button>
   </header>
 
   <div id="main-row">
@@ -125,6 +126,86 @@
       </div>
       <pre id="overlay-body"></pre>
     </div>
+  </div>
+
+  <div id="settings-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <form id="settings-form">
+      <div class="settings-head">
+        <div>
+          <span id="settings-title">SETTINGS</span>
+          <span class="settings-subtitle">Applies to new requests and sessions</span>
+        </div>
+        <button type="button" id="settings-close">CLOSE</button>
+      </div>
+      <div class="settings-scroll">
+        <section class="settings-section settings-wide">
+          <h2>INFERENCE ENDPOINT</h2>
+          <div class="settings-endpoint-row">
+            <input id="setting-endpoint" type="url" spellcheck="false" placeholder="http://127.0.0.1:11434" />
+            <button type="button" id="settings-test-endpoint">TEST</button>
+          </div>
+          <p class="setting-help">Ollama-compatible base URL. Change the port for another local server; remote URLs send prompts and attachments to that machine.</p>
+          <div id="settings-test-result" class="setting-status"></div>
+        </section>
+
+        <section class="settings-section">
+          <h2>CONTEXT</h2>
+          <label>Main context <span class="setting-inline"><select id="setting-main-context"><option value="0">Auto (up to 128K)</option><option value="8192">8K</option><option value="16384">16K</option><option value="32768">32K</option><option value="65536">64K</option><option value="131072">128K</option><option value="custom">Custom</option></select><input id="setting-main-context-custom" class="hidden" type="number" min="2048" max="262144" step="1024" aria-label="Custom main context tokens" /></span></label>
+          <label class="check-row"><input id="setting-auto-compact" type="checkbox" /> Auto-compact</label>
+          <label>Compact at <input id="setting-compact-threshold" type="number" min="50" max="90" step="5" />%</label>
+          <label>Keep model loaded <select id="setting-keep-alive"><option value="0">Unload immediately</option><option value="5m">5 minutes</option><option value="30m">30 minutes</option><option value="-1">Keep loaded</option></select></label>
+          <p class="setting-help">Context is always capped by the selected model's native limit.</p>
+        </section>
+
+        <section class="settings-section">
+          <h2>DEFAULT MODELS</h2>
+          <label>Chat <select id="setting-chat-model"></select></label>
+          <label>Code / planner <select id="setting-code-model"></select></label>
+          <label>Coder <select id="setting-coder-model"></select></label>
+          <label>Scout / verifier <select id="setting-scout-model"></select></label>
+        </section>
+
+        <section class="settings-section">
+          <h2>RESPONSE STYLE</h2>
+          <label>Code <select id="setting-code-temperature"><option value="0.2">Precise</option><option value="0.3">Balanced</option><option value="0.7">Creative</option></select></label>
+          <label>Chat <select id="setting-chat-temperature"><option value="0.2">Precise</option><option value="0.6">Balanced</option><option value="0.9">Creative</option></select></label>
+          <p class="setting-help">Lower values are steadier; higher values produce more varied responses.</p>
+        </section>
+
+        <section class="settings-section">
+          <h2>SESSION DEFAULTS</h2>
+          <label>Start in <select id="setting-default-mode"><option value="last">Last used mode</option><option value="code">Code</option><option value="chat">Chat</option></select></label>
+          <label class="check-row"><input id="setting-code-think" type="checkbox" /> Think in Code</label>
+          <label class="check-row"><input id="setting-chat-think" type="checkbox" /> Think in Chat</label>
+          <label class="check-row"><input id="setting-sidebar-open" type="checkbox" /> History sidebar open</label>
+          <label class="check-row"><input id="setting-auto-approve" type="checkbox" /> Auto-approve in Code</label>
+          <label class="check-row"><input id="setting-auto-branch" type="checkbox" /> Auto-branch in Code</label>
+          <label class="check-row"><input id="setting-review-mode" type="checkbox" /> Review mode in Code</label>
+          <p class="setting-help">Research always starts off for privacy.</p>
+        </section>
+
+        <section class="settings-section">
+          <h2>ADVANCED AGENTS</h2>
+          <label>Main step cap <input id="setting-max-agent-steps" type="number" min="5" max="100" /></label>
+          <label>Default loop runs <input id="setting-loop-iterations" type="number" min="1" max="50" /></label>
+          <label>Coder context <input id="setting-coder-context" type="number" min="2048" max="262144" step="1024" /></label>
+          <label>Scout context <input id="setting-scout-context" type="number" min="2048" max="262144" step="1024" /></label>
+        </section>
+
+        <section class="settings-section settings-wide">
+          <h2>GLOBAL INSTRUCTIONS</h2>
+          <label>Chat instructions <textarea id="setting-chat-instructions" rows="4" placeholder="Preferences that apply to every Chat session"></textarea></label>
+          <label>Code instructions <textarea id="setting-code-instructions" rows="4" placeholder="Preferences that apply to every Code session"></textarea></label>
+          <p class="setting-help">Project BRITTAIN.md instructions remain separate and more specific.</p>
+        </section>
+      </div>
+      <div class="settings-actions">
+        <span id="settings-save-result" class="setting-status"></span>
+        <button type="button" id="settings-reset">RESET DEFAULTS</button>
+        <button type="button" id="settings-cancel">CANCEL</button>
+        <button type="submit" class="approve">SAVE</button>
+      </div>
+    </form>
   </div>
 
   <script src="vendor/marked.js"></script>

@@ -7,9 +7,9 @@ const fs = require('fs');
 const os = require('os');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
+const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
 
-const OLLAMA = 'http://127.0.0.1:11434';
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 // The context window we actually request from Ollama. Without an explicit
 // num_ctx, Ollama uses its own (much smaller) default and SILENTLY TRUNCATES
@@ -19,13 +19,28 @@ const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user mess
 // on a 36GB Mac WITH Ollama's q8_0 KV cache enabled (OLLAMA_FLASH_ATTENTION=1,
 // OLLAMA_KV_CACHE_TYPE=q8_0 via launchctl setenv); drop to 32_768 without it.
 const NUM_CTX_CAP = 131_072; // sized for heavy use
-// Low temperature for agent work: model defaults (~0.7-0.8) suit chat, but for
-// code generation they invite near-miss token glitches — the '\．' and
-// byte-fallback junk seen in long runs (fablereview.md).
-const AGENT_TEMPERATURE = 0.3;
+let runtimeSettings = { ...DEFAULT_SETTINGS };
+let settingsUserDataDir = '';
 
-async function effectiveContext(model) {
-  return Math.min(await getContextLength(model), NUM_CTX_CAP);
+function inferenceEndpoint() {
+  return runtimeSettings.inferenceEndpoint;
+}
+
+function compactThreshold() {
+  return runtimeSettings.compactThreshold;
+}
+
+function shouldAutoCompact(used, limit) {
+  return runtimeSettings.autoCompact && !!limit && used > compactThreshold() * limit;
+}
+
+function compactPercent() {
+  return Math.round(compactThreshold() * 100);
+}
+
+async function effectiveContext(model, configuredCap = runtimeSettings.mainContextCap) {
+  const cap = configuredCap > 0 ? configuredCap : NUM_CTX_CAP;
+  return Math.min(await getContextLength(model), cap);
 }
 
 // ---------- context hygiene ----------
@@ -217,7 +232,9 @@ for (const extra of ['/opt/homebrew/bin', '/usr/local/bin', process.env.HOME + '
 }
 
 app.whenReady().then(() => {
-  initTools(app.getPath('userData'));
+  settingsUserDataDir = app.getPath('userData');
+  runtimeSettings = loadSettings(settingsUserDataDir);
+  initTools(settingsUserDataDir);
   createWindow();
 });
 app.on('before-quit', stopAllManagedProcesses);
@@ -225,13 +242,16 @@ app.on('window-all-closed', () => app.quit());
 
 // ---------- ollama helpers ----------
 async function ollamaJson(route, body, signal) {
-  const res = await fetch(OLLAMA + route, {
+  const requestBody = body && route === '/api/chat'
+    ? { ...body, keep_alive: runtimeSettings.keepAlive }
+    : body;
+  const res = await fetch(inferenceEndpoint() + route, {
     method: body ? 'POST' : 'GET',
     headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
+    body: requestBody ? JSON.stringify(requestBody) : undefined,
     signal,
   });
-  if (!res.ok) throw new Error(`Ollama ${route} failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new Error(`Inference endpoint ${route} failed: ${res.status} ${await res.text()}`);
   return res.json();
 }
 
@@ -293,8 +313,11 @@ async function runtimeMetadata(model) {
       nativeContext: contextKey ? modelInfo[contextKey] : null,
     },
     settings: {
-      requestedContextCap: NUM_CTX_CAP,
-      temperature: AGENT_TEMPERATURE,
+      inferenceEndpoint: runtimeSettings.inferenceEndpoint,
+      requestedContextCap: runtimeSettings.mainContextCap || NUM_CTX_CAP,
+      codeTemperature: runtimeSettings.codeTemperature,
+      chatTemperature: runtimeSettings.chatTemperature,
+      keepAlive: runtimeSettings.keepAlive,
     },
     hardware: {
       platform: process.platform,
@@ -357,8 +380,8 @@ ipcMain.on('question:response', (_e, { id, answer }) => {
 });
 
 // ---------- streaming chat with ollama ----------
-async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS, recovery = { toolCallRetries: 0 }) {
-  const res = await fetch(OLLAMA + '/api/chat', {
+async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS, recovery = { toolCallRetries: 0 }, temperature = runtimeSettings.codeTemperature) {
+  const res = await fetch(inferenceEndpoint() + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -366,7 +389,8 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
       messages,
       ...(toolset ? { tools: toolset } : {}), // null = no tools (forces a text answer)
       stream: true,
-      options: { num_ctx: numCtx, temperature: AGENT_TEMPERATURE },
+      keep_alive: runtimeSettings.keepAlive,
+      options: { num_ctx: numCtx, temperature },
       ...(think === undefined ? {} : { think }),
     }),
     signal,
@@ -386,11 +410,12 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
           numCtx,
           toolset,
           { toolCallRetries: 1 },
+          temperature,
         );
       }
       throw new Error(toolCallFailureMessage(model));
     }
-    throw new Error(`Ollama chat failed: ${res.status} ${errorBody}`);
+    throw new Error(`Inference endpoint chat failed: ${res.status} ${errorBody}`);
   }
 
   const reader = res.body.getReader();
@@ -501,6 +526,9 @@ function chatSystemPrompt(onlineResearch = false) {
   } else {
     lines.push('', 'Online research is disabled. Answer from your existing knowledge and be candid when fresh verification would help.');
   }
+  if (runtimeSettings.globalChatInstructions) {
+    lines.push('', 'User-wide Chat instructions:', runtimeSettings.globalChatInstructions);
+  }
   return lines.join('\n');
 }
 
@@ -530,6 +558,9 @@ function systemPrompt(cwd, model = '', onlineResearch = false) {
     );
   } else {
     lines.push('', 'Everything runs locally; dedicated internet research tools are disabled.');
+  }
+  if (runtimeSettings.globalCodeInstructions) {
+    lines.push('', 'User-wide Code instructions:', runtimeSettings.globalCodeInstructions);
   }
   const memory = readMemory(cwd).trim();
   if (memory) {
@@ -592,10 +623,12 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   const runLog = { mutations: new Set(), commands: [], verified: false };
   let lastStats = null;
   let exhaustedWithToolCalls = false;
+  const maxAgentSteps = runtimeSettings.maxAgentSteps || MAX_AGENT_STEPS;
+  const temperature = chatMode ? runtimeSettings.chatTemperature : runtimeSettings.codeTemperature;
 
   {
-    for (let step = 0; step < MAX_AGENT_STEPS; step++) {
-      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink, false, contextLength, activeTools);
+    for (let step = 0; step < maxAgentSteps; step++) {
+      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink, false, contextLength, activeTools, { toolCallRetries: 0 }, temperature);
 
       // rescue tool calls the model emitted as raw text (qwen3-coder quirk)
       if (!toolCalls.length) {
@@ -751,13 +784,13 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       }
       if (stopRequested) break;
 
-      // auto-compact at 70%: generation QUALITY degrades well before overflow
+      // Auto-compaction protects generation quality before the window overflows
       // (glitch tokens, thought-leak into files — see fablereview.md), so this
       // is a quality guard, not just a size guard
       if (lastStats && contextLength) {
         const used = lastStats.promptTokens + lastStats.evalTokens;
-        if (used > 0.7 * contextLength) {
-          win.webContents.send('stream:info', 'Context past 70% — auto-compacting…');
+        if (shouldAutoCompact(used, contextLength)) {
+          win.webContents.send('stream:info', `Context past ${compactPercent()}% — auto-compacting…`);
           win.webContents.send('stream:state', 'compacting');
           const c = await compactConversation(model);
           if (c.ok) win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
@@ -767,7 +800,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
     }
   }
   if (exhaustedWithToolCalls && !stopRequested) {
-    win.webContents.send('stream:info', `Agent stopped after reaching the ${MAX_AGENT_STEPS}-step safety cap.`);
+    win.webContents.send('stream:info', `Agent stopped after reaching the ${maxAgentSteps}-step safety cap.`);
   }
   return { lastContent, lastStats, contextLength, runLog };
 }
@@ -887,7 +920,7 @@ async function maybePrecompact(model) {
   if (conversation.length < 2) return;
   const contextLength = await effectiveContext(model);
   const estimated = estimateTokens(stripOldImages(conversation));
-  if (estimated <= 0.7 * contextLength) return;
+  if (!shouldAutoCompact(estimated, contextLength)) return;
   win.webContents.send('stream:info', `Context is ~${Math.round((estimated / contextLength) * 100)}% full before sending — auto-compacting first…`);
   win.webContents.send('stream:state', 'auto-compacting…');
   const c = await compactConversation(model);
@@ -1023,7 +1056,7 @@ async function runSubagent(task, subModel, cwd) {
     { role: 'system', content: subagentSystemPrompt(cwd) },
     { role: 'user', content: task },
   ];
-  const numCtx = Math.min(await getContextLength(subModel), SUBAGENT_CTX_CAP);
+  const numCtx = await effectiveContext(subModel, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
   // scouts should be fast: disable thinking where the model supports the flag
   const useThink = (await supportsThinking(subModel)) ? false : undefined;
   let finalContent = '';
@@ -1109,7 +1142,6 @@ const CODER_MAX_STEPS = 30;
 const CODER_CTX_CAP = 32_768;
 const ORCHESTRATOR_MAX_TASKS = 6;
 const ORCHESTRATOR_MAX_REPAIRS = 1;
-const SCOPED_COMPACT_THRESHOLD = 0.7;
 const SCOPED_MAX_COMPACTIONS = 2;
 
 function scopedProjectContext(cwd) {
@@ -1204,7 +1236,7 @@ async function compactScopedMessages(model, msgs, numCtx, role, usageBucket, con
       model,
       messages: summaryMessages,
       stream: false,
-      options: { num_ctx: numCtx, temperature: AGENT_TEMPERATURE },
+      options: { num_ctx: numCtx, temperature: runtimeSettings.codeTemperature },
       ...(useThink === undefined ? {} : { think: useThink }),
     }, currentAbort?.signal);
     const summary = (data.message?.content || '').trim();
@@ -1320,7 +1352,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
     if (!toolCalls.length) {
       msgs.push({ role: 'user', content: 'Do not narrate the plan. Call submit_implementation_plan now with the best plan supported by your inspection.' });
       const used = Math.max((stats?.promptTokens || 0) + (stats?.evalTokens || 0), estimateTokens(msgs));
-      if (used > SCOPED_COMPACT_THRESHOLD * numCtx && compactions < SCOPED_MAX_COMPACTIONS) {
+      if (shouldAutoCompact(used, numCtx) && compactions < SCOPED_MAX_COMPACTIONS) {
         compactions++;
         win.webContents.send('stream:state', `compacting planner ${compactions}/${SCOPED_MAX_COMPACTIONS}`);
         const compacted = await compactScopedMessages(
@@ -1332,7 +1364,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
           'Continue inspecting only if necessary, then call submit_implementation_plan with the complete ordered plan.',
         );
         win.webContents.send('stream:info', compacted.ok
-          ? `Planner context checkpointed at 70% (${compactions}/${SCOPED_MAX_COMPACTIONS}).`
+          ? `Planner context checkpointed at ${compactPercent()}% (${compactions}/${SCOPED_MAX_COMPACTIONS}).`
           : `Planner checkpoint failed (${compacted.error}); continuing with the existing context.`);
       }
       continue;
@@ -1363,7 +1395,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
       msgs.push({ role: 'tool', tool_name: name, content: String(result) });
     }
     const used = Math.max((stats?.promptTokens || 0) + (stats?.evalTokens || 0), estimateTokens(msgs));
-    if (used > SCOPED_COMPACT_THRESHOLD * numCtx && compactions < SCOPED_MAX_COMPACTIONS) {
+    if (shouldAutoCompact(used, numCtx) && compactions < SCOPED_MAX_COMPACTIONS) {
       compactions++;
       win.webContents.send('stream:state', `compacting planner ${compactions}/${SCOPED_MAX_COMPACTIONS}`);
       const compacted = await compactScopedMessages(
@@ -1375,7 +1407,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
         'Continue from the checkpoint. Inspect only what is still missing, then call submit_implementation_plan.',
       );
       win.webContents.send('stream:info', compacted.ok
-        ? `Planner context checkpointed at 70% (${compactions}/${SCOPED_MAX_COMPACTIONS}).`
+        ? `Planner context checkpointed at ${compactPercent()}% (${compactions}/${SCOPED_MAX_COMPACTIONS}).`
         : `Planner checkpoint failed (${compacted.error}); continuing with the existing context.`);
     }
   }
@@ -1406,7 +1438,7 @@ function coderSystemPrompt(cwd) {
 }
 
 async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFeedback = '') {
-  const numCtx = Math.min(await getContextLength(coderModel), CODER_CTX_CAP);
+  const numCtx = await effectiveContext(coderModel, runtimeSettings.coderContextCap || CODER_CTX_CAP);
   const useThink = (await supportsThinking(coderModel)) ? !!think : undefined;
   const taskPacket = {
     ...task,
@@ -1457,7 +1489,7 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
         msgs.push({ role: 'tool', tool_name: name, content: String(result) });
       }
       const used = Math.max((stats?.promptTokens || 0) + (stats?.evalTokens || 0), estimateTokens(msgs));
-      if (used > SCOPED_COMPACT_THRESHOLD * numCtx && compactions < SCOPED_MAX_COMPACTIONS) {
+      if (shouldAutoCompact(used, numCtx) && compactions < SCOPED_MAX_COMPACTIONS) {
         compactions++;
         win.webContents.send('stream:state', `compacting coder ${compactions}/${SCOPED_MAX_COMPACTIONS}`);
         const compacted = await compactScopedMessages(
@@ -1469,7 +1501,7 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
           'Continue implementing the original task from this checkpoint. Use tools, run the required checks, and finish with a concise evidence-based report.',
         );
         win.webContents.send('stream:info', compacted.ok
-          ? `Coder context checkpointed at 70% (${compactions}/${SCOPED_MAX_COMPACTIONS}).`
+          ? `Coder context checkpointed at ${compactPercent()}% (${compactions}/${SCOPED_MAX_COMPACTIONS}).`
           : `Coder checkpoint failed (${compacted.error}); continuing with the existing context.`);
       }
     }
@@ -1578,10 +1610,11 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
     .join('\n\n'), 9000);
   try {
     const useThink = (await supportsThinking(verifierModel)) ? false : undefined;
+    const numCtx = await effectiveContext(verifierModel, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
     const data = await ollamaJson('/api/chat', {
       model: verifierModel,
       stream: false,
-      options: { num_ctx: 16_384, temperature: 0.1 },
+      options: { num_ctx: numCtx, temperature: 0.1 },
       ...(useThink === undefined ? {} : { think: useThink }),
       messages: [
         {
@@ -1612,10 +1645,11 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
 async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
   try {
     const think = (await supportsThinking(subModel)) ? false : undefined;
+    const numCtx = await effectiveContext(subModel, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
     const data = await ollamaJson('/api/chat', {
       model: subModel,
       stream: false,
-      options: { num_ctx: 8192, temperature: AGENT_TEMPERATURE },
+      options: { num_ctx: numCtx, temperature: runtimeSettings.codeTemperature },
       ...(think === undefined ? {} : { think }),
       messages: [
         {
@@ -1894,8 +1928,8 @@ ipcMain.handle('chat:loop', async (_e, { model, coderModel, useCoder, subModel, 
 
       // auto-compact between iterations so long loops never hit silent truncation
       const used = lastStats ? lastStats.promptTokens + lastStats.evalTokens : 0;
-      if (contextLength && used > 0.7 * contextLength) {
-        info('Context past 70% — auto-compacting before the next iteration…');
+      if (shouldAutoCompact(used, contextLength)) {
+        info(`Context past ${compactPercent()}% — auto-compacting before the next iteration…`);
         state('auto-compacting…');
         const c = await compactConversation(model);
         if (c.ok) {
@@ -2068,6 +2102,45 @@ ipcMain.handle('usage:get', () => usage);
 ipcMain.handle('app:isDev', () => !app.isPackaged);
 ipcMain.handle('app:getVersion', () => require('./package.json').version);
 
+ipcMain.handle('settings:get', () => ({
+  ok: true,
+  settings: { ...runtimeSettings },
+  defaults: { ...DEFAULT_SETTINGS },
+}));
+
+ipcMain.handle('settings:testEndpoint', async (_e, value) => {
+  try {
+    const endpoint = normalizeEndpoint(value);
+    const res = await fetch(endpoint + '/api/tags', { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return { ok: false, error: `GET /api/tags returned ${res.status}.` };
+    const data = await res.json();
+    if (!Array.isArray(data.models)) return { ok: false, error: 'The endpoint responded, but not with the Ollama-compatible models format.' };
+    return { ok: true, endpoint, modelCount: data.models.length };
+  } catch (err) {
+    const reason = err.name === 'TimeoutError' ? 'Connection timed out after 5 seconds.' : String(err.message || err);
+    return { ok: false, error: reason };
+  }
+});
+
+ipcMain.handle('settings:save', (_e, value) => {
+  try {
+    if (currentAbort) return { ok: false, error: 'Stop the active run before changing inference settings.' };
+    const normalized = normalizeSettings(value);
+    const endpointChanged = normalized.inferenceEndpoint !== runtimeSettings.inferenceEndpoint;
+    runtimeSettings = saveSettings(settingsUserDataDir, normalized);
+    if (endpointChanged) {
+      contextCache.clear();
+      capsCache.clear();
+      runtimeMetadataCache.clear();
+    } else {
+      runtimeMetadataCache.clear();
+    }
+    return { ok: true, settings: { ...runtimeSettings } };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
 // chat history support: the renderer saves/loads conversations, but the live
 // array lives here — these let it read the current one and swap in a stored one.
 ipcMain.handle('chat:get', () => conversation);
@@ -2170,7 +2243,7 @@ ipcMain.handle('models:list', async () => {
     const data = await ollamaJson('/api/tags');
     return { ok: true, models: (data.models || []).map((m) => m.name) };
   } catch (err) {
-    return { ok: false, error: 'Cannot reach Ollama at ' + OLLAMA + ' — is it running?' };
+    return { ok: false, error: 'Cannot reach the inference endpoint at ' + inferenceEndpoint() + ' — is it running and Ollama-compatible?' };
   }
 });
 
@@ -2249,7 +2322,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
       model,
       messages: msgs,
       stream: false,
-      options: { num_ctx: await effectiveContext(model), temperature: AGENT_TEMPERATURE },
+      options: { num_ctx: await effectiveContext(model), temperature: runtimeSettings.codeTemperature },
     }, signal);
     const summary = (data.message?.content || '').trim();
     if (!summary) return { ok: false, error: 'Model returned an empty summary.' };

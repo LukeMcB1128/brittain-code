@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('api', {
   onCheckpointState: (cb) => ipcRenderer.on('checkpoint:state', (_e, d) => cb(d)),
   onRunReport: (cb) => ipcRenderer.on('run:report', (_e, d) => cb(d)),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
+  settingsGet: () => ipcRenderer.invoke('settings:get'),
+  settingsSave: (settings) => ipcRenderer.invoke('settings:save', settings),
+  settingsTestEndpoint: (endpoint) => ipcRenderer.invoke('settings:testEndpoint', endpoint),
   compact: (payload) => ipcRenderer.invoke('chat:compact', payload),
   loop: (payload = {}) => ipcRenderer.invoke('chat:loop', {
     ...payload,

@@ -1,6 +1,6 @@
 # Brittain Code
 
-A local-first coding agent and general chat desktop app powered by your local Ollama models. Inference, chats, project memory, and ordinary tools stay on your Mac; optional online research is disabled by default. No backend server or model API key is required — the app talks directly to Ollama at `localhost:11434`.
+A local-first coding agent and general chat desktop app powered by Ollama-compatible models. Inference, chats, project memory, and ordinary tools stay on your Mac by default; optional online research is disabled by default. No model API key is required — the default endpoint is Ollama at `localhost:11434`, and Settings can point the app at another compatible host or port.
 
 ## Run it
 
@@ -44,6 +44,12 @@ The status bar shows: current state, context usage (tokens used vs the model's c
 
 **NEW SESSION** clears the conversation (context resets to zero).
 
+## Settings
+
+**SETTINGS** controls the Ollama-compatible inference endpoint, separate default models and response styles for Code and Chat, main/coder/scout context caps, auto-compaction and its threshold, model keep-alive, starting mode, THINK and Code safety defaults, sidebar visibility, global instructions, main-agent step cap, and the default `/loop` iteration count. Main context **Auto** uses up to 128K tokens and never exceeds the model's native context; a custom cap can be entered when needed. Research always starts disabled regardless of session defaults.
+
+The inference endpoint accepts an `http://` or `https://` base URL containing only a host and optional port, such as `http://127.0.0.1:9001`. **TEST** checks the endpoint's `/api/tags` response before saving. This supports servers that implement Ollama's `/api/tags`, `/api/show`, and `/api/chat` shapes; other provider protocols will need a provider adapter. A non-loopback endpoint sends prompts, attachment contents, and tool context to that server, so it is no longer local-only.
+
 Chats are saved automatically as individual JSON files in `~/Library/Application Support/Brittain Code/chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar puts folder-free conversations under **GENERAL** and groups Code chats by project folder. Loading a chat restores its mode, model, directory, THINK, and AUTO-APPROVE states, but never restores RESEARCH.
 
 ## Online research
@@ -82,7 +88,7 @@ Type these in the message box:
 
 ## Offline orchestration
 
-`/orchestrate` separates planning from implementation while keeping inference local. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. Tasks run sequentially to avoid loading multiple large Ollama models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at 70% usage, with at most two compactions per stage; every coder task still starts with a fresh context. The final chat response stays concise; use DIFF when you want the complete patch and working-tree detail.
+`/orchestrate` separates planning from implementation while keeping inference local by default. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. Tasks run sequentially to avoid loading multiple large models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at the configured compaction threshold, with at most two compactions per stage; every coder task still starts with a fresh context. The final chat response stays concise; use DIFF when you want the complete patch and working-tree detail.
 
 `/loop --coder` uses the same scoped planner, coder, and evidence-based verifier, but spends one loop iteration on each implementation or repair attempt. It advances through the plan only after the current task is verified and can keep repairing until the iteration cap. After every planned task passes, a final whole-goal verification either completes the loop or creates a final verifier-guided repair task. Plain `/loop` keeps its original single-model, conversation-preserving behavior.
 
@@ -104,7 +110,8 @@ The offline benchmark includes versioned bug-fix, feature, debugging, and econom
 
 | File | What it does |
 |---|---|
-| `main.js` | The agent loop, system prompt, Ollama streaming, persistence, subagents, and application IPC handlers. |
+| `main.js` | The agent loop, system prompt, inference streaming, persistence, subagents, and application IPC handlers. |
+| `settings.js` | Settings defaults, validation, and atomic on-disk persistence. |
 | `attachments.js` | Local validation and text extraction for attached PDFs, text files, source code, and images. |
 | `tools.js` | Tool schemas, implementations, managed processes, network guards, and risky/network/sensitive approval classifications. Add or change tools here. |
 | `renderer/app.js` | UI behavior: sending, streaming display, timers, approval buttons. |
@@ -112,4 +119,4 @@ The offline benchmark includes versioned bug-fix, feature, debugging, and econom
 | `renderer/index.html` | The layout skeleton. |
 | `preload.js` | The IPC bridge — only touch when adding a new message channel. |
 
-Important limits: `MAX_AGENT_STEPS` and `NUM_CTX_CAP` live near the top of `main.js`; output, process-log, network-download, and tool-specific caps live in `tools.js`.
+Default runtime limits live in `settings.js` and can be changed from Settings; output, process-log, network-download, and tool-specific safety caps remain in `tools.js`.
