@@ -82,15 +82,15 @@
   </div>
 
   <footer>
-    <div id="img-preview" class="hidden"></div>
+    <div id="attachment-preview" class="hidden"></div>
     <div id="composer-head">
       <span id="composer-mode">CODE</span>
       <span id="composer-context">Project tools are restricted to the selected directory.</span>
     </div>
     <div id="input-row">
       <textarea id="input" rows="3" placeholder="Describe a task... (Enter to send, Shift+Enter for newline)"></textarea>
-      <button id="img-btn" title="Attach an image (or paste one into the text box)">IMG</button>
-      <input type="file" id="img-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple class="hidden" />
+      <button id="attach-btn" title="Attach images, PDFs, text, or code files">ATTACH</button>
+      <input type="file" id="attach-file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/*,.md,.markdown,.csv,.tsv,.json,.jsonl,.yaml,.yml,.xml,.html,.css,.js,.mjs,.cjs,.jsx,.ts,.tsx,.py,.rb,.go,.rs,.java,.c,.cc,.cpp,.h,.hpp,.cs,.swift,.kt,.kts,.sh,.bash,.zsh,.sql,.toml,.ini,.cfg,.conf,.log" multiple class="hidden" />
       <button id="send-btn">SEND</button>
       <button id="stop-btn" class="hidden">STOP</button>
     </div>

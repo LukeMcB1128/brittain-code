@@ -43,3 +43,19 @@ test('Code and Chat modes are wired through UI, persistence, and the agent bound
   assert.match(main, /const modeTools = chatMode \? CHAT_TOOLS : TOOL_DEFS/);
   assert.match(main, /if \(!activeToolNames\.has\(name\)\)/);
 });
+
+test('general attachments are wired from the picker through local extraction and history rendering', () => {
+  const html = source('renderer/index.html');
+  const renderer = source('renderer/app.js');
+  const main = source('main.js');
+  const packageJson = JSON.parse(source('package.json'));
+
+  assert.match(html, /id="attach-btn"/);
+  assert.match(html, /application\/pdf/);
+  assert.match(renderer, /files,\n\s+\}\);/);
+  assert.match(renderer, /msg\.attachments \|\| \[\]/);
+  assert.match(main, /extractFileAttachments\(files/);
+  assert.match(main, /contentWithAttachments\(text, fileAttachments\)/);
+  assert.equal(packageJson.build.files.includes('attachments.js'), true);
+  assert.equal(packageJson.dependencies.unpdf, '^1.6.2');
+});

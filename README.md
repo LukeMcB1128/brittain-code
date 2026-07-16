@@ -93,7 +93,7 @@ The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is en
 - When DIR is a git repo, the status bar shows the branch and changed-file count, with **DIFF** and **COMMIT** buttons. The diff refreshes after every agent run — review what it changed before committing.
 - Put a **`BRITTAIN.md`** in any project folder and its contents are added to the system prompt for chats in that folder (like Claude Code's CLAUDE.md) — conventions, build commands, things the agent should know.
 - The agent saves cross-chat lessons per project under `~/Library/Application Support/Brittain Code/memory/projects/`. Nothing is written into the project itself. Use `/memory` to view the selected project's file and its exact location. The former universal `memory.md`, if present, remains visible as legacy data but is no longer injected into prompts.
-- Attach images with the **IMG** button or paste them into the text box (vision-capable models only).
+- Use **ATTACH** for images, PDFs, text files, and common source-code formats; pasted images still work. Images require a vision-capable model. Documents are extracted locally as read-only context, capped to protect the model window, and scanned PDFs without selectable text currently require external OCR.
 - **Esc** stops a running generation. Speed (tokens/sec) shows in the status bar after each response.
 
 ## Model benchmark
@@ -105,6 +105,7 @@ The offline benchmark includes versioned bug-fix, feature, debugging, and econom
 | File | What it does |
 |---|---|
 | `main.js` | The agent loop, system prompt, Ollama streaming, persistence, subagents, and application IPC handlers. |
+| `attachments.js` | Local validation and text extraction for attached PDFs, text files, source code, and images. |
 | `tools.js` | Tool schemas, implementations, managed processes, network guards, and risky/network/sensitive approval classifications. Add or change tools here. |
 | `renderer/app.js` | UI behavior: sending, streaming display, timers, approval buttons. |
 | `renderer/style.css` | All styling. Colors are CSS variables at the top. |

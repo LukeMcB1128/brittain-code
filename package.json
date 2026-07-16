@@ -16,10 +16,14 @@
     "productName": "Brittain Code",
     "files": [
       "main.js",
+      "attachments.js",
       "ollama-recovery.js",
       "tools.js",
       "preload.js",
       "renderer/**"
+    ],
+    "asarUnpack": [
+      "node_modules/unpdf/**"
     ],
     "mac": {
       "identity": null,
@@ -32,5 +36,8 @@
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3",
     "marked": "^18.0.5"
+  },
+  "dependencies": {
+    "unpdf": "^1.6.2"
   }
 }

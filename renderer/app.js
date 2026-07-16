@@ -303,6 +303,10 @@ async function saveChat() {
   // Only generate a new title if this is a new chat (no existing title or title is generic)
   let title = 'Chat';
   const firstUser = conversation.find((m) => m.role === 'user');
+  const firstUserText = firstUser
+    ? firstUser.displayContent || firstUser.attachments?.map((attachment) => attachment.name).join(', ') || firstUser.content || 'Chat'
+    : 'Chat';
+  const fallbackTitle = firstUserText.substring(0, 30) + (firstUserText.length > 30 ? '...' : '');
   
   // Check if we should generate a title using the LLM
   if (!currentChatId || !firstUser) {
@@ -313,15 +317,11 @@ async function saveChat() {
         title = titleRes.title;
       } else {
         // Fallback to old behavior if LLM fails
-        title = firstUser
-          ? firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
-          : 'Chat';
+        title = firstUser ? fallbackTitle : 'Chat';
       }
     } catch (err) {
       // Fallback to old behavior if API call fails
-      title = firstUser
-        ? firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
-        : 'Chat';
+      title = firstUser ? fallbackTitle : 'Chat';
     }
   } else {
     // For existing chats, keep the existing title
@@ -330,7 +330,7 @@ async function saveChat() {
     if (chatEntry && chatEntry.title) {
       title = chatEntry.title;
     } else if (firstUser) {
-      title = firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '');
+      title = fallbackTitle;
     }
   }
 
@@ -426,7 +426,8 @@ function renderConversation(conversation) {
   for (const msg of conversation) {
     if (msg.role === 'user') {
       const imgs = (msg.images || []).map((b, i) => `data:${msg.imageTypes?.[i] || 'image/png'};base64,${b}`);
-      addMessage('user', msg.content || (imgs.length ? '(image)' : ''), imgs);
+      const shownText = msg.displayContent || (msg.attachments?.length ? '(attached files)' : msg.content) || (imgs.length ? '(image)' : '');
+      addMessage('user', shownText, imgs, msg.attachments || []);
     } else if (msg.role === 'assistant') {
       if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
       if (msg.content) renderMarkdown(addMessage('assistant', ''), msg.content);
@@ -454,13 +455,24 @@ function renderConversation(conversation) {
   }
 }
 
-// ---------- image attachments ----------
-let pendingImages = []; // data URLs awaiting send
+// ---------- attachments ----------
+const MAX_ATTACHMENTS = 6;
+const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const DOCUMENT_EXTENSIONS = new Set([
+  'pdf', 'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml',
+  'xml', 'html', 'htm', 'css', 'scss', 'less', 'js', 'mjs', 'cjs', 'jsx', 'ts',
+  'tsx', 'py', 'rb', 'go', 'rs', 'java', 'c', 'cc', 'cpp', 'h', 'hpp', 'cs',
+  'swift', 'kt', 'kts', 'sh', 'bash', 'zsh', 'sql', 'toml', 'ini', 'cfg', 'conf',
+  'log', 'properties',
+]);
+let pendingImages = []; // { name, type, size, dataUrl }
+let pendingFiles = []; // { name, type, size, dataUrl }
 
-$('img-btn').addEventListener('click', () => $('img-file').click());
+$('attach-btn').addEventListener('click', () => $('attach-file').click());
 
-$('img-file').addEventListener('change', (e) => {
-  for (const f of e.target.files) addImage(f);
+$('attach-file').addEventListener('change', (e) => {
+  for (const file of e.target.files) addAttachment(file);
   e.target.value = '';
 });
 
@@ -468,40 +480,85 @@ input.addEventListener('paste', (e) => {
   for (const item of e.clipboardData.items) {
     if (item.type.startsWith('image/')) {
       e.preventDefault();
-      addImage(item.getAsFile());
+      addAttachment(item.getAsFile());
     }
   }
 });
 
-function addImage(file) {
+function attachmentCount() {
+  return pendingImages.length + pendingFiles.length;
+}
+
+function fileExtension(name) {
+  const parts = String(name || '').toLowerCase().split('.');
+  return parts.length > 1 ? parts.pop() : '';
+}
+
+function addAttachment(file) {
   if (!file) return;
+  if (attachmentCount() >= MAX_ATTACHMENTS) return addError(`Attach at most ${MAX_ATTACHMENTS} files at once.`);
+  if (!file.size) return addError(`${file.name || 'Attachment'} is empty.`);
+  if (file.size > MAX_ATTACHMENT_SIZE) return addError(`${file.name || 'Attachment'} is larger than 15 MB.`);
+  const isImage = IMAGE_TYPES.has(file.type);
+  const isDocument = file.type === 'application/pdf' || file.type.startsWith('text/') || DOCUMENT_EXTENSIONS.has(fileExtension(file.name));
+  if (!isImage && !isDocument) return addError(`${file.name || 'Attachment'} is not a supported image, PDF, text, or code file.`);
   const reader = new FileReader();
   reader.onload = () => {
-    pendingImages.push(reader.result);
-    renderImagePreview();
+    const attachment = {
+      name: file.name || (isImage ? 'pasted-image' : 'attachment'),
+      type: file.type || (fileExtension(file.name) === 'pdf' ? 'application/pdf' : 'text/plain'),
+      size: file.size,
+      dataUrl: reader.result,
+    };
+    (isImage ? pendingImages : pendingFiles).push(attachment);
+    renderAttachmentPreview();
   };
   reader.readAsDataURL(file);
 }
 
-function renderImagePreview() {
-  const strip = $('img-preview');
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderAttachmentPreview() {
+  const strip = $('attachment-preview');
   strip.innerHTML = '';
-  strip.classList.toggle('hidden', !pendingImages.length);
-  pendingImages.forEach((src, i) => {
+  strip.classList.toggle('hidden', !attachmentCount());
+  pendingImages.forEach((attachment, index) => {
     const wrap = document.createElement('div');
     wrap.className = 'img-thumb';
     const img = document.createElement('img');
-    img.src = src;
+    img.src = attachment.dataUrl;
+    img.alt = attachment.name;
     const x = document.createElement('button');
     x.textContent = '✕';
-    x.title = 'Remove image';
+    x.title = `Remove ${attachment.name}`;
     x.addEventListener('click', () => {
-      pendingImages.splice(i, 1);
-      renderImagePreview();
+      pendingImages.splice(index, 1);
+      renderAttachmentPreview();
     });
     wrap.appendChild(img);
     wrap.appendChild(x);
     strip.appendChild(wrap);
+  });
+  pendingFiles.forEach((attachment, index) => {
+    const chip = document.createElement('div');
+    chip.className = 'file-chip';
+    const details = document.createElement('span');
+    details.className = 'file-chip-details';
+    details.textContent = `${attachment.name} · ${formatFileSize(attachment.size)}`;
+    const remove = document.createElement('button');
+    remove.textContent = '✕';
+    remove.title = `Remove ${attachment.name}`;
+    remove.addEventListener('click', () => {
+      pendingFiles.splice(index, 1);
+      renderAttachmentPreview();
+    });
+    chip.appendChild(details);
+    chip.appendChild(remove);
+    strip.appendChild(chip);
   });
 }
 
@@ -517,7 +574,7 @@ stopBtn.addEventListener('click', () => window.api.stop());
 
 async function send() {
   const text = input.value.trim();
-  if ((!text && !pendingImages.length) || busy) return;
+  if ((!text && !attachmentCount()) || busy) return;
   if (text.startsWith('/')) {
     input.value = '';
     if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate')) {
@@ -529,15 +586,27 @@ async function send() {
   if (appMode === 'code' && !cwd) return addError('Pick a working directory first (DIR button, top left).');
 
   // Ollama wants raw base64 without the data-URL prefix
-  const images = pendingImages.map((d) => d.split(',')[1]);
-  const imageTypes = pendingImages.map((d) => d.slice(5, d.indexOf(';')) || 'image/png');
-  const shownImages = pendingImages;
+  const images = pendingImages.map((attachment) => attachment.dataUrl.split(',')[1]);
+  const imageTypes = pendingImages.map((attachment) => attachment.type || 'image/png');
+  const imageAttachments = pendingImages.map(({ name, type, size }) => ({ name, type, size }));
+  const files = pendingFiles.map((attachment) => ({
+    name: attachment.name,
+    type: attachment.type,
+    size: attachment.size,
+    data: attachment.dataUrl.split(',')[1],
+  }));
+  const shownImages = pendingImages.map((attachment) => attachment.dataUrl);
+  const shownAttachments = [
+    ...pendingImages.map(({ name, type, size }) => ({ name, type, size, kind: 'image' })),
+    ...pendingFiles.map(({ name, type, size }) => ({ name, type, size, kind: type === 'application/pdf' ? 'pdf' : 'text' })),
+  ];
   pendingImages = [];
-  renderImagePreview();
+  pendingFiles = [];
+  renderAttachmentPreview();
 
   input.value = '';
   hideStartupMessage();
-  addMessage('user', text || '(image)', shownImages);
+  addMessage('user', text || '(attached files)', shownImages, shownAttachments);
   startRun();
 
   const res = await window.api.send({
@@ -552,6 +621,8 @@ async function send() {
     think: thinkToggle.checked,
     images,
     imageTypes,
+    imageAttachments,
+    files,
   });
 
   if (!res.ok) addError(res.error);
@@ -618,7 +689,7 @@ function finalizeAssistant() {
   currentAssistant = null;
 }
 
-function addMessage(role, text, images) {
+function addMessage(role, text, images, attachments = []) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   const label = document.createElement('span');
@@ -638,6 +709,21 @@ function addMessage(role, text, images) {
       strip.appendChild(img);
     }
     div.appendChild(strip);
+  }
+  const documents = attachments.filter((attachment) => attachment.kind !== 'image');
+  if (documents.length) {
+    const files = document.createElement('div');
+    files.className = 'msg-files';
+    for (const attachment of documents) {
+      const chip = document.createElement('span');
+      chip.className = 'msg-file';
+      const details = [attachment.name, formatFileSize(Number(attachment.size) || 0)];
+      if (attachment.pages) details.push(`${attachment.pages} pages`);
+      if (attachment.truncated) details.push('truncated');
+      chip.textContent = details.join(' · ');
+      files.appendChild(chip);
+    }
+    div.appendChild(files);
   }
   chat.appendChild(div);
   scrollDown();
@@ -983,7 +1069,8 @@ const codeStartupMessages = [
   "Happy to assist with your development",
   "Let's get coding!",
   "Your AI coding assistant is here",
-  "Ask questions, get answers, build amazing things"
+  "Ask questions, get answers, build amazing things",
+  "Let's get to work"
 ];
 
 const chatStartupMessages = [
@@ -991,6 +1078,7 @@ const chatStartupMessages = [
   'Chat locally, or enable Research to search the web',
   'Ask a question without choosing a folder',
   'Ready when you are',
+  'Pondering...'
 ];
 
 // Show a random startup message
