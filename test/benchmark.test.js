@@ -20,6 +20,8 @@ test('benchmark task fixtures are versioned, protected, and intentionally incomp
     assert.equal(manifest.version, task.version);
     assert.equal(task.protectedFiles.includes('test.js'), true);
     assert.equal(task.protectedFiles.includes('package.json'), true);
+    assert.equal(fs.existsSync(path.join(__dirname, '..', 'benchmark', task.promptFile)), true);
+    assert.equal(task.targetFiles.every((file) => task.allowedFiles.includes(file)), true);
     const packageJson = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
     assert.equal(packageJson.scripts.test, 'node test.js');
 
@@ -28,6 +30,14 @@ test('benchmark task fixtures are versioned, protected, and intentionally incomp
     assert.equal(result.hidden.total > 0, true);
     assert.equal(result.hidden.pass < result.hidden.total, true, `${id} baseline must fail hidden checks`);
   }
+});
+
+test('benchmark suite contains the complete harder coding generation', () => {
+  assert.deepEqual(Object.keys(TASKS), ['cart', 'feature', 'debug', 'economy', 'outbox']);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(TASKS).map(([id, task]) => [id, task.version])),
+    { cart: 4, feature: 3, debug: 3, economy: 3, outbox: 1 },
+  );
 });
 
 test('benchmark report aggregates repetitions by configuration with median and pass rate', () => {
@@ -92,7 +102,7 @@ test('benchmark report uses readable charts and task, mode, and thinking filters
   assert.match(html, /class="score-chart"/);
   assert.match(html, /class="legend-item"/);
   assert.match(html, /<select id="think">/);
-  assert.match(html, /tasks 2\/4/);
+  assert.match(html, new RegExp(`tasks 2/${Object.keys(TASKS).length}`));
   assert.match(html, /data-view-key="feature\|all\|all"/);
   assert.match(html, new RegExp(`cart v${TASKS.cart.version}`));
   assert.match(html, /Archived test versions \(0 runs\)/);

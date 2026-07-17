@@ -104,7 +104,7 @@ The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is en
 
 ## Model benchmark
 
-The offline benchmark includes versioned bug-fix, feature, debugging, and economy-simulation tasks. It deterministically scores correctness, protected-file safety, verification reliability, and task-normalized efficiency; it also compares solo models with planner/coder/verifier teams using saved per-role telemetry. See [`benchmark/README.md`](benchmark/README.md) for setup, repetition, grading, and report commands.
+The offline benchmark includes five versioned coding tasks covering checkout arithmetic, atomic rollback, debugging with green tests, deterministic snapshot/resume simulation, and a durable retry outbox. It deterministically scores correctness, protected-file safety, verification reliability, and task-normalized efficiency; it also compares solo models with planner/coder/verifier teams using saved per-role telemetry. See [`benchmark/README.md`](benchmark/README.md) for setup, repetition, grading, and report commands.
 
 ## Code layout — where to modify things
 

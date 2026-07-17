@@ -1,11 +1,12 @@
-Build the deterministic headless economy slice described by the existing test.js.
+Complete and harden the deterministic economy simulation across rng.js, ledger.js, and economy.js.
 
-Implement rng.js, ledger.js, and economy.js with:
-- deterministic seeded replay;
-- households and firms represented as accounts;
-- explicit ledger transfers that never create or destroy money;
-- nonnegative finite balances;
-- one finite metrics record per tick;
-- stable long runs, zero-tick support, and no mutation of the options object.
+Preserve the existing simulation rules and result schema. Add working snapshot continuation through resume(snapshot, additionalTicks): resuming an 8-tick result for 12 ticks must be deeply identical to a fresh 20-tick run with the same original options. Repeated/multi-stage resumes must behave the same way.
+
+Contract:
+- createRng(seed, optionalState) must replay deterministically; snapshot() captures the exact continuation state.
+- Ledger accepts known accounts with nonnegative safe-integer cent balances. transfer validates known distinct accounts, a nonnegative safe-integer cent amount, and sufficient funds before mutating anything.
+- simulate validates an integer seed, nonnegative safe-integer ticks, and positive safe-integer household/firm counts.
+- Preserve account order and IDs (h0... then f0...), conserve money, keep nonnegative integer-cent balances, and emit one all-integer metrics record per tick.
+- simulate and resume must not mutate their input objects. Zero ticks and stable long runs are required.
 
 Do not modify test.js. Verify with the repository's declared test check. This task may be run as a normal solo message or with /orchestrate.
