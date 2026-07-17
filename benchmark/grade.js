@@ -149,7 +149,8 @@ const generatedTokens = sum('gen');
 const wallTimeMs = Number(metrics.wallTimeMs) || null;
 const toolErrors = Number(metrics.toolErrors) || toolErrorsFromTranscript;
 const toolCalls = Number(metrics.toolCalls) || calls.length;
-const mode = Number(metrics.orchestrations) > 0 || /^ORCHESTRATE:/i.test(String(convo.find((m) => m.role === 'user')?.content || '')) ? 'team' : 'solo';
+const hasTeamWorkflowMessage = convo.some((message) => message.role === 'user' && /^(?:ORCHESTRATE|CODER LOOP)\b/i.test(String(message.content || '')));
+const mode = Number(metrics.orchestrations) > 0 || Number(metrics.coderLoopIterations) > 0 || hasTeamWorkflowMessage ? 'team' : 'solo';
 const plannerModel = raw.model || '(unknown)';
 const coderModel = mode === 'team' ? raw.coderModel || '(unknown)' : null;
 const verifierModel = mode === 'team' ? raw.subModel || '(unknown)' : null;
@@ -250,6 +251,8 @@ const record = {
   recoveredToolCalls: Number(metrics.recoveredToolCalls) || 0,
   toolCallRetries: Number(metrics.toolCallRetries) || 0,
   compactions: Number(metrics.compactions) || 0,
+  loopIterations: Number(metrics.loopIterations) || 0,
+  coderLoopIterations: Number(metrics.coderLoopIterations) || 0,
   repairs: Number(metrics.repairs) || 0,
   peakContextTokens: Number(metrics.peakContextTokens) || 0,
   efficiencyBudget: effectiveBudget,

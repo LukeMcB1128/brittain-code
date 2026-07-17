@@ -14,30 +14,34 @@ const onlineResearchToggle = $('online-research');
 const autoBranchToggle = $('auto-branch');
 const reviewToggle = $('review-mode');
 const undoBtn = $('undo-btn');
+const codeModeBtn = $('mode-code');
+const chatModeBtn = $('mode-chat');
 
 let cwd = null;
+let appMode = localStorage.getItem('appMode') === 'chat' ? 'chat' : 'code';
 let busy = false;
 let subModel = localStorage.getItem('subModel') || 'qwen3:8b'; // set via /subagent
 let coderModel = localStorage.getItem('coderModel') || 'qwen3-coder:30b'; // set via /coder
 let elapsedTimer = null;
 let toolCount = 0;
 let currentChatId = null;
+let appSettings = null;
+let settingsDefaults = null;
+let currentModels = [];
+
+setAppMode(appMode, false, false);
 
 // ---------- boot ----------
 (async function boot() {
-  const res = await window.api.listModels();
-  if (!res.ok) {
-    addError(res.error);
-    return;
+  const settingsRes = await window.api.settingsGet();
+  if (settingsRes.ok) {
+    appSettings = settingsRes.settings;
+    settingsDefaults = settingsRes.defaults;
+    if (appSettings.defaultMode !== 'last') appMode = appSettings.defaultMode;
+    setAppMode(appMode, false, false);
   }
-  for (const name of res.models) {
-    const opt = document.createElement('option');
-    opt.value = name;
-    opt.textContent = name;
-    modelSelect.appendChild(opt);
-  }
-  const saved = localStorage.getItem('model');
-  if (saved && res.models.includes(saved)) modelSelect.value = saved;
+
+  const models = await reloadModels(defaultModelForMode(appMode));
 
   // Display version number
   try {
@@ -49,17 +53,19 @@ let currentChatId = null;
   }
 
   // subagent model: validate the saved choice against what's installed
-  if (!res.models.includes(subModel)) {
-    subModel = res.models.includes('qwen3:8b') ? 'qwen3:8b' : res.models[0] || '';
+  subModel = appSettings?.scoutModel || subModel;
+  if (!models.includes(subModel)) {
+    subModel = models.includes('qwen3:8b') ? 'qwen3:8b' : models[0] || '';
   }
   // Prefer the coding-specialized model, then gpt-oss as a capable local
   // fallback once installed, then whichever subagent model is available.
-  if (!res.models.includes(coderModel)) {
-    coderModel = res.models.includes('qwen3-coder:30b')
+  coderModel = appSettings?.coderModel || coderModel;
+  if (!models.includes(coderModel)) {
+    coderModel = models.includes('qwen3-coder:30b')
       ? 'qwen3-coder:30b'
-      : res.models.includes('gpt-oss:20b')
+      : models.includes('gpt-oss:20b')
         ? 'gpt-oss:20b'
-        : subModel || res.models[0] || '';
+        : subModel || models[0] || '';
     localStorage.setItem('coderModel', coderModel);
   }
 
@@ -75,11 +81,7 @@ let currentChatId = null;
   const savedCwd = localStorage.getItem('cwd');
   if (savedCwd) setCwd(savedCwd);
 
-  thinkToggle.checked = localStorage.getItem('think') === '1';
-  autoApprove.checked = localStorage.getItem('autoApprove') === '1';
-  autoBranchToggle.checked = localStorage.getItem('autoBranch') === '1';
-  reviewToggle.checked = localStorage.getItem('reviewMode') === '1';
-  onlineResearchToggle.checked = false; // privacy boundary: never restore online access implicitly
+  applySessionDefaults();
 
   // One-time migration: chats used to live in localStorage; move them to disk.
   try {
@@ -102,6 +104,43 @@ let currentChatId = null;
   showStartupMessage();
 })();
 
+function defaultModelForMode(mode) {
+  const configured = mode === 'chat' ? appSettings?.chatModel : appSettings?.codeModel;
+  return configured || localStorage.getItem(`model:${mode}`) || localStorage.getItem('model') || '';
+}
+
+async function reloadModels(preferred = '') {
+  const res = await window.api.listModels();
+  modelSelect.innerHTML = '';
+  if (!res.ok) {
+    currentModels = [];
+    addError(res.error);
+    populateSettingsModelSelects();
+    return currentModels;
+  }
+  currentModels = res.models;
+  for (const name of currentModels) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    modelSelect.appendChild(opt);
+  }
+  if (preferred && currentModels.includes(preferred)) modelSelect.value = preferred;
+  populateSettingsModelSelects();
+  return currentModels;
+}
+
+function applySessionDefaults() {
+  thinkToggle.checked = appSettings ? !!appSettings[appMode === 'chat' ? 'chatThink' : 'codeThink'] : localStorage.getItem('think') === '1';
+  autoApprove.checked = appSettings ? !!appSettings.autoApprove : localStorage.getItem('autoApprove') === '1';
+  autoBranchToggle.checked = appSettings ? !!appSettings.autoBranch : localStorage.getItem('autoBranch') === '1';
+  reviewToggle.checked = appSettings ? !!appSettings.reviewMode : localStorage.getItem('reviewMode') === '1';
+  sidebar.classList.toggle('hidden', appSettings ? !appSettings.sidebarOpen : false);
+  onlineResearchToggle.checked = false; // privacy boundary: never restore online access implicitly
+  const preferred = defaultModelForMode(appMode);
+  if (preferred && currentModels.includes(preferred)) modelSelect.value = preferred;
+}
+
 thinkToggle.addEventListener('change', () => localStorage.setItem('think', thinkToggle.checked ? '1' : '0'));
 autoApprove.addEventListener('change', () => localStorage.setItem('autoApprove', autoApprove.checked ? '1' : '0'));
 autoBranchToggle.addEventListener('change', () => localStorage.setItem('autoBranch', autoBranchToggle.checked ? '1' : '0'));
@@ -114,7 +153,44 @@ onlineResearchToggle.addEventListener('change', () => {
   if (!approved) onlineResearchToggle.checked = false;
 });
 
-modelSelect.addEventListener('change', () => localStorage.setItem('model', modelSelect.value));
+modelSelect.addEventListener('change', () => {
+  localStorage.setItem('model', modelSelect.value);
+  localStorage.setItem(`model:${appMode}`, modelSelect.value);
+});
+codeModeBtn.addEventListener('click', () => chooseAppMode('code'));
+chatModeBtn.addEventListener('click', () => chooseAppMode('chat'));
+
+function setAppMode(mode, persist = true, refreshHistory = true) {
+  appMode = mode === 'chat' ? 'chat' : 'code';
+  document.body.dataset.mode = appMode;
+  codeModeBtn.classList.toggle('active', appMode === 'code');
+  chatModeBtn.classList.toggle('active', appMode === 'chat');
+  codeModeBtn.setAttribute('aria-pressed', appMode === 'code' ? 'true' : 'false');
+  chatModeBtn.setAttribute('aria-pressed', appMode === 'chat' ? 'true' : 'false');
+  $('composer-mode').textContent = appMode.toUpperCase();
+  $('sidebar-head').textContent = appMode === 'chat' ? 'CHAT HISTORY' : 'CODE HISTORY';
+  $('composer-context').textContent = appMode === 'chat'
+    ? 'No folder access. Enable RESEARCH when you want to search the web.'
+    : 'Project tools are restricted to the selected directory.';
+  input.placeholder = appMode === 'chat'
+    ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
+    : 'Describe a task... (Enter to send, Shift+Enter for newline)';
+  if (persist) localStorage.setItem('appMode', appMode);
+  refreshGit();
+  if (refreshHistory) loadChatHistory();
+}
+
+async function chooseAppMode(mode) {
+  if (busy || mode === appMode) return;
+  const conversation = await window.api.getConversation();
+  if (conversation.length && !confirm(`Switch to ${mode.toUpperCase()} and start a new session?\n\nYour current chat is already saved in History.`)) return;
+  setAppMode(mode);
+  if (conversation.length) await newSession();
+  else {
+    applySessionDefaults();
+    showStartupMessage();
+  }
+}
 
 $('cwd-btn').addEventListener('click', async () => {
   const res = await window.api.pickCwd();
@@ -180,7 +256,10 @@ $('review-discard-btn').addEventListener('click', async () => {
 
 // ---------- chat history ----------
 async function loadChatHistory() {
-  const chats = await window.api.historyList();
+  const allChats = await window.api.historyList();
+  const chats = allChats.filter((chatEntry) => appMode === 'chat'
+    ? chatEntry.mode === 'chat'
+    : chatEntry.mode !== 'chat');
   chats.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)); // newest first
   chatList.innerHTML = '';
 
@@ -191,19 +270,27 @@ async function loadChatHistory() {
     chatList.appendChild(noChats);
     return;
   }
-  // group chats by project folder (newest group first; chats are already newest-first)
+  // General Chat conversations live outside projects; Code chats stay grouped by folder.
   const groups = new Map();
   for (const c of chats) {
-    const key = c.cwd || '';
+    const key = c.mode === 'chat' ? '__general__' : c.cwd || '__legacy__';
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(c);
   }
 
-  for (const [dir, items] of groups) {
+  for (const [group, items] of groups) {
     const head = document.createElement('div');
     head.className = 'chat-group';
-    head.textContent = dir ? dir.split('/').filter(Boolean).pop().toUpperCase() : 'NO FOLDER';
-    head.title = dir || 'Chats saved before folders were tracked';
+    if (group === '__general__') {
+      head.textContent = 'GENERAL';
+      head.title = 'Folder-free Chat conversations';
+    } else if (group === '__legacy__') {
+      head.textContent = 'OLDER CHATS';
+      head.title = 'Chats saved before modes and folders were tracked';
+    } else {
+      head.textContent = group.split('/').filter(Boolean).pop().toUpperCase();
+      head.title = group;
+    }
     chatList.appendChild(head);
     for (const c of items) renderChatItem(c);
   }
@@ -256,6 +343,10 @@ async function saveChat() {
   // Only generate a new title if this is a new chat (no existing title or title is generic)
   let title = 'Chat';
   const firstUser = conversation.find((m) => m.role === 'user');
+  const firstUserText = firstUser
+    ? firstUser.displayContent || firstUser.attachments?.map((attachment) => attachment.name).join(', ') || firstUser.content || 'Chat'
+    : 'Chat';
+  const fallbackTitle = firstUserText.substring(0, 30) + (firstUserText.length > 30 ? '...' : '');
   
   // Check if we should generate a title using the LLM
   if (!currentChatId || !firstUser) {
@@ -266,15 +357,11 @@ async function saveChat() {
         title = titleRes.title;
       } else {
         // Fallback to old behavior if LLM fails
-        title = firstUser
-          ? firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
-          : 'Chat';
+        title = firstUser ? fallbackTitle : 'Chat';
       }
     } catch (err) {
       // Fallback to old behavior if API call fails
-      title = firstUser
-        ? firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
-        : 'Chat';
+      title = firstUser ? fallbackTitle : 'Chat';
     }
   } else {
     // For existing chats, keep the existing title
@@ -283,7 +370,7 @@ async function saveChat() {
     if (chatEntry && chatEntry.title) {
       title = chatEntry.title;
     } else if (firstUser) {
-      title = firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '');
+      title = fallbackTitle;
     }
   }
 
@@ -293,7 +380,8 @@ async function saveChat() {
       id: currentChatId,
       title,
       model: modelSelect.value,
-      cwd: cwd || '',
+      mode: appMode,
+      cwd: appMode === 'code' ? cwd || '' : '',
       think: thinkToggle.checked,
       autoApprove: autoApprove.checked,
       autoBranch: autoBranchToggle.checked,
@@ -315,6 +403,7 @@ async function loadChat(chatId) {
   if (!res.ok) return addError('Could not load chat: ' + res.error);
   const saved = res.chat;
   onlineResearchToggle.checked = false; // loading history must never restore network access
+  setAppMode(saved.mode === 'chat' ? 'chat' : 'code');
 
   // Push the stored conversation into the main process so the model continues from it.
   const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics);
@@ -332,7 +421,7 @@ async function loadChat(chatId) {
 
   // Restore the working directory this chat was using, if it still exists.
   let cwdChanged = false;
-  if (saved.cwd && saved.cwd !== cwd) {
+  if (appMode === 'code' && saved.cwd && saved.cwd !== cwd) {
     if (await window.api.dirExists(saved.cwd)) {
       setCwd(saved.cwd);
       cwdChanged = true;
@@ -377,7 +466,8 @@ function renderConversation(conversation) {
   for (const msg of conversation) {
     if (msg.role === 'user') {
       const imgs = (msg.images || []).map((b, i) => `data:${msg.imageTypes?.[i] || 'image/png'};base64,${b}`);
-      addMessage('user', msg.content || (imgs.length ? '(image)' : ''), imgs);
+      const shownText = msg.displayContent || (msg.attachments?.length ? '(attached files)' : msg.content) || (imgs.length ? '(image)' : '');
+      addMessage('user', shownText, imgs, msg.attachments || []);
     } else if (msg.role === 'assistant') {
       if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
       if (msg.content) renderMarkdown(addMessage('assistant', ''), msg.content);
@@ -405,13 +495,24 @@ function renderConversation(conversation) {
   }
 }
 
-// ---------- image attachments ----------
-let pendingImages = []; // data URLs awaiting send
+// ---------- attachments ----------
+const MAX_ATTACHMENTS = 6;
+const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const DOCUMENT_EXTENSIONS = new Set([
+  'pdf', 'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml',
+  'xml', 'html', 'htm', 'css', 'scss', 'less', 'js', 'mjs', 'cjs', 'jsx', 'ts',
+  'tsx', 'py', 'rb', 'go', 'rs', 'java', 'c', 'cc', 'cpp', 'h', 'hpp', 'cs',
+  'swift', 'kt', 'kts', 'sh', 'bash', 'zsh', 'sql', 'toml', 'ini', 'cfg', 'conf',
+  'log', 'properties',
+]);
+let pendingImages = []; // { name, type, size, dataUrl }
+let pendingFiles = []; // { name, type, size, dataUrl }
 
-$('img-btn').addEventListener('click', () => $('img-file').click());
+$('attach-btn').addEventListener('click', () => $('attach-file').click());
 
-$('img-file').addEventListener('change', (e) => {
-  for (const f of e.target.files) addImage(f);
+$('attach-file').addEventListener('change', (e) => {
+  for (const file of e.target.files) addAttachment(file);
   e.target.value = '';
 });
 
@@ -419,40 +520,85 @@ input.addEventListener('paste', (e) => {
   for (const item of e.clipboardData.items) {
     if (item.type.startsWith('image/')) {
       e.preventDefault();
-      addImage(item.getAsFile());
+      addAttachment(item.getAsFile());
     }
   }
 });
 
-function addImage(file) {
+function attachmentCount() {
+  return pendingImages.length + pendingFiles.length;
+}
+
+function fileExtension(name) {
+  const parts = String(name || '').toLowerCase().split('.');
+  return parts.length > 1 ? parts.pop() : '';
+}
+
+function addAttachment(file) {
   if (!file) return;
+  if (attachmentCount() >= MAX_ATTACHMENTS) return addError(`Attach at most ${MAX_ATTACHMENTS} files at once.`);
+  if (!file.size) return addError(`${file.name || 'Attachment'} is empty.`);
+  if (file.size > MAX_ATTACHMENT_SIZE) return addError(`${file.name || 'Attachment'} is larger than 15 MB.`);
+  const isImage = IMAGE_TYPES.has(file.type);
+  const isDocument = file.type === 'application/pdf' || file.type.startsWith('text/') || DOCUMENT_EXTENSIONS.has(fileExtension(file.name));
+  if (!isImage && !isDocument) return addError(`${file.name || 'Attachment'} is not a supported image, PDF, text, or code file.`);
   const reader = new FileReader();
   reader.onload = () => {
-    pendingImages.push(reader.result);
-    renderImagePreview();
+    const attachment = {
+      name: file.name || (isImage ? 'pasted-image' : 'attachment'),
+      type: file.type || (fileExtension(file.name) === 'pdf' ? 'application/pdf' : 'text/plain'),
+      size: file.size,
+      dataUrl: reader.result,
+    };
+    (isImage ? pendingImages : pendingFiles).push(attachment);
+    renderAttachmentPreview();
   };
   reader.readAsDataURL(file);
 }
 
-function renderImagePreview() {
-  const strip = $('img-preview');
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderAttachmentPreview() {
+  const strip = $('attachment-preview');
   strip.innerHTML = '';
-  strip.classList.toggle('hidden', !pendingImages.length);
-  pendingImages.forEach((src, i) => {
+  strip.classList.toggle('hidden', !attachmentCount());
+  pendingImages.forEach((attachment, index) => {
     const wrap = document.createElement('div');
     wrap.className = 'img-thumb';
     const img = document.createElement('img');
-    img.src = src;
+    img.src = attachment.dataUrl;
+    img.alt = attachment.name;
     const x = document.createElement('button');
     x.textContent = '✕';
-    x.title = 'Remove image';
+    x.title = `Remove ${attachment.name}`;
     x.addEventListener('click', () => {
-      pendingImages.splice(i, 1);
-      renderImagePreview();
+      pendingImages.splice(index, 1);
+      renderAttachmentPreview();
     });
     wrap.appendChild(img);
     wrap.appendChild(x);
     strip.appendChild(wrap);
+  });
+  pendingFiles.forEach((attachment, index) => {
+    const chip = document.createElement('div');
+    chip.className = 'file-chip';
+    const details = document.createElement('span');
+    details.className = 'file-chip-details';
+    details.textContent = `${attachment.name} · ${formatFileSize(attachment.size)}`;
+    const remove = document.createElement('button');
+    remove.textContent = '✕';
+    remove.title = `Remove ${attachment.name}`;
+    remove.addEventListener('click', () => {
+      pendingFiles.splice(index, 1);
+      renderAttachmentPreview();
+    });
+    chip.appendChild(details);
+    chip.appendChild(remove);
+    strip.appendChild(chip);
   });
 }
 
@@ -468,7 +614,7 @@ stopBtn.addEventListener('click', () => window.api.stop());
 
 async function send() {
   const text = input.value.trim();
-  if ((!text && !pendingImages.length) || busy) return;
+  if ((!text && !attachmentCount()) || busy) return;
   if (text.startsWith('/')) {
     input.value = '';
     if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate')) {
@@ -477,30 +623,46 @@ async function send() {
     return handleSlash(text);
   }
   if (!modelSelect.value) return addError('No model selected — is Ollama running?');
-  if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+  if (appMode === 'code' && !cwd) return addError('Pick a working directory first (DIR button, top left).');
 
   // Ollama wants raw base64 without the data-URL prefix
-  const images = pendingImages.map((d) => d.split(',')[1]);
-  const imageTypes = pendingImages.map((d) => d.slice(5, d.indexOf(';')) || 'image/png');
-  const shownImages = pendingImages;
+  const images = pendingImages.map((attachment) => attachment.dataUrl.split(',')[1]);
+  const imageTypes = pendingImages.map((attachment) => attachment.type || 'image/png');
+  const imageAttachments = pendingImages.map(({ name, type, size }) => ({ name, type, size }));
+  const files = pendingFiles.map((attachment) => ({
+    name: attachment.name,
+    type: attachment.type,
+    size: attachment.size,
+    data: attachment.dataUrl.split(',')[1],
+  }));
+  const shownImages = pendingImages.map((attachment) => attachment.dataUrl);
+  const shownAttachments = [
+    ...pendingImages.map(({ name, type, size }) => ({ name, type, size, kind: 'image' })),
+    ...pendingFiles.map(({ name, type, size }) => ({ name, type, size, kind: type === 'application/pdf' ? 'pdf' : 'text' })),
+  ];
   pendingImages = [];
-  renderImagePreview();
+  pendingFiles = [];
+  renderAttachmentPreview();
 
   input.value = '';
   hideStartupMessage();
-  addMessage('user', text || '(image)', shownImages);
+  addMessage('user', text || '(attached files)', shownImages, shownAttachments);
   startRun();
 
   const res = await window.api.send({
     model: modelSelect.value,
     subModel,
     text,
-    cwd,
-    autoApprove: autoApprove.checked,
+    mode: appMode,
+    cwd: appMode === 'code' ? cwd : null,
+    autoApprove: appMode === 'code' && autoApprove.checked,
+    autoBranch: appMode === 'code' && autoBranchToggle.checked,
     onlineResearch: onlineResearchToggle.checked,
     think: thinkToggle.checked,
     images,
     imageTypes,
+    imageAttachments,
+    files,
   });
 
   if (!res.ok) addError(res.error);
@@ -567,7 +729,7 @@ function finalizeAssistant() {
   currentAssistant = null;
 }
 
-function addMessage(role, text, images) {
+function addMessage(role, text, images, attachments = []) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   const label = document.createElement('span');
@@ -587,6 +749,21 @@ function addMessage(role, text, images) {
       strip.appendChild(img);
     }
     div.appendChild(strip);
+  }
+  const documents = attachments.filter((attachment) => attachment.kind !== 'image');
+  if (documents.length) {
+    const files = document.createElement('div');
+    files.className = 'msg-files';
+    for (const attachment of documents) {
+      const chip = document.createElement('span');
+      chip.className = 'msg-file';
+      const details = [attachment.name, formatFileSize(Number(attachment.size) || 0)];
+      if (attachment.pages) details.push(`${attachment.pages} pages`);
+      if (attachment.truncated) details.push('truncated');
+      chip.textContent = details.join(' · ');
+      files.appendChild(chip);
+    }
+    div.appendChild(files);
   }
   chat.appendChild(div);
   scrollDown();
@@ -769,7 +946,8 @@ function updateContextBar(contextTokens, contextLength) {
   const pct = Math.min(100, (contextTokens / contextLength) * 100);
   const fill = $('ctx-fill');
   fill.style.width = pct + '%';
-  fill.className = pct > 90 ? 'danger' : pct > 70 ? 'warn' : '';
+  const warningAt = (appSettings?.compactThreshold || 0.7) * 100;
+  fill.className = pct > 90 ? 'danger' : pct > warningAt ? 'warn' : '';
   fill.id = 'ctx-fill';
 }
 
@@ -778,7 +956,7 @@ window.api.onStats(({ contextTokens, contextLength, tokPerSec, scope }) => {
   if (tokPerSec) $('tok-speed').textContent = tokPerSec.toFixed(1) + ' t/s';
   // Planner context is short-lived and discarded after /orchestrate. Warn only
   // when the persisted conversation itself needs compaction.
-  if (scope !== 'planner' && !compactWarned && contextTokens / contextLength > 0.8) {
+  if (scope !== 'planner' && appSettings?.autoCompact === false && !compactWarned && contextTokens / contextLength > 0.8) {
     compactWarned = true;
     addInfo('Context is over 80% full — run /compact soon or the model will start losing the oldest messages (including its instructions).');
   }
@@ -924,8 +1102,7 @@ function hideQuestion() {
   pendingQuestionId = null;
 }
 
-// Array of startup messages
-const startupMessages = [
+const codeStartupMessages = [
   "Welcome to Brittain Code!",
   "Ready to help with your coding tasks",
   "Start by describing what you'd like to build",
@@ -933,7 +1110,16 @@ const startupMessages = [
   "Happy to assist with your development",
   "Let's get coding!",
   "Your AI coding assistant is here",
-  "Ask questions, get answers, build amazing things"
+  "Ask questions, get answers, build amazing things",
+  "Let's get to work"
+];
+
+const chatStartupMessages = [
+  'What would you like to explore?',
+  'Chat locally, or enable Research to search the web',
+  'Ask a question without choosing a folder',
+  'Ready when you are',
+  'Pondering...'
 ];
 
 // Show a random startup message
@@ -941,7 +1127,8 @@ function showStartupMessage() {
   const contentElement = $('startup-message-content');
   contentElement.innerHTML = '';
 
-  const randomMessage = startupMessages[Math.floor(Math.random() * startupMessages.length)];
+  const messages = appMode === 'chat' ? chatStartupMessages : codeStartupMessages;
+  const randomMessage = messages[Math.floor(Math.random() * messages.length)];
   const p = document.createElement('p');
   p.textContent = randomMessage;
   contentElement.appendChild(p);
@@ -969,12 +1156,174 @@ async function newSession() {
   $('ctx-fill').style.width = '0%';
   setState('idle');
   currentChatId = null;
-  onlineResearchToggle.checked = false;
+  applySessionDefaults();
   loadChatHistory(); // clear active highlight
   showStartupMessage();
 }
 
 $('new-btn').addEventListener('click', newSession);
+
+async function showSettings() {
+  if (!appSettings) {
+    const res = await window.api.settingsGet();
+    if (!res.ok) return addError(res.error || 'Could not load settings.');
+    appSettings = res.settings;
+    settingsDefaults = res.defaults;
+  }
+  fillSettingsForm(appSettings);
+  $('settings-save-result').textContent = '';
+  $('settings-test-result').textContent = '';
+  $('settings-modal').classList.remove('hidden');
+}
+
+$('settings-btn').addEventListener('click', showSettings);
+
+const settingModelFields = {
+  'setting-chat-model': 'chatModel',
+  'setting-code-model': 'codeModel',
+  'setting-coder-model': 'coderModel',
+  'setting-scout-model': 'scoutModel',
+};
+
+function populateSettingsModelSelects(source = appSettings || {}) {
+  for (const [id, key] of Object.entries(settingModelFields)) {
+    const select = $(id);
+    if (!select) continue;
+    const selected = source[key] || '';
+    select.innerHTML = '';
+    const automatic = document.createElement('option');
+    automatic.value = '';
+    automatic.textContent = 'Automatic / last used';
+    select.appendChild(automatic);
+    const names = [...currentModels];
+    if (selected && !names.includes(selected)) names.unshift(selected);
+    for (const name of names) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name + (currentModels.includes(name) ? '' : ' (not found)');
+      select.appendChild(option);
+    }
+    select.value = selected;
+  }
+}
+
+function setTemperatureSelect(id, value) {
+  const select = $(id);
+  const stringValue = String(value);
+  if (![...select.options].some((option) => option.value === stringValue)) {
+    const option = document.createElement('option');
+    option.value = stringValue;
+    option.textContent = `Custom (${stringValue})`;
+    select.appendChild(option);
+  }
+  select.value = stringValue;
+}
+
+function fillSettingsForm(settings) {
+  populateSettingsModelSelects(settings);
+  $('setting-endpoint').value = settings.inferenceEndpoint;
+  const standardContexts = ['0', '8192', '16384', '32768', '65536', '131072'];
+  const contextValue = String(settings.mainContextCap);
+  $('setting-main-context').value = standardContexts.includes(contextValue) ? contextValue : 'custom';
+  $('setting-main-context-custom').value = standardContexts.includes(contextValue) ? '' : contextValue;
+  $('setting-main-context-custom').classList.toggle('hidden', $('setting-main-context').value !== 'custom');
+  $('setting-auto-compact').checked = !!settings.autoCompact;
+  $('setting-compact-threshold').value = Math.round(settings.compactThreshold * 100);
+  $('setting-keep-alive').value = settings.keepAlive;
+  setTemperatureSelect('setting-code-temperature', settings.codeTemperature);
+  setTemperatureSelect('setting-chat-temperature', settings.chatTemperature);
+  $('setting-default-mode').value = settings.defaultMode;
+  $('setting-code-think').checked = !!settings.codeThink;
+  $('setting-chat-think').checked = !!settings.chatThink;
+  $('setting-sidebar-open').checked = !!settings.sidebarOpen;
+  $('setting-auto-approve').checked = !!settings.autoApprove;
+  $('setting-auto-branch').checked = !!settings.autoBranch;
+  $('setting-review-mode').checked = !!settings.reviewMode;
+  $('setting-max-agent-steps').value = settings.maxAgentSteps;
+  $('setting-loop-iterations').value = settings.defaultLoopIterations;
+  $('setting-coder-context').value = settings.coderContextCap;
+  $('setting-scout-context').value = settings.scoutContextCap;
+  $('setting-chat-instructions').value = settings.globalChatInstructions;
+  $('setting-code-instructions').value = settings.globalCodeInstructions;
+}
+
+function settingsFromForm() {
+  const selectedContext = $('setting-main-context').value;
+  return {
+    ...appSettings,
+    inferenceEndpoint: $('setting-endpoint').value.trim(),
+    mainContextCap: Number(selectedContext === 'custom' ? $('setting-main-context-custom').value : selectedContext),
+    autoCompact: $('setting-auto-compact').checked,
+    compactThreshold: Number($('setting-compact-threshold').value) / 100,
+    keepAlive: $('setting-keep-alive').value,
+    chatModel: $('setting-chat-model').value,
+    codeModel: $('setting-code-model').value,
+    coderModel: $('setting-coder-model').value,
+    scoutModel: $('setting-scout-model').value,
+    codeTemperature: Number($('setting-code-temperature').value),
+    chatTemperature: Number($('setting-chat-temperature').value),
+    defaultMode: $('setting-default-mode').value,
+    codeThink: $('setting-code-think').checked,
+    chatThink: $('setting-chat-think').checked,
+    sidebarOpen: $('setting-sidebar-open').checked,
+    autoApprove: $('setting-auto-approve').checked,
+    autoBranch: $('setting-auto-branch').checked,
+    reviewMode: $('setting-review-mode').checked,
+    maxAgentSteps: Number($('setting-max-agent-steps').value),
+    defaultLoopIterations: Number($('setting-loop-iterations').value),
+    coderContextCap: Number($('setting-coder-context').value),
+    scoutContextCap: Number($('setting-scout-context').value),
+    globalChatInstructions: $('setting-chat-instructions').value,
+    globalCodeInstructions: $('setting-code-instructions').value,
+  };
+}
+
+function hideSettings() {
+  $('settings-modal').classList.add('hidden');
+}
+
+$('setting-main-context').addEventListener('change', () => {
+  $('setting-main-context-custom').classList.toggle('hidden', $('setting-main-context').value !== 'custom');
+});
+
+$('settings-test-endpoint').addEventListener('click', async () => {
+  const status = $('settings-test-result');
+  status.className = 'setting-status';
+  status.textContent = 'Testing…';
+  const res = await window.api.settingsTestEndpoint($('setting-endpoint').value);
+  status.classList.add(res.ok ? 'ok' : 'error');
+  status.textContent = res.ok ? `Connected — ${res.modelCount} model${res.modelCount === 1 ? '' : 's'} found.` : res.error;
+});
+
+$('settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const status = $('settings-save-result');
+  status.className = 'setting-status';
+  status.textContent = 'Saving…';
+  const next = settingsFromForm();
+  const oldEndpoint = appSettings.inferenceEndpoint;
+  const res = await window.api.settingsSave(next);
+  if (!res.ok) {
+    status.classList.add('error');
+    status.textContent = res.error;
+    return;
+  }
+  appSettings = res.settings;
+  coderModel = appSettings.coderModel || coderModel;
+  subModel = appSettings.scoutModel || subModel;
+  if (oldEndpoint !== appSettings.inferenceEndpoint) await reloadModels(defaultModelForMode(appMode));
+  applySessionDefaults();
+  hideSettings();
+  addInfo('Settings saved. New inference and agent requests will use them.');
+  hideStartupMessage();
+});
+
+$('settings-reset').addEventListener('click', () => fillSettingsForm(settingsDefaults));
+$('settings-cancel').addEventListener('click', hideSettings);
+$('settings-close').addEventListener('click', hideSettings);
+$('settings-modal').addEventListener('click', (event) => {
+  if (event.target.id === 'settings-modal') hideSettings();
+});
 
 // ---------- slash commands ----------
 const SLASH_HELP = [
@@ -984,7 +1333,7 @@ const SLASH_HELP = [
   '/diff — show the git diff for the working directory',
   '/commit <message> — stage all changes and commit',
   '/graph — show a visual tree of the git commit history',
-  '/loop [n] <goal> — work toward a goal for up to n iterations (default 8); a verifier subagent judges completion after each pass',
+  '/loop [--coder] [n] <goal> — repeat until verified; --coder delegates planned implementation and repairs to the selected coder model',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
   '/model <for name> — switch model (partial match ok)',
   '/coder [name] — show or set the writable coding-worker model (partial match ok)',
@@ -995,13 +1344,28 @@ const SLASH_HELP = [
   '/tools — list all available tools',
 ].join('\n');
 
+const CHAT_SLASH_HELP = [
+  '/help — show this list',
+  '/clear — start a new session',
+  '/compact — summarize the conversation to free up context',
+  '/model <name> — switch model (partial match ok)',
+  '/usage — show context and token usage',
+  '/export — save this chat as a markdown file',
+  '/tools — list tools available to the app',
+].join('\n');
+
 async function handleSlash(raw) {
   const [cmd, ...rest] = raw.slice(1).split(' ');
   const arg = rest.join(' ').trim();
+  const normalizedCmd = cmd.toLowerCase();
+  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'orchestrate', 'commit', 'coder', 'subagent', 'memory']);
+  if (appMode === 'chat' && codeOnlyCommands.has(normalizedCmd)) {
+    return addError(`/${normalizedCmd} is only available in Code mode.`);
+  }
 
-  switch (cmd.toLowerCase()) {
+  switch (normalizedCmd) {
     case 'help':
-      return addInfo(SLASH_HELP);
+      return addInfo(appMode === 'chat' ? CHAT_SLASH_HELP : SLASH_HELP);
 
     case 'clear':
       return newSession();
@@ -1041,28 +1405,43 @@ async function handleSlash(raw) {
       if (busy) return;
       if (!modelSelect.value) return addError('No model selected.');
       if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
-      let iterations = 8;
+      let useCoder = false;
+      let iterations = appSettings?.defaultLoopIterations || 8;
       let goal = arg;
-      const m = arg.match(/^(\d+)\s+([\s\S]+)/);
+      const coderFlag = goal.match(/^--coder(?:\s+|$)/i);
+      if (coderFlag) {
+        useCoder = true;
+        goal = goal.slice(coderFlag[0].length).trim();
+      }
+      const m = goal.match(/^(\d+)\s+([\s\S]+)/);
       if (m) { iterations = parseInt(m[1], 10); goal = m[2].trim(); }
-      if (!goal) return addError('Usage: /loop [iterations] <goal> — e.g. /loop 10 make all tests pass');
+      if (!goal) return addError('Usage: /loop [--coder] [iterations] <goal> — e.g. /loop --coder 10 make all tests pass');
+      if (useCoder && !coderModel) return addError('No coder model selected. Use /coder <name>.');
       if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the loop will pause for every risky tool call. Turn it on for unattended runs.');
 
-      addMessage('user', `LOOP (max ${iterations}): ${goal}`);
+      addMessage('user', `${useCoder ? 'CODER LOOP' : 'LOOP'} (max ${iterations}): ${goal}`);
       startRun();
-      const res = await window.api.loop({
-        model: modelSelect.value,
-        subModel,
-        goal,
-        cwd,
-        autoApprove: autoApprove.checked,
-        autoBranch: autoBranchToggle.checked,
-        onlineResearch: onlineResearchToggle.checked,
-        think: thinkToggle.checked,
-        maxIterations: iterations,
-      });
-      if (!res.ok) addError(res.error);
-      endRun();
+      try {
+        const res = await window.api.loop({
+          model: modelSelect.value,
+          coderModel,
+          useCoder,
+          subModel,
+          goal,
+          cwd,
+          autoApprove: autoApprove.checked,
+          autoBranch: autoBranchToggle.checked,
+          onlineResearch: onlineResearchToggle.checked,
+          think: thinkToggle.checked,
+          maxIterations: iterations,
+        });
+        if (!res.ok) addError(res.error);
+        else if (res.report) renderMarkdown(addMessage('assistant', res.report), res.report);
+      } catch (err) {
+        addError('Loop failed: ' + (err.message || err));
+      } finally {
+        endRun();
+      }
       return saveChat();
     }
 
@@ -1183,7 +1562,7 @@ async function handleSlash(raw) {
     }
 
     case 'tools': {
-      const res = await window.api.toolsList();
+      const res = await window.api.toolsList(appMode);
       if (!res.ok) return addError('Failed to fetch tools: ' + res.error);
       const toolLines = res.tools.map(t => (t.isNetwork ? '[NET] ' : t.isSensitive ? '[SEC] ' : t.isDestructive ? '[DEST]' : t.isRisky ? '[!]   ' : '      ') + ' ' + t.name);
       return showOverlay('AVAILABLE TOOLS', toolLines.join('\n'));
@@ -1197,7 +1576,7 @@ async function handleSlash(raw) {
 // ---------- git ----------
 async function refreshGit() {
   const info = $('git-info');
-  if (!cwd) return info.classList.add('hidden');
+  if (appMode !== 'code' || !cwd) return info.classList.add('hidden');
   const res = await window.api.gitStatus(cwd);
   if (!res.ok) return info.classList.add('hidden');
   $('git-branch').textContent = res.branch + (res.changed ? ' ±' + res.changed : ' ✓');
@@ -1249,7 +1628,8 @@ $('overlay').addEventListener('click', (e) => {
 // ---------- keyboard shortcuts ----------
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if (!$('overlay').classList.contains('hidden')) hideOverlay();
+    if (!$('settings-modal').classList.contains('hidden')) hideSettings();
+    else if (!$('overlay').classList.contains('hidden')) hideOverlay();
     else if (busy) window.api.stop();
   }
 });

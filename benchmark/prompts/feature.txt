@@ -1,9 +1,12 @@
-Implement atomic order placement across inventory.js and orders.js.
+Finish the atomic checkout flow across inventory.js and orders.js.
 
-Requirements:
-- Add Inventory.reserveBatch(lines).
-- Validate the entire batch before changing stock; any invalid or insufficient line must leave all stock unchanged.
-- Duplicate SKU lines count toward the same total demand.
-- placeOrder must use the atomic batch operation, reject missing prices, preserve integer-cent totals, and return a receipt detached from caller input.
-- Do not modify test.js.
-- Verify with the repository's declared test check.
+Contract:
+- Inventory.reserveBatch(lines) validates the complete batch before mutation, aggregates duplicate SKU demand, reserves atomically, and returns detached normalized lines (one line per SKU).
+- A line requires a nonempty string SKU and a positive safe-integer quantity. Unknown or insufficient stock must leave all stock unchanged.
+- Inventory.releaseBatch(lines) releases normalized reservations.
+- placeOrder(inventory, lines, prices, charge) validates every price before reserving. Prices are nonnegative safe-integer cents.
+- After a successful reservation, call charge(totalCents) exactly once and use its return value as paymentId.
+- If charge throws, release exactly the reserved stock and rethrow the original error.
+- Return { totalCents, paymentId, lines }, with normalized receipt lines detached from caller input.
+
+Do not modify test.js. Verify with the repository's declared test check.

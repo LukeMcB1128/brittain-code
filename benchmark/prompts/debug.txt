@@ -1,3 +1,5 @@
-Users report that cache entries configured with ttlSeconds=10 disappear after only a few milliseconds, although the existing tests are green. Diagnose and fix the source generally.
+The visible cache tests are green, but production reports three related failures: tenants sometimes receive another tenant's cached record, cached false/zero/empty-string values behave like misses, and a 10-second TTL expires after only a few milliseconds. Diagnose and fix the implementation generally.
 
-Do not modify test.js. Preserve constructor injection of the clock, use the repository's declared test check, and explain the root cause briefly in your final response.
+Tenant and key are nonempty strings and their exact identities must be preserved, including case and whitespace. ttlSeconds must be finite and nonnegative; zero expires immediately. Expired entries should be removed. Preserve constructor injection of the millisecond clock.
+
+Do not modify test.js. Verify with the repository's declared test check and explain the root causes briefly in your final response.
