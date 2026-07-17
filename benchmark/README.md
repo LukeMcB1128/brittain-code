@@ -26,10 +26,11 @@ node benchmark/setup.js --list
 
 | Task | Challenge |
 |---|---|
-| `cart` | Small visible bug-fix smoke test; compatible with the original benchmark |
-| `feature` | Atomic multi-file feature with rollback and hidden edge cases |
-| `debug` | Bug report whose visible tests are already green |
-| `economy` | Deterministic multi-file economy slice for solo or orchestration testing |
+| `cart` | Checkout arithmetic, rounding, validation, and tax/shipping boundaries |
+| `feature` | Atomic multi-file checkout with inventory compensation after payment failure |
+| `debug` | Multi-tenant cache isolation, falsy values, and TTL bugs with green visible tests |
+| `economy` | Deterministic simulation with ledger invariants and exact snapshot/resume replay |
+| `outbox` | Durable FIFO retry queue with backoff, dead letters, snapshots, and a resilient worker |
 
 Hidden graders live in `benchmark/tasks.js`, outside the selected scratch directory. Brittain Code’s project boundary prevents the tested agent from reading them.
 
@@ -40,6 +41,7 @@ node benchmark/setup.js --task cart
 node benchmark/setup.js --task feature
 node benchmark/setup.js --task debug
 node benchmark/setup.js --task economy
+node benchmark/setup.js --task outbox
 ```
 
 Defaults are `~/brittain-bench` for `cart` and `~/brittain-bench-<task>` for other tasks. Override with `--dir /path`. Setup refuses to replace a non-benchmark directory unless `--force` is explicitly supplied.
@@ -74,7 +76,7 @@ Efficiency budgets are declared with each versioned task in `tasks.js`. Team run
 
 ## Orchestrated team run
 
-Use the `economy` or `feature` fixture:
+Use the `economy`, `feature`, or `outbox` fixture:
 
 ```text
 /model gemma4:26b
@@ -129,6 +131,7 @@ node benchmark/grade.js /Downloads/Coding/brittain-bench --task cart
 node benchmark/grade.js /Downloads/Coding/brittain-bench-feature --task feature
 node benchmark/grade.js /Downloads/Coding/brittain-bench-debug --task debug
 node benchmark/grade.js /Downloads/Coding/brittain-bench-economy --task economy
+node benchmark/grade.js /Downloads/Coding/brittain-bench-outbox --task outbox
 ```
 
 # To refresh git
@@ -137,4 +140,5 @@ cd ~/Downloads/Coding/brittain-bench && git reset --hard -q bench-baseline && gi
 cd ~/Downloads/Coding/brittain-bench-feature && git reset --hard -q bench-baseline && git clean -fdq
 cd ~/Downloads/Coding/brittain-bench-debug && git reset --hard -q bench-baseline && git clean -fdq
 cd ~/Downloads/Coding/brittain-bench-economy && git reset --hard -q bench-baseline && git clean -fdq
+cd ~/Downloads/Coding/brittain-bench-outbox && git reset --hard -q bench-baseline && git clean -fdq
 ```

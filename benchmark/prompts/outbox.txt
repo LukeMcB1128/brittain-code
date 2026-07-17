@@ -1,0 +1,12 @@
+Implement and harden the durable retry outbox across outbox.js and worker.js.
+
+Contract:
+- Constructor options baseDelayMs, maxDelayMs, and maxAttempts are positive safe integers; maxDelayMs must be at least baseDelayMs.
+- enqueue(id, payload, now) accepts a nonempty string ID and finite nonnegative timestamp. Pending IDs are unique: reject duplicates without mutation, but an ID may be reused after success. Store and return detached payload data.
+- due(now) returns detached due jobs ordered by nextAttemptAt and then FIFO sequence, without mutating the queue.
+- Failures increment attempts and schedule baseDelayMs * 2^(attempts-1), capped at maxDelayMs.
+- A job is removed and dead-lettered on exactly maxAttempts. Preserve its last error as text.
+- drainDue processes the due-at-start batch even if one delivery fails. It returns { delivered, failed, deadLettered } ID arrays and does not throw delivery errors.
+- snapshot() and Outbox.fromSnapshot() round-trip all state without aliases. Reject malformed snapshots atomically, including duplicate pending IDs.
+
+Payloads are JSON-compatible data. Do not modify test.js. Verify with the repository's declared test check.

@@ -2316,6 +2316,11 @@ const CODER_TOOL_NAMES = new Set([
 ]);
 const CODER_TOOLS = TOOL_DEFS.filter((d) => CODER_TOOL_NAMES.has(d.function.name));
 
+// Folder-free Chat mode can ask the user questions and optionally research the
+// public web. It never receives project, shell, Git, process, or memory tools.
+const CHAT_TOOL_NAMES = new Set(['ask_user', 'web_search', 'web_fetch']);
+const CHAT_TOOLS = TOOL_DEFS.filter((d) => CHAT_TOOL_NAMES.has(d.function.name));
+
 module.exports = {
   initTools,
   TOOL_DEFS,
@@ -2326,6 +2331,8 @@ module.exports = {
   ORCHESTRATOR_TOOL_NAMES,
   CODER_TOOLS,
   CODER_TOOL_NAMES,
+  CHAT_TOOLS,
+  CHAT_TOOL_NAMES,
   NETWORK_TOOLS,
   SENSITIVE_TOOLS,
   DESTRUCTIVE_TOOLS,

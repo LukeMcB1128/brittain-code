@@ -1,3 +1,12 @@
-This folder is a small shopping-cart module whose tests are failing. Make every test pass.
+This checkout module has several failing tests and incorrect totals. Repair cart.js generally.
 
-Do not modify test.js or hardcode expected values. Fix the source generally, verify with the real test command, and report the final pass count.
+Contract:
+- All monetary values are integer cents.
+- Each item has unitPriceCents (a nonnegative safe integer), quantity (a positive safe integer), and taxable (a boolean).
+- lineTotal returns unitPriceCents * quantity, and subtotal sums the line totals.
+- discountPercent must be finite and between 0 and 100 inclusive. Round the total discount to the nearest cent.
+- Tax applies only to taxable merchandise after the same percentage discount and is rounded to the nearest cent.
+- Shipping is free when the discounted merchandise subtotal is at least freeShippingThresholdCents; otherwise add shippingCents.
+- Reject malformed items or discounts instead of producing a partial/NaN total. Do not mutate caller input.
+
+Do not modify config.js or test.js. Do not hardcode examples. Verify with the repository's declared test check and report the final pass count.
