@@ -127,18 +127,18 @@ Older benchmark results remain visible as legacy rows, but they cannot participa
 
 # To run
 ```bash
-node benchmark/grade.js /Downloads/Coding/brittain-bench --task cart
-node benchmark/grade.js /Downloads/Coding/brittain-bench-feature --task feature
-node benchmark/grade.js /Downloads/Coding/brittain-bench-debug --task debug
-node benchmark/grade.js /Downloads/Coding/brittain-bench-economy --task economy
-node benchmark/grade.js /Downloads/Coding/brittain-bench-outbox --task outbox
+node benchmark/grade.js brittain-bench --task cart
+node benchmark/grade.js brittain-bench-feature --task feature
+node benchmark/grade.js brittain-bench-debug --task debug
+node benchmark/grade.js brittain-bench-economy --task economy
+node benchmark/grade.js brittain-bench-outbox --task outbox
 ```
 
 # To refresh git
 ```bash
-cd ~/Downloads/Coding/brittain-bench && git reset --hard -q bench-baseline && git clean -fdq
-cd ~/Downloads/Coding/brittain-bench-feature && git reset --hard -q bench-baseline && git clean -fdq
-cd ~/Downloads/Coding/brittain-bench-debug && git reset --hard -q bench-baseline && git clean -fdq
-cd ~/Downloads/Coding/brittain-bench-economy && git reset --hard -q bench-baseline && git clean -fdq
-cd ~/Downloads/Coding/brittain-bench-outbox && git reset --hard -q bench-baseline && git clean -fdq
+cd /Users/lukemclarenbrittain/brittain-bench && git reset --hard -q bench-baseline && git clean -fdq
+cd /Users/lukemclarenbrittain/brittain-bench-feature && git reset --hard -q bench-baseline && git clean -fdq
+cd /Users/lukemclarenbrittain/brittain-bench-debug && git reset --hard -q bench-baseline && git clean -fdq
+cd /Users/lukemclarenbrittain/brittain-bench-economy && git reset --hard -q bench-baseline && git clean -fdq
+cd /Users/lukemclarenbrittain/brittain-bench-outbox && git reset --hard -q bench-baseline && git clean -fdq
 ```

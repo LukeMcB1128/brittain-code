@@ -8,8 +8,24 @@ const { TASKS, getTask } = require('./tasks');
 
 const argv = process.argv.slice(2);
 function flag(name) { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] || '' : null; }
-const explicitDir = flag('--dir') || process.env.BENCH_DIR;
-let benchDir = path.resolve((explicitDir || path.join(os.homedir(), 'brittain-bench')).replace(/^~/, os.homedir()));
+function positionalDir() {
+  const valueFlags = new Set(['--dir', '--chat', '--task']);
+  for (let i = 0; i < argv.length; i++) {
+    if (valueFlags.has(argv[i])) { i++; continue; }
+    if (!argv[i].startsWith('-')) return argv[i];
+  }
+  return null;
+}
+function resolveBenchDir(value) {
+  const expanded = String(value).replace(/^~/, os.homedir());
+  if (path.isAbsolute(expanded)) return path.resolve(expanded);
+  const relative = path.resolve(expanded);
+  if (fs.existsSync(relative)) return relative;
+  const homeRelative = path.join(os.homedir(), expanded);
+  return fs.existsSync(homeRelative) ? homeRelative : relative;
+}
+const explicitDir = flag('--dir') || positionalDir() || process.env.BENCH_DIR;
+let benchDir = resolveBenchDir(explicitDir || path.join(os.homedir(), 'brittain-bench'));
 const chatsDir = path.join(os.homedir(), 'Library', 'Application Support', 'Brittain Code', 'chats');
 
 function readJson(file, fallback = null) {
@@ -64,6 +80,17 @@ const convo = raw.conversation || [];
 const manifest = readJson(path.join(benchDir, '.brittain-benchmark.json'), {});
 const taskId = flag('--task') || manifest.task || 'cart';
 const task = getTask(taskId);
+
+if (manifest.task && manifest.task !== taskId) {
+  console.error(`Task mismatch: --task ${taskId} does not match the ${manifest.task} fixture at ${benchDir}.`);
+  console.error('Pass the correct --dir, or omit --task and let the fixture manifest select it. No result was saved.');
+  process.exit(2);
+}
+if (raw.cwd && path.resolve(raw.cwd) !== benchDir) {
+  console.error(`Chat mismatch: chat ${raw.id || '(unknown)'} belongs to ${path.resolve(raw.cwd)}, not ${benchDir}.`);
+  console.error('Pass the matching --dir and chat. No result was saved.');
+  process.exit(2);
+}
 
 const READ_TOOLS = new Set(['read_file', 'get_file_lines', 'search_in_file', 'file_info', 'list_directory', 'find_files', 'search_files', 'analyze_file_structure', 'get_file_type', 'count_lines']);
 const MUTATE_TOOLS = new Set(['write_file', 'edit_file', 'edit_files', 'append_file', 'replace_in_file', 'delete_file', 'move_file', 'copy_file']);

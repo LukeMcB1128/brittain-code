@@ -40,6 +40,24 @@ test('benchmark suite contains the complete harder coding generation', () => {
   );
 });
 
+test('benchmark grader accepts a positional fixture and rejects task mismatches', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-benchmark-cli-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = path.join(root, 'cart');
+  const chat = path.join(root, 'chat.json');
+  cp.execFileSync(process.execPath, [path.join(__dirname, '..', 'benchmark', 'setup.js'), '--task', 'cart', '--dir', fixture, '--force']);
+  fs.writeFileSync(chat, JSON.stringify({ id: 'fixture-chat', cwd: fixture, model: 'test-model', conversation: [] }));
+
+  const accepted = cp.spawnSync(process.execPath, [path.join(__dirname, '..', 'benchmark', 'grade.js'), fixture, '--chat', chat, '--dry-run'], { encoding: 'utf8' });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.stdout, new RegExp(`Bench dir : ${fixture.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+
+  const rejected = cp.spawnSync(process.execPath, [path.join(__dirname, '..', 'benchmark', 'grade.js'), fixture, '--chat', chat, '--task', 'feature', '--dry-run'], { encoding: 'utf8' });
+  assert.equal(rejected.status, 2);
+  assert.match(rejected.stderr, /Task mismatch: --task feature does not match the cart fixture/);
+  assert.match(rejected.stderr, /No result was saved/);
+});
+
 test('benchmark report aggregates repetitions by configuration with median and pass rate', () => {
   const rows = [
     { schemaVersion: 2, configKey: 'same', task: 'cart', mode: 'solo', modelLabel: 'model-a', total: 80, fullPass: false, correctness: 45, reliability: 12, efficiency: 10, wallTimeMs: 3000, generatedTokens: 500, toolCalls: 10 },
