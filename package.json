@@ -8,7 +8,7 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test",
-    "dist": "electron-builder --mac dir",
+    "dist": "electron-builder --mac dmg zip",
     "deploy": "electron-builder --mac dir && rm -rf '/Applications/Brittain Code.app' && cp -R 'dist/mac-arm64/Brittain Code.app' /Applications/ && echo 'Deployed to /Applications'"
   },
   "build": {
@@ -29,7 +29,11 @@
     ],
     "mac": {
       "identity": null,
-      "target": ["dir", "dmg", "zip"],
+      "target": [
+        "dir",
+        "dmg",
+        "zip"
+      ],
       "icon": "build/icon.icns"
     }
   },
