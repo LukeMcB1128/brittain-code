@@ -114,7 +114,7 @@ async function reloadModels(preferred = '') {
   modelSelect.innerHTML = '';
   if (!res.ok) {
     currentModels = [];
-    addError(res.error);
+    renderOnboarding('unreachable', res.error);
     populateSettingsModelSelects();
     return currentModels;
   }
@@ -127,8 +127,81 @@ async function reloadModels(preferred = '') {
   }
   if (preferred && currentModels.includes(preferred)) modelSelect.value = preferred;
   populateSettingsModelSelects();
+  renderOnboarding(currentModels.length ? 'ok' : 'empty');
   return currentModels;
 }
+
+// ---------- onboarding overlay: unreachable endpoint / zero models installed ----------
+function renderOnboarding(state, detail) {
+  const overlay = $('onboarding-overlay');
+  const title = $('onboarding-title');
+  const body = $('onboarding-body');
+  const ollamaBtn = $('onboarding-ollama');
+
+  if (state === 'ok') {
+    overlay.classList.add('hidden');
+    return;
+  }
+
+  overlay.classList.remove('hidden');
+  ollamaBtn.classList.toggle('hidden', state !== 'unreachable');
+
+  if (state === 'unreachable') {
+    title.textContent = 'NO LOCAL MODEL SERVER FOUND';
+    body.innerHTML = '';
+    const p1 = document.createElement('p');
+    p1.textContent = detail || 'Brittain Code could not reach an Ollama-compatible endpoint.';
+    const p2 = document.createElement('p');
+    p2.textContent = 'Install Ollama, then make sure it is running:';
+    body.appendChild(p1);
+    body.appendChild(p2);
+    addCopyableCommand(body, 'ollama serve');
+    const p3 = document.createElement('p');
+    p3.textContent = 'Using a different local server (LM Studio, etc.)? Point Brittain Code at its address instead:';
+    body.appendChild(p3);
+  } else if (state === 'empty') {
+    title.textContent = 'NO MODELS INSTALLED YET';
+    body.innerHTML = '';
+    const p1 = document.createElement('p');
+    p1.textContent = 'Ollama is running, but no models are pulled. Any tool-calling model works — for example:';
+    body.appendChild(p1);
+    addCopyableCommand(body, 'ollama pull gpt-oss:20b');
+    const p2 = document.createElement('p');
+    p2.textContent = 'or, for a smaller/faster download:';
+    body.appendChild(p2);
+    addCopyableCommand(body, 'ollama pull qwen2.5-coder:7b');
+    const p3 = document.createElement('p');
+    p3.textContent = 'Browse more at ollama.com/library, then check again.';
+    body.appendChild(p3);
+  }
+}
+
+function addCopyableCommand(container, command) {
+  const code = document.createElement('code');
+  code.textContent = command;
+  code.title = 'Click to copy';
+  code.addEventListener('click', () => {
+    navigator.clipboard.writeText(command).catch(() => {});
+    const original = code.textContent;
+    code.textContent = 'copied!';
+    setTimeout(() => { code.textContent = original; }, 900);
+  });
+  container.appendChild(code);
+}
+
+$('onboarding-retry').addEventListener('click', async () => {
+  $('onboarding-retry').textContent = 'CHECKING…';
+  await reloadModels(defaultModelForMode(appMode));
+  applySessionDefaults();
+  $('onboarding-retry').textContent = 'CHECK AGAIN';
+});
+
+$('onboarding-settings').addEventListener('click', () => {
+  showSettings();
+});
+
+$('onboarding-ollama').addEventListener('click', () => window.api.openOllamaSite());
+
 
 function applySessionDefaults() {
   thinkToggle.checked = appSettings ? !!appSettings[appMode === 'chat' ? 'chatThink' : 'codeThink'] : localStorage.getItem('think') === '1';
@@ -1293,6 +1366,15 @@ $('settings-test-endpoint').addEventListener('click', async () => {
   const res = await window.api.settingsTestEndpoint($('setting-endpoint').value);
   status.classList.add(res.ok ? 'ok' : 'error');
   status.textContent = res.ok ? `Connected — ${res.modelCount} model${res.modelCount === 1 ? '' : 's'} found.` : res.error;
+});
+
+$('settings-open-mcp').addEventListener('click', async () => {
+  const status = $('settings-mcp-result');
+  status.className = 'setting-status';
+  status.textContent = 'Opening…';
+  const res = await window.api.mcpOpenConfig();
+  status.classList.add(res.ok ? 'ok' : 'error');
+  status.textContent = res.ok ? 'Revealed in Finder: ' + res.configPath : res.error;
 });
 
 $('settings-form').addEventListener('submit', async (event) => {

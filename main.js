@@ -1,7 +1,7 @@
 // Brittain Code — Electron main process.
 // Owns the agent loop: talks to Ollama, executes tools, streams results to the UI.
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -621,8 +621,8 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   const activeTools = chatMode
     ? (onlineResearch ? modeTools : null)
     : (onlineResearch ? modeTools : modeTools.filter((definition) => !NETWORK_TOOLS.has(definition.function.name)));
-  // external MCP tools ride along in code mode only (P1); chat mode stays lean
-  const mcpDefs = chatMode ? [] : mcp.toolDefs();
+  // external MCP tools go for all
+  const mcpDefs = mcp.toolDefs();
   const agentTools = activeTools ? activeTools.concat(mcpDefs) : activeTools;
   const activeToolNames = new Set((agentTools || []).map((definition) => definition.function.name));
   // report the window we actually run with, not the model's theoretical max
@@ -2119,8 +2119,40 @@ ipcMain.handle('usage:get', () => usage);
 ipcMain.handle('mcp:status', () => ({ servers: mcp.status(), configPath: mcp.configPath }));
 ipcMain.handle('mcp:toggle', (_e, name, on) => (mcp.setEnabled(name, on) ? { ok: true } : { ok: false, error: 'No MCP server named "' + name + '"' }));
 
+// Guarantees mcp.json exists (valid, parseable, self-documenting) then reveals
+// it in Finder — the config format has no comment syntax, so the "how to use
+// this" text lives in an ignored top-level key instead of a separate doc file.
+const MCP_CONFIG_TEMPLATE = {
+  _readme: [
+    'Brittain Code reads mcpServers below on startup — restart the app after editing.',
+    'Same shape as Claude Desktop\'s config, so existing configs can be pasted in directly.',
+    'Every tool from an MCP server always requires your approval, even with AUTO-APPROVE on.',
+    'Example (delete the leading underscore and fill in a real command to activate):',
+  ],
+  _example: {
+    filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/path/to/allow'] },
+  },
+  mcpServers: {},
+};
+
+ipcMain.handle('mcp:openConfig', () => {
+  try {
+    if (!fs.existsSync(mcp.configPath)) {
+      fs.mkdirSync(path.dirname(mcp.configPath), { recursive: true });
+      fs.writeFileSync(mcp.configPath, JSON.stringify(MCP_CONFIG_TEMPLATE, null, 2) + '\n', 'utf8');
+    }
+    shell.showItemInFolder(mcp.configPath);
+    return { ok: true, configPath: mcp.configPath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 // true when running from source (npm start) rather than the installed build
 ipcMain.handle('app:isDev', () => !app.isPackaged);
+
+// Hardcoded destination — never opens an arbitrary/user-supplied URL.
+ipcMain.handle('app:openOllamaSite', () => { shell.openExternal('https://ollama.com/download'); return { ok: true }; });
 ipcMain.handle('app:getVersion', () => require('./package.json').version);
 
 ipcMain.handle('settings:get', () => ({

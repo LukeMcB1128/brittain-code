@@ -22,7 +22,7 @@
     </label>
     <label class="toggle online-toggle" title="Opt in to external web search and page retrieval. Queries and URLs leave this Mac; every online call still asks for approval.">
       <input type="checkbox" id="online-research" />
-      <span>RESEARCH</span>
+      <span>ONLINE</span>
     </label>
     <label class="toggle code-only" title="When on, file writes and shell commands run without asking">
       <input type="checkbox" id="auto-approve" />
@@ -49,6 +49,18 @@
     <!-- Startup message overlay — lives outside #chat so chat.innerHTML wipes can't destroy it -->
     <div id="startup-message" class="hidden">
       <div id="startup-message-content"></div>
+    </div>
+    <!-- First-run / no-model onboarding overlay — outside #chat, above everything else -->
+    <div id="onboarding-overlay" class="hidden">
+      <div id="onboarding-box">
+        <div id="onboarding-title"></div>
+        <div id="onboarding-body"></div>
+        <div id="onboarding-actions">
+          <button id="onboarding-retry">CHECK AGAIN</button>
+          <button id="onboarding-settings">CHANGE ENDPOINT</button>
+          <button id="onboarding-ollama">OPEN OLLAMA.COM</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -155,6 +167,13 @@
           <label>Compact at <input id="setting-compact-threshold" type="number" min="50" max="90" step="5" />%</label>
           <label>Keep model loaded <select id="setting-keep-alive"><option value="0">Unload immediately</option><option value="5m">5 minutes</option><option value="30m">30 minutes</option><option value="-1">Keep loaded</option></select></label>
           <p class="setting-help">Context is always capped by the selected model's native limit.</p>
+        </section>
+
+        <section class="settings-section">
+          <h2>INTEGRATIONS (MCP)</h2>
+          <p class="setting-help">External tool servers, configured in a JSON file. Every MCP tool call always requires your approval.</p>
+          <button type="button" id="settings-open-mcp">OPEN MCP CONFIG</button>
+          <span id="settings-mcp-result" class="setting-status"></span>
         </section>
 
         <section class="settings-section">

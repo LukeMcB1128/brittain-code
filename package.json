@@ -29,7 +29,7 @@
     ],
     "mac": {
       "identity": null,
-      "target": "dir",
+      "target": ["dir", "dmg", "zip"],
       "icon": "build/icon.icns"
     }
   },

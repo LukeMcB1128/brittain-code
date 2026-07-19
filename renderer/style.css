@@ -955,6 +955,80 @@ button.mini:disabled {
   display: none;
 }
 
+/* ---------- onboarding overlay (unreachable endpoint / no models yet) ---------- */
+#onboarding-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+}
+
+#onboarding-overlay.hidden {
+  display: none;
+}
+
+#onboarding-box {
+  width: min(560px, 90%);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  padding: 28px 32px;
+}
+
+#onboarding-title {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  margin-bottom: 14px;
+}
+
+#onboarding-body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+#onboarding-body p {
+  margin: 0 0 12px 0;
+}
+
+#onboarding-body code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  margin: 6px 0 14px 0;
+  overflow-x: auto;
+  cursor: pointer;
+}
+
+#onboarding-body code:hover {
+  border-color: var(--accent);
+}
+
+#onboarding-body code::after {
+  content: " (click to copy)";
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+#onboarding-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+
+#onboarding-actions button.hidden {
+  display: none;
+}
+
 @media (max-width: 900px) {
   .settings-scroll { grid-template-columns: 1fr; }
   .settings-section.settings-wide { grid-column: auto; }
