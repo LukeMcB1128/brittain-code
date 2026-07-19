@@ -1189,7 +1189,7 @@ const codeStartupMessages = [
 
 const chatStartupMessages = [
   'What would you like to explore?',
-  'Chat locally, or enable Research to search the web',
+  'Chat locally, or enable Online to search the web',
   'Ask a question without choosing a folder',
   'Ready when you are',
   'Pondering...'
