@@ -1339,6 +1339,7 @@ const SLASH_HELP = [
   '/coder [name] — show or set the writable coding-worker model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
   '/usage — show how context and tokens have been spent across all agents',
+  '/mcp [on|off <server>] — external MCP tool servers: status, enable, disable',
   '/memory — view what the agent has remembered',
   '/export — save this chat as a markdown file',
   '/tools — list all available tools',
@@ -1513,6 +1514,20 @@ async function handleSlash(raw) {
       coderModel = match;
       localStorage.setItem('coderModel', match);
       return addInfo('Coder model set to ' + match);
+    }
+
+    case 'mcp': {
+      const st = await window.api.mcpStatus();
+      if (!arg) {
+        if (!st.servers.length) return addInfo('No MCP servers configured.\nAdd them to ' + st.configPath + ' (same format as Claude Desktop) and restart the app.');
+        const lines = st.servers.map((sv) =>
+          `${sv.enabled ? '●' : '○'} ${sv.name} — ${sv.status}, ${sv.tools} tool${sv.tools === 1 ? '' : 's'}${sv.error ? ' — ' + sv.error : ''}`);
+        return addInfo('MCP servers (● enabled / ○ disabled):\n' + lines.join('\n') + '\nEvery MCP call requires approval, even with AUTO-APPROVE on.\nConfig: ' + st.configPath);
+      }
+      const m = arg.match(/^(on|off)\s+(.+)$/);
+      if (!m) return addError('Usage: /mcp, /mcp on <server>, or /mcp off <server>');
+      const res = await window.api.mcpToggle(m[2].trim(), m[1] === 'on');
+      return res.ok ? addInfo(`MCP server "${m[2].trim()}" ${m[1] === 'on' ? 'enabled' : 'disabled'} for this session.`) : addError(res.error);
     }
 
     case 'usage': {

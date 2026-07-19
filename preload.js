@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('api', {
   gitCommit: (cwd, message) => ipcRenderer.invoke('git:commit', cwd, message),
   memoryGet: (cwd) => ipcRenderer.invoke('memory:get', cwd),
   usageGet: () => ipcRenderer.invoke('usage:get'),
+  mcpStatus: () => ipcRenderer.invoke('mcp:status'),
+  mcpToggle: (name, on) => ipcRenderer.invoke('mcp:toggle', name, on),
   isDev: () => ipcRenderer.invoke('app:isDev'),
   undoCheckpoint: (cwd) => ipcRenderer.invoke('checkpoint:undo', cwd),
   onCheckpointState: (cb) => ipcRenderer.on('checkpoint:state', (_e, d) => cb(d)),

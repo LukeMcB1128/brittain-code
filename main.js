@@ -5,6 +5,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { McpManager } = require('./mcp');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
@@ -231,13 +232,21 @@ for (const extra of ['/opt/homebrew/bin', '/usr/local/bin', process.env.HOME + '
   }
 }
 
+const mcp = new McpManager();
+
 app.whenReady().then(() => {
   settingsUserDataDir = app.getPath('userData');
   runtimeSettings = loadSettings(settingsUserDataDir);
   initTools(settingsUserDataDir);
+  // MCP servers connect in the background; status via /mcp
+  mcp.startAll(settingsUserDataDir).then((results) => {
+    for (const r of results) {
+      console.log(r.ok ? `MCP ${r.name}: connected (${r.tools} tools)` : `MCP ${r.name}: FAILED — ${r.error}`);
+    }
+  });
   createWindow();
 });
-app.on('before-quit', stopAllManagedProcesses);
+app.on('before-quit', () => { stopAllManagedProcesses(); mcp.stopAll(); });
 app.on('window-all-closed', () => app.quit());
 
 // ---------- ollama helpers ----------
@@ -612,7 +621,10 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   const activeTools = chatMode
     ? (onlineResearch ? modeTools : null)
     : (onlineResearch ? modeTools : modeTools.filter((definition) => !NETWORK_TOOLS.has(definition.function.name)));
-  const activeToolNames = new Set((activeTools || []).map((definition) => definition.function.name));
+  // external MCP tools ride along in code mode only (P1); chat mode stays lean
+  const mcpDefs = chatMode ? [] : mcp.toolDefs();
+  const agentTools = activeTools ? activeTools.concat(mcpDefs) : activeTools;
+  const activeToolNames = new Set((agentTools || []).map((definition) => definition.function.name));
   // report the window we actually run with, not the model's theoretical max
   const contextLength = await effectiveContext(model);
   // For models that support thinking, always send an explicit true/false —
@@ -628,7 +640,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
 
   {
     for (let step = 0; step < maxAgentSteps; step++) {
-      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink, false, contextLength, activeTools, { toolCallRetries: 0 }, temperature);
+      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink, false, contextLength, agentTools, { toolCallRetries: 0 }, temperature);
 
       // rescue tool calls the model emitted as raw text (qwen3-coder quirk)
       if (!toolCalls.length) {
@@ -753,6 +765,12 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
             ? await safeExecute(name, args, cwd)
             : 'The user denied this destructive command. Do not retry it or any variation of it unless the user explicitly asks.';
           win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(destructive command denied by user)', denied: !approved });
+        } else if (mcp.owns(name)) {
+          const approved = await requestApproval({ name, args, mcp: true });
+          result = approved
+            ? await mcp.call(name, args)
+            : 'The user denied this external MCP tool call. Do not retry it unless the user explicitly asks.';
+          win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(MCP call denied by user)', denied: !approved });
         } else if (isSensitiveToolCall(name, args)) {
           const approved = await requestApproval({ name, args, sensitive: true });
           result = approved
@@ -2097,6 +2115,9 @@ ipcMain.handle('chat:reset', () => {
 });
 
 ipcMain.handle('usage:get', () => usage);
+
+ipcMain.handle('mcp:status', () => ({ servers: mcp.status(), configPath: mcp.configPath }));
+ipcMain.handle('mcp:toggle', (_e, name, on) => (mcp.setEnabled(name, on) ? { ok: true } : { ok: false, error: 'No MCP server named "' + name + '"' }));
 
 // true when running from source (npm start) rather than the installed build
 ipcMain.handle('app:isDev', () => !app.isPackaged);
