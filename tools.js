@@ -216,9 +216,34 @@ const DESTRUCTIVE_COMMAND_PATTERNS = [
   /\b(?:mv|cp|rm|rmdir|touch|tee)\b[^|;&]*\s(?:\/(?!tmp\/)|~\/(?!$))/, // mutate absolute/home paths outside the project
 ];
 
+// Windows-native equivalents — cmd.exe and PowerShell spell all of the above
+// differently, and a classifier tuned only for Unix syntax would give a false
+// sense of safety on win32 (the one platform where run_command uses these).
+const DESTRUCTIVE_COMMAND_PATTERNS_WIN = [
+  /\bdel\b[^&|]*\/[sf]/i,                          // del /s or /f (recursive/force)
+  /\bRemove-Item\b[^&|]*-Recurse/i,
+  /\brd\b[^&|]*\/s/i,                                // rmdir /s
+  /\bFormat-Volume\b|\bformat\b\s+[a-z]:/i,
+  /\bDiskpart\b/i,
+  /\bStop-Computer\b|\bRestart-Computer\b|\bshutdown\b\s+\/[rs]/i,
+  /\bStop-Process\b[^&|]*-Force|\btaskkill\b[^&|]*\/f/i,
+  /\bSet-ExecutionPolicy\b/i,
+  /\bnet\s+user\b|\bnet\s+localgroup\b/i,
+  /\bicacls\b[^&|]*\/grant/i,
+  /\bReg\s+(delete|add)\b/i,
+  /\bSchtasks\b[^&|]*\/(create|delete)/i,
+  /(?:iwr|Invoke-WebRequest|curl)\b[^&|]*\|\s*(?:iex|Invoke-Expression)/i, // pipe a download into execution
+  /\bgit\s+push\b.*(--force|-f\b)/i,
+  /\bgit\s+push\b/i,
+  /\bgit\s+reset\s+--hard\b/i,
+  /\bgit\s+clean\b/i,
+  /\bnpm\s+(publish|unpublish)\b/i,
+];
+
 function isDestructiveCommand(command) {
   const c = String(command || '');
-  return DESTRUCTIVE_COMMAND_PATTERNS.some((re) => re.test(c));
+  const patterns = process.platform === 'win32' ? DESTRUCTIVE_COMMAND_PATTERNS_WIN : DESTRUCTIVE_COMMAND_PATTERNS;
+  return patterns.some((re) => re.test(c));
 }
 
 // ---------- protected paths (Tier 2) ----------
@@ -1726,8 +1751,18 @@ async function executeTool(name, args, cwd) {
     case 'check_port_usage': {
       const port = parseInt(args.port, 10);
       if (!Number.isInteger(port) || port < 1 || port > 65535) return `Error: invalid port "${args.port}"`;
+      // lsof doesn't exist on Windows; netstat -ano is the win32 equivalent
+      // (it lists PIDs, not process names, but that's enough to see if the
+      // port is in use, and matches the level of detail lsof gives here).
+      const [cmd, cmdArgs] = process.platform === 'win32'
+        ? ['netstat', ['-ano']]
+        : ['lsof', ['-i', ':' + port, '-sTCP:LISTEN']];
       return new Promise((resolve) => {
-        execFile('lsof', ['-i', ':' + port, '-sTCP:LISTEN'], { cwd, timeout: 10_000 }, (err, stdout, stderr) => {
+        execFile(cmd, cmdArgs, { cwd, timeout: 10_000 }, (err, stdout, stderr) => {
+          if (process.platform === 'win32') {
+            const lines = stdout.split('\n').filter((l) => l.includes(`:${port} `) || l.includes(`:${port}\r`));
+            return resolve(lines.length ? truncate(lines.join('\n')) : 'Port is not in use.');
+          }
           if (err && !stdout && !stderr) return resolve('Port is not in use.');
           resolve(truncate(stdout || stderr || '(no output)'));
         });

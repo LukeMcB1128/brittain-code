@@ -226,9 +226,14 @@ function createWindow() {
 // npm, and other Homebrew tools are invisible to run_command (seen live in a
 // benchmark: "node: command not found", after which the model fabricated its
 // results). Make the packaged app's PATH match a normal terminal's.
-for (const extra of ['/opt/homebrew/bin', '/usr/local/bin', process.env.HOME + '/.local/bin']) {
-  if (!(process.env.PATH || '').split(':').includes(extra)) {
-    process.env.PATH = extra + ':' + (process.env.PATH || '');
+// Windows apps launched from Explorer inherit the full user PATH already
+// (no launchd-style stripping), and the ':' separator / $HOME below are
+// wrong for win32 regardless — skip entirely there.
+if (process.platform !== 'win32') {
+  for (const extra of ['/opt/homebrew/bin', '/usr/local/bin', process.env.HOME + '/.local/bin']) {
+    if (!(process.env.PATH || '').split(':').includes(extra)) {
+      process.env.PATH = extra + ':' + (process.env.PATH || '');
+    }
   }
 }
 

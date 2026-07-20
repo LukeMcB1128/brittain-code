@@ -690,7 +690,7 @@ async function send() {
   if ((!text && !attachmentCount()) || busy) return;
   if (text.startsWith('/')) {
     input.value = '';
-    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate')) {
+    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate') || text.includes('/mcp')) {
       hideStartupMessage();
     }
     return handleSlash(text);

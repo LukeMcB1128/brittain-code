@@ -35,6 +35,17 @@
         "zip"
       ],
       "icon": "build/icon.icns"
+    },
+    "afterSign": "scripts/afterSign.js",
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon-1024.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     }
   },
   "devDependencies": {
