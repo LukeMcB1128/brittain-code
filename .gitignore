@@ -4,3 +4,4 @@ dist/
 RESEARCH_LOG.md
 results.json
 report.html
+.playwright-mcp/
