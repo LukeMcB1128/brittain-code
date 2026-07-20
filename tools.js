@@ -2380,4 +2380,5 @@ module.exports = {
   legacyMemoryPath,
   readLegacyMemory,
   stopAllManagedProcesses,
+  SELF_TALK,
 };

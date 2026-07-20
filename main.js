@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { McpManager } = require('./mcp');
-const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses } = require('./tools');
+const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
@@ -123,6 +123,7 @@ function freshUsage() {
       deniedTools: 0,
       recoveredToolCalls: 0,
       toolCallRetries: 0,
+      psychosisDetections: 0,
       compactions: 0,
       loopIterations: 0,
       coderLoopIterations: 0,
@@ -439,6 +440,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
   let thinking = '';
   const toolCalls = [];
   let stats = null;
+  const repetitionState = { value: 0 };
 
   for (;;) {
     const { done, value } = await reader.read();
@@ -455,10 +457,20 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
       if (msg.thinking) {
         thinking += msg.thinking;
         if (!silent) win.webContents.send('stream:thinking', msg.thinking);
+        const thinkHit = scanThinkingForPsychosis(thinking);
+        if (thinkHit) {
+          try { await reader.cancel(); } catch {}
+          throw new PsychosisDetectedError(thinkHit.reason, thinkHit.excerpt);
+        }
       }
       if (msg.content) {
         content += msg.content;
         if (!silent) win.webContents.send('stream:token', msg.content);
+        const hit = scanContentForPsychosis(content, repetitionState);
+        if (hit) {
+          try { await reader.cancel(); } catch {}
+          throw new PsychosisDetectedError(hit.reason, hit.excerpt);
+        }
       }
       if (msg.tool_calls) toolCalls.push(...msg.tool_calls);
       if (chunk.done) {
@@ -515,6 +527,67 @@ function parseRawToolCalls(content) {
     .replace(/<\/?(tool_call|function|parameter)[^>]*>/g, '')
     .trim();
   return { calls, cleaned };
+}
+
+// ---------- live psychosis detector ----------
+// Catches the exact failure signatures from fablereview.md WHILE the model is
+// still generating, instead of discovering them after the fact in a written
+// file. On a hit, the in-flight generation is cancelled immediately; the
+// caller (runAgentTurn) gets one chance to recover via compaction — the same
+// "sanity reset" this session proved works after the fact — before giving up
+// honestly. Runs inside streamChat itself, so every caller (main agent,
+// subagent, verifier, coder) is protected with no per-call-site changes.
+class PsychosisDetectedError extends Error {
+  constructor(reason, excerpt) {
+    super(reason);
+    this.name = 'PsychosisDetectedError';
+    this.excerpt = excerpt;
+  }
+}
+
+const GLITCH_TOKEN_RE = /<0x[0-9A-Fa-f]{2}>|\uFFFD/;
+const GLITCH_FULLWIDTH_RE = /[A-Za-z0-9_$][\uFF0E]|[\uFF0E][A-Za-z0-9_$(]/;
+
+// Cheap, bounded repetition scan: only runs every 400 new chars, only over the
+// tail, and strides through it rather than checking every offset — a
+// degenerate model repeats large chunks verbatim, so a stride of 8 still
+// reliably lands inside a repeat without costing O(n) per character.
+function findRepeatedSubstring(tail, len = 40, minRepeats = 3) {
+  if (tail.length < len * minRepeats) return null;
+  const seen = new Map();
+  for (let i = 0; i + len <= tail.length; i += 8) {
+    const chunk = tail.slice(i, i + len);
+    if (/^\s*$/.test(chunk)) continue;
+    const count = (seen.get(chunk) || 0) + 1;
+    seen.set(chunk, count);
+    if (count >= minRepeats) return chunk;
+  }
+  return null;
+}
+
+function scanContentForPsychosis(content, repetitionState) {
+  const tail = content.slice(-600);
+  if (GLITCH_TOKEN_RE.test(tail)) return { reason: 'raw byte-fallback/replacement token in output', excerpt: tail.slice(-120) };
+  if (GLITCH_FULLWIDTH_RE.test(tail)) return { reason: 'full-width punctuation where ASCII code was expected', excerpt: tail.slice(-120) };
+  if (SELF_TALK.test(tail)) return { reason: 'conversational self-talk leaking into generated content', excerpt: tail.slice(-160) };
+  if (content.length - repetitionState.value >= 400) {
+    repetitionState.value = content.length;
+    const repeat = findRepeatedSubstring(tail);
+    if (repeat) return { reason: 'repetition loop detected', excerpt: repeat.slice(0, 80) };
+  }
+  return null;
+}
+
+// Reasoning traces legitimately say things like "Wait, let me reconsider" —
+// that's normal chain-of-thought, not psychosis. Only glitch tokens (mojibake
+// is mojibake regardless of channel) are checked in `thinking`; self-talk and
+// repetition are scoped to the final answer, matching how SELF_TALK is tuned
+// (a comment-prefixed phrase leaking into code, not prose reasoning aloud).
+function scanThinkingForPsychosis(thinking) {
+  const tail = thinking.slice(-300);
+  if (GLITCH_TOKEN_RE.test(tail)) return { reason: 'raw byte-fallback/replacement token in reasoning', excerpt: tail.slice(-120) };
+  if (GLITCH_FULLWIDTH_RE.test(tail)) return { reason: 'full-width punctuation in reasoning where ASCII was expected', excerpt: tail.slice(-120) };
+  return null;
 }
 
 // ---------- agent loop ----------
@@ -643,9 +716,31 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   const maxAgentSteps = runtimeSettings.maxAgentSteps || MAX_AGENT_STEPS;
   const temperature = chatMode ? runtimeSettings.chatTemperature : runtimeSettings.codeTemperature;
 
+  let psychosisRetried = false;
   {
     for (let step = 0; step < maxAgentSteps; step++) {
-      let { content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink, false, contextLength, agentTools, { toolCallRetries: 0 }, temperature);
+      let content, thinking, toolCalls, stats;
+      try {
+        ({ content, thinking, toolCalls, stats } = await streamChat(model, messages(), currentAbort.signal, useThink, false, contextLength, agentTools, { toolCallRetries: 0 }, temperature));
+      } catch (err) {
+        if (err.name !== 'PsychosisDetectedError') throw err;
+        usage.metrics.psychosisDetections = (usage.metrics.psychosisDetections || 0) + 1;
+        win.webContents.send('stream:info', `⚠ LIVE GUARD: ${err.message} — excerpt: "${err.excerpt}"\nGeneration stopped immediately.`);
+        if (psychosisRetried) {
+          win.webContents.send('stream:info', 'Detected again after recovery — stopping this turn. Consider switching models or starting a new session.');
+          break;
+        }
+        psychosisRetried = true;
+        win.webContents.send('stream:state', 'auto-compacting (recovering)…');
+        const c = await compactConversation(model);
+        if (!c.ok) {
+          win.webContents.send('stream:info', 'Recovery compact failed (' + c.error + ') — stopping this turn.');
+          break;
+        }
+        win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+        win.webContents.send('stream:info', 'Context compacted — retrying this turn once with a clean slate.');
+        continue;
+      }
 
       // rescue tool calls the model emitted as raw text (qwen3-coder quirk)
       if (!toolCalls.length) {
@@ -2153,8 +2248,101 @@ ipcMain.handle('mcp:openConfig', () => {
   }
 });
 
+// ---------- benchmark-informed model router ----------
+// Dev-only: reads the local benchmark harness's own results.json (gitignored,
+// never bundled into a packaged build — benchmarking is a source-tree
+// workflow, not a shipped feature). Missing file is a normal, expected state,
+// not an error: it just means no benchmarks have been run yet.
+function median(nums) {
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function readBenchResults() {
+  try {
+    const raw = fs.readFileSync(path.join(__dirname, 'benchmark', 'results.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+ipcMain.handle('bench:query', (_e, taskFilter) => {
+  const entries = readBenchResults();
+  if (!entries.length) return { ok: true, available: false, tasks: [], rows: [] };
+
+  const tasks = [...new Set(entries.map((e) => e.task).filter(Boolean))].sort();
+  const filtered = taskFilter ? entries.filter((e) => e.task === taskFilter) : entries;
+
+  // group by (task, model) — median score is far more robust than any single
+  // run, given how much variance one glitch-token stumble can introduce
+  const groups = new Map();
+  for (const e of filtered) {
+    if (typeof e.total !== 'number' || !e.model) continue;
+    const key = e.task + ' ' + e.model;
+    if (!groups.has(key)) groups.set(key, { task: e.task, model: e.model, mode: e.mode, scores: [] });
+    groups.get(key).scores.push(e.total);
+  }
+
+  const rows = [...groups.values()]
+    .map((g) => ({ task: g.task, model: g.model, mode: g.mode, runs: g.scores.length, median: median(g.scores) }))
+    .sort((a, b) => b.median - a.median || b.runs - a.runs);
+
+  return { ok: true, available: true, tasks, rows };
+});
+
 // true when running from source (npm start) rather than the installed build
 ipcMain.handle('app:isDev', () => !app.isPackaged);
+// ---------- context inspector ----------
+// Reconstructs exactly what the NEXT request would send — the system prompt
+// plus every message after image-eviction — so "what did the model actually
+// see?" (the root cause behind three separate bugs this project has hit) is
+// a ten-second glance instead of an hour of forensics. Read-only: never calls
+// the model.
+ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch }) => {
+  try {
+    const chatMode = mode === 'chat';
+    const prompt = chatMode ? chatSystemPrompt(onlineResearch) : systemPrompt(cwd, model, onlineResearch);
+    const ready = modelReadyMessages(conversation);
+    const contextLength = await effectiveContext(model);
+
+    const rows = ready.map((msg, i) => {
+      const original = conversation[i];
+      const flags = [];
+      if (original && original.images?.length && !msg.images?.length) flags.push('images evicted');
+      if (typeof msg.content === 'string' && msg.content.includes('[an attached image was removed')) {
+        if (!flags.includes('images evicted')) flags.push('images evicted');
+      }
+      if (msg.role === 'tool' && String(msg.content || '').length > 1500) flags.push('large tool output');
+      return {
+        role: msg.role,
+        toolName: msg.tool_name || null,
+        tokens: estimateTokens(msg),
+        preview: String(msg.content || '').slice(0, 140),
+        flags,
+      };
+    });
+
+    const systemTokens = estimateTokens({ role: 'system', content: prompt });
+    const totalTokens = systemTokens + rows.reduce((sum, r) => sum + r.tokens, 0);
+
+    return {
+      ok: true,
+      systemPrompt: prompt,
+      systemTokens,
+      rows,
+      totalTokens,
+      contextLength,
+      percentUsed: contextLength ? Math.round((totalTokens / contextLength) * 100) : 0,
+      messageCount: ready.length,
+    };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
 
 // Hardcoded destination — never opens an arbitrary/user-supplied URL.
 ipcMain.handle('app:openOllamaSite', () => { shell.openExternal('https://ollama.com/download'); return { ok: true }; });

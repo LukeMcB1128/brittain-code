@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('api', {
   mcpStatus: () => ipcRenderer.invoke('mcp:status'),
   mcpToggle: (name, on) => ipcRenderer.invoke('mcp:toggle', name, on),
   mcpOpenConfig: () => ipcRenderer.invoke('mcp:openConfig'),
+  benchQuery: (task) => ipcRenderer.invoke('bench:query', task),
+  contextInspect: (payload) => ipcRenderer.invoke('context:inspect', payload),
   isDev: () => ipcRenderer.invoke('app:isDev'),
   openOllamaSite: () => ipcRenderer.invoke('app:openOllamaSite'),
   undoCheckpoint: (cwd) => ipcRenderer.invoke('checkpoint:undo', cwd),

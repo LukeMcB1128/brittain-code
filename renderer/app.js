@@ -1422,6 +1422,8 @@ const SLASH_HELP = [
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
   '/usage — show how context and tokens have been spent across all agents',
   '/mcp [on|off <server>] — external MCP tool servers: status, enable, disable',
+  '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
+  '/best [task] [use] — rank installed models by local benchmark score for a task; "use" switches to the top result',
   '/memory — view what the agent has remembered',
   '/export — save this chat as a markdown file',
   '/tools — list all available tools',
@@ -1610,6 +1612,52 @@ async function handleSlash(raw) {
       if (!m) return addError('Usage: /mcp, /mcp on <server>, or /mcp off <server>');
       const res = await window.api.mcpToggle(m[2].trim(), m[1] === 'on');
       return res.ok ? addInfo(`MCP server "${m[2].trim()}" ${m[1] === 'on' ? 'enabled' : 'disabled'} for this session.`) : addError(res.error);
+    }
+
+    case 'context': {
+      const res = await window.api.contextInspect({ model: modelSelect.value, cwd, mode: appMode, onlineResearch: onlineResearchToggle.checked });
+      if (!res.ok) return addError(res.error);
+      const lines = [
+        `SYSTEM PROMPT — ${res.systemTokens.toLocaleString()} tok`,
+        '',
+        `${res.messageCount} message(s) in conversation:`,
+      ];
+      res.rows.forEach((r, i) => {
+        const label = r.toolName ? `${r.role} [${r.toolName}]` : r.role;
+        const flagStr = r.flags.length ? `  ⚠ ${r.flags.join(', ')}` : '';
+        lines.push(`${String(i + 1).padStart(3)}. ${label.padEnd(18)} ~${String(r.tokens).padStart(6)} tok  "${r.preview}"${flagStr}`);
+      });
+      lines.push('', `TOTAL: ~${res.totalTokens.toLocaleString()} / ${res.contextLength.toLocaleString()} tok (${res.percentUsed}% of window)`);
+      return showOverlay('CONTEXT — what will actually be sent', lines.join('\n'));
+    }
+
+    case 'best': {
+      const parts = arg.split(/\s+/).filter(Boolean);
+      const useIt = parts[parts.length - 1] === 'use';
+      if (useIt) parts.pop();
+      const task = parts.join(' ') || '';
+      const res = await window.api.benchQuery(task || undefined);
+      if (!res.ok) return addError(res.error);
+      if (!res.available) return addInfo('No local benchmark results found yet (benchmark/results.json is dev-only and gitignored — run the harness in benchmark/ first).');
+      if (!task) {
+        if (!res.rows.length) return addInfo('No scored runs yet.');
+        const byTask = new Map();
+        for (const r of res.rows) if (!byTask.has(r.task)) byTask.set(r.task, r); // rows are pre-sorted best-first
+        const lines = [...byTask.values()].map((r) => `${r.task.padEnd(12)} best: ${r.model} (median ${r.median}, ${r.runs} run${r.runs === 1 ? '' : 's'})`);
+        return showOverlay('BENCHMARK LEADERBOARD', 'Tasks: ' + res.tasks.join(', ') + '\n\n' + lines.join('\n') + '\n\nUse /best <task> for the full ranking, or /best <task> use to switch models.');
+      }
+      const rows = res.rows.filter((r) => r.task === task);
+      if (!rows.length) return addError(`No results for task "${task}". Known tasks: ${res.tasks.join(', ') || '(none)'}`);
+      if (useIt) {
+        const top = rows[0];
+        if (!currentModels.includes(top.model)) return addError(`Top model "${top.model}" for "${task}" isn't installed here. Ranking:\n` + rows.map((r) => `${r.model} — median ${r.median}`).join('\n'));
+        modelSelect.value = top.model;
+        localStorage.setItem('model', top.model);
+        localStorage.setItem(`model:${appMode}`, top.model);
+        return addInfo(`Switched to ${top.model} — top scorer for "${task}" (median ${top.median} over ${top.runs} run${top.runs === 1 ? '' : 's'}).`);
+      }
+      const lines = rows.map((r, i) => `${i + 1}. ${r.model.padEnd(24)} median ${String(r.median).padStart(3)}  (${r.runs} run${r.runs === 1 ? '' : 's'}, ${r.mode})`);
+      return showOverlay(`BENCHMARK — ${task}`, lines.join('\n') + '\n\n/best ' + task + ' use — switch to the top model');
     }
 
     case 'usage': {
