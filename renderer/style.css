@@ -648,28 +648,6 @@ footer {
   background: var(--bg-panel);
 }
 
-#composer-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 8px 14px 0;
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--text-dim);
-}
-
-#composer-mode {
-  color: var(--accent);
-  font-weight: 700;
-  letter-spacing: 1px;
-}
-
-#composer-context {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 #input-row { display: flex; gap: 8px; padding: 10px 12px 6px; }
 
 #input {

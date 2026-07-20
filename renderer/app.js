@@ -240,11 +240,7 @@ function setAppMode(mode, persist = true, refreshHistory = true) {
   chatModeBtn.classList.toggle('active', appMode === 'chat');
   codeModeBtn.setAttribute('aria-pressed', appMode === 'code' ? 'true' : 'false');
   chatModeBtn.setAttribute('aria-pressed', appMode === 'chat' ? 'true' : 'false');
-  $('composer-mode').textContent = appMode.toUpperCase();
   $('sidebar-head').textContent = appMode === 'chat' ? 'CHAT HISTORY' : 'CODE HISTORY';
-  $('composer-context').textContent = appMode === 'chat'
-    ? 'No folder access. Enable RESEARCH when you want to search the web.'
-    : 'Project tools are restricted to the selected directory.';
   input.placeholder = appMode === 'chat'
     ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
     : 'Describe a task... (Enter to send, Shift+Enter for newline)';
@@ -1417,7 +1413,7 @@ const SLASH_HELP = [
   '/graph — show a visual tree of the git commit history',
   '/loop [--coder] [n] <goal> — repeat until verified; --coder delegates planned implementation and repairs to the selected coder model',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
-  '/model <for name> — switch model (partial match ok)',
+  '/model <name> — switch model (partial match ok)',
   '/coder [name] — show or set the writable coding-worker model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
   '/usage — show how context and tokens have been spent across all agents',
@@ -1435,6 +1431,8 @@ const CHAT_SLASH_HELP = [
   '/compact — summarize the conversation to free up context',
   '/model <name> — switch model (partial match ok)',
   '/usage — show context and token usage',
+  '/mcp [on|off <server>] - external MCP tool servers: status, enable, disable',
+  '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
   '/export — save this chat as a markdown file',
   '/tools — list tools available to the app',
 ].join('\n');
