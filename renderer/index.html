@@ -167,9 +167,21 @@
 
         <section class="settings-section">
           <h2>INTEGRATIONS (MCP)</h2>
-          <p class="setting-help">External tool servers, configured in a JSON file. Every MCP tool call always requires your approval.</p>
-          <button type="button" id="settings-open-mcp">OPEN MCP CONFIG</button>
-          <span id="settings-mcp-result" class="setting-status"></span>
+          <p class="setting-help">Connect external tool servers (browsers, databases, APIs) over the Model Context Protocol. Servers are defined in a JSON config file; restart the app after editing it.</p>
+          <div class="mcp-config-row">
+            <button type="button" id="settings-open-mcp">OPEN MCP CONFIG</button>
+            <span id="settings-mcp-result" class="setting-status"></span>
+          </div>
+
+          <div class="mcp-danger">
+            <label class="check-row mcp-danger-toggle">
+              <input id="setting-mcp-auto-approve" type="checkbox" />
+              <span>Auto-approve all MCP tool calls</span>
+            </label>
+            <p class="mcp-danger-note">
+              <strong>⚠ Trust warning.</strong> MCP servers are third-party code that runs on your machine and can read files, reach the network, or take actions outside this app. By default every MCP call waits for your approval — even when AUTO-APPROVE is on — so you can inspect each one. Turning this on removes that check and lets any connected server act automatically. Only enable it for servers you fully trust and have configured yourself.
+            </p>
+          </div>
         </section>
 
         <section class="settings-section">

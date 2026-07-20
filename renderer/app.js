@@ -1308,6 +1308,7 @@ function fillSettingsForm(settings) {
   $('setting-auto-approve').checked = !!settings.autoApprove;
   $('setting-auto-branch').checked = !!settings.autoBranch;
   $('setting-review-mode').checked = !!settings.reviewMode;
+  $('setting-mcp-auto-approve').checked = !!settings.mcpAutoApprove;
   $('setting-max-agent-steps').value = settings.maxAgentSteps;
   $('setting-loop-iterations').value = settings.defaultLoopIterations;
   $('setting-coder-context').value = settings.coderContextCap;
@@ -1338,6 +1339,7 @@ function settingsFromForm() {
     autoApprove: $('setting-auto-approve').checked,
     autoBranch: $('setting-auto-branch').checked,
     reviewMode: $('setting-review-mode').checked,
+    mcpAutoApprove: $('setting-mcp-auto-approve').checked,
     maxAgentSteps: Number($('setting-max-agent-steps').value),
     defaultLoopIterations: Number($('setting-loop-iterations').value),
     coderContextCap: Number($('setting-coder-context').value),
@@ -1604,7 +1606,7 @@ async function handleSlash(raw) {
         if (!st.servers.length) return addInfo('No MCP servers configured.\nAdd them to ' + st.configPath + ' (same format as Claude Desktop) and restart the app.');
         const lines = st.servers.map((sv) =>
           `${sv.enabled ? '●' : '○'} ${sv.name} — ${sv.status}, ${sv.tools} tool${sv.tools === 1 ? '' : 's'}${sv.error ? ' — ' + sv.error : ''}`);
-        return addInfo('MCP servers (● enabled / ○ disabled):\n' + lines.join('\n') + '\nEvery MCP call requires approval, even with AUTO-APPROVE on.\nConfig: ' + st.configPath);
+        return addInfo('MCP servers (● enabled / ○ disabled):\n' + lines.join('\n') + '\nMCP calls require approval unless "Auto-approve all MCP tool calls" is enabled in Settings.\nConfig: ' + st.configPath);
       }
       const m = arg.match(/^(on|off)\s+(.+)$/);
       if (!m) return addError('Usage: /mcp, /mcp on <server>, or /mcp off <server>');

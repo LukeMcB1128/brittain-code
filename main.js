@@ -866,10 +866,18 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
             : 'The user denied this destructive command. Do not retry it or any variation of it unless the user explicitly asks.';
           win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(destructive command denied by user)', denied: !approved });
         } else if (mcp.owns(name)) {
-          const approved = await requestApproval({ name, args, mcp: true });
-          result = approved
-            ? await mcp.call(name, args)
-            : 'The user denied this external MCP tool call. Do not retry it unless the user explicitly asks.';
+          // MCP tools are third-party and untrusted, so they normally require
+          // approval even under the code-mode AUTO-APPROVE. The dedicated
+          // mcpAutoApprove setting is the ONLY thing that waives that prompt —
+          // opt-in, off by default, and gated behind a disclaimer in Settings.
+          const autoApproved = !!runtimeSettings.mcpAutoApprove;
+          const approved = autoApproved || await requestApproval({ name, args, mcp: true });
+          if (approved) {
+            const callResult = await mcp.call(name, args);
+            result = autoApproved ? '[MCP auto-approved] ' + callResult : callResult;
+          } else {
+            result = 'The user denied this external MCP tool call. Do not retry it unless the user explicitly asks.';
+          }
           win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(MCP call denied by user)', denied: !approved });
         } else if (isSensitiveToolCall(name, args)) {
           const approved = await requestApproval({ name, args, sensitive: true });
