@@ -1589,17 +1589,55 @@ function coderSystemPrompt(cwd) {
     'Preserve pre-existing user changes. Do not commit, revert, or rewrite unrelated code.',
     'Use edit_file/edit_files for existing files and write_file only for new files or files you have fully read.',
     'Use run_project_check without a check name first to discover verification for package, CMake, Cargo, Go, Python, or Make projects, then run the most relevant discovered check. Never claim a check passed unless its tool result proves it.',
+    'Work in one bounded pass. After you have made a useful change or run the relevant check, stop broad exploration and return your concise report. If a PREVIOUS ATTEMPT packet is provided, treat it as the handoff from the prior coder: do not re-list or re-read already inspected files unless the verifier feedback or current task requires it.',
     'When finished, return a concise report listing changed files, checks run, and any unresolved issue.',
     scopedProjectContext(cwd),
   ].filter(Boolean).join('\n');
 }
 
-async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFeedback = '') {
+function buildCoderHandoff(coderResult, verifierFeedback = '') {
+  if (!coderResult) return null;
+  const evidence = Array.isArray(coderResult.evidence) ? coderResult.evidence : [];
+  const unique = (items, cap) => [...new Set(items.filter(Boolean))].slice(0, cap);
+  const changedPaths = unique(evidence
+    .filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name))
+    .flatMap(evidencePaths), 30);
+  const inspectedPaths = unique(evidence
+    .filter((entry) => ['read_file', 'read_git_diff', 'list_directory', 'analyze_file_structure'].includes(entry.name))
+    .flatMap((entry) => [entry.args?.path]), 30);
+  const checks = evidence
+    .filter((entry) => entry.name === 'run_project_check' || entry.name === 'run_command')
+    .slice(-8)
+    .map((entry) => ({
+      command: String(entry.args?.check || entry.args?.command || entry.name).slice(0, 240),
+      outcome: String(entry.result || '').slice(0, 900),
+    }));
+  return {
+    report: String(coderResult.report || '').slice(-3500),
+    changed_paths: changedPaths,
+    already_inspected: inspectedPaths,
+    checks,
+    verifier_feedback: String(verifierFeedback || '').slice(0, 3000),
+  };
+}
+
+async function forceCoderWrapUp(coderModel, msgs, signal, think, numCtx) {
+  const wrapMessages = [...msgs, {
+    role: 'user',
+    content: 'CONTEXT CHECKPOINT: Stop calling tools now. Write the concise evidence-based handoff report: files changed, checks and exact outcomes, unresolved work, and what the next coder must do. Do not continue exploring.',
+  }];
+  const { content, stats } = await streamChat(coderModel, wrapMessages, signal, think, true, numCtx, null);
+  recordUsage('coder', stats);
+  return content || '(coder reached the context checkpoint without a final handoff report)';
+}
+
+async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFeedback = '', priorAttempt = null) {
   const numCtx = await effectiveContext(coderModel, runtimeSettings.coderContextCap || CODER_CTX_CAP);
   const useThink = (await supportsThinking(coderModel)) ? !!think : undefined;
   const taskPacket = {
     ...task,
     ...(repairFeedback ? { verifier_feedback: repairFeedback } : {}),
+    ...(priorAttempt ? { previous_attempt: priorAttempt } : {}),
   };
   const msgs = [
     { role: 'system', content: coderSystemPrompt(cwd) },
@@ -1608,7 +1646,6 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
   const evidence = [];
   let finalContent = '';
   let steps = 0;
-  let compactions = 0;
   const label = repairFeedback ? `${task.title} (repair)` : task.title;
   win.webContents.send('stream:subagent', { phase: 'start', role: 'CODER', task: label, model: coderModel });
   usage.coder.runs += 1;
@@ -1646,20 +1683,15 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
         msgs.push({ role: 'tool', tool_name: name, content: String(result) });
       }
       const used = Math.max((stats?.promptTokens || 0) + (stats?.evalTokens || 0), estimateTokens(msgs));
-      if (shouldAutoCompact(used, numCtx) && compactions < SCOPED_MAX_COMPACTIONS) {
-        compactions++;
-        win.webContents.send('stream:state', `compacting coder ${compactions}/${SCOPED_MAX_COMPACTIONS}`);
-        const compacted = await compactScopedMessages(
-          coderModel,
-          msgs,
-          numCtx,
-          'coder',
-          'coder',
-          'Continue implementing the original task from this checkpoint. Use tools, run the required checks, and finish with a concise evidence-based report.',
-        );
-        win.webContents.send('stream:info', compacted.ok
-          ? `Coder context checkpointed at ${compactPercent()}% (${compactions}/${SCOPED_MAX_COMPACTIONS}).`
-          : `Coder checkpoint failed (${compacted.error}); continuing with the existing context.`);
+      const reachedToolCap = step + 1 >= CODER_MAX_STEPS;
+      if (reachedToolCap || shouldAutoCompact(used, numCtx)) {
+        win.webContents.send('stream:state', 'wrapping up coder context');
+        const reason = reachedToolCap
+          ? `Coder reached its ${CODER_MAX_STEPS}-step cap`
+          : `Coder context reached ${compactPercent()}%`;
+        win.webContents.send('stream:info', `${reason}; requesting a handoff report instead of continuing broad exploration.`);
+        finalContent = await forceCoderWrapUp(coderModel, msgs, currentAbort.signal, useThink, numCtx);
+        break;
       }
     }
   } catch (err) {
@@ -1908,7 +1940,16 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
     onProgress({ currentPhase: isRepair ? 'repair' : 'implementation', currentIteration: iteration, lastEvent: `${isRepair ? 'Repairing' : 'Implementing'}: ${task.title}` });
     state(`coder loop ${iteration}/${max} (${coderModel})`);
 
-    const attempt = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think, feedback);
+    const priorAttempt = results.find((entry) => entry.task.id === task.id)?.coderResult || null;
+    const attempt = await runCoderTask(
+      task,
+      coderModel,
+      cwd,
+      !!autoApprove,
+      !!think,
+      feedback,
+      buildCoderHandoff(priorAttempt, feedback),
+    );
     absorbCoderEvidence(loopLog, attempt.evidence);
     if (stopRequested) break;
 
@@ -2252,7 +2293,15 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
         usage.metrics.repairs += 1;
         win.webContents.send('stream:info', `Verifier requested a repair for “${task.title}”:\n${verdict.slice(0, 2000)}`);
         win.webContents.send('stream:state', `repairing ${index + 1}/${plan.tasks.length} (${coderModel})`);
-        const repair = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think, verdict.slice(0, 3000));
+        const repair = await runCoderTask(
+          task,
+          coderModel,
+          cwd,
+          !!autoApprove,
+          !!think,
+          verdict.slice(0, 3000),
+          buildCoderHandoff(coderResult, verdict),
+        );
         coderResult = {
           report: `${coderResult.report}\n\nREPAIR REPORT:\n${repair.report}`,
           evidence: [...coderResult.evidence, ...repair.evidence],

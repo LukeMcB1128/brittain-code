@@ -23,6 +23,11 @@ test('coder loop is wired through renderer, preload, main workflow, and benchmar
   assert.match(main, /if \(useCoder\) \{[\s\S]*runCoderGoalLoop/);
   assert.match(main, /runCoderGoalLoop[\s\S]*runOrchestrationVerifier/);
   assert.match(main, /coderLoopIterations \+= 1/);
+  assert.match(main, /function buildCoderHandoff/);
+  assert.match(main, /previous_attempt: priorAttempt/);
+  assert.match(main, /forceCoderWrapUp/);
+  assert.match(main, /instead of continuing broad exploration/);
+  assert.match(main, /reachedToolCap/);
 
   assert.match(grader, /metrics\.coderLoopIterations/);
   assert.match(grader, /ORCHESTRATE\|CODER LOOP/);
