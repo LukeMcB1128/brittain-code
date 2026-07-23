@@ -756,6 +756,41 @@ button.mini:disabled {
 #overlay-body .diff-file { color: var(--yellow); font-weight: 700; }
 
 /* ---------- settings ---------- */
+/* ---------- in-app confirm modal (replaces native window.confirm) ---------- */
+#confirm-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.68);
+}
+
+#confirm-modal.hidden { display: none; }
+
+#confirm-box {
+  width: min(440px, 94vw);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  padding: 20px 22px;
+}
+
+#confirm-message {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  margin: 0 0 18px 0;
+}
+
+#confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 #settings-modal {
   position: fixed;
   inset: 0;

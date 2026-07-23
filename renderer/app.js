@@ -218,10 +218,11 @@ thinkToggle.addEventListener('change', () => localStorage.setItem('think', think
 autoApprove.addEventListener('change', () => localStorage.setItem('autoApprove', autoApprove.checked ? '1' : '0'));
 autoBranchToggle.addEventListener('change', () => localStorage.setItem('autoBranch', autoBranchToggle.checked ? '1' : '0'));
 reviewToggle.addEventListener('change', () => localStorage.setItem('reviewMode', reviewToggle.checked ? '1' : '0'));
-onlineResearchToggle.addEventListener('change', () => {
+onlineResearchToggle.addEventListener('change', async () => {
   if (!onlineResearchToggle.checked) return;
-  const approved = confirm(
-    'Enable ONLINE RESEARCH for this session?\n\nSearch queries and requested page URLs will leave this Mac. Every web_search and web_fetch call will still require explicit approval, even when AUTO-APPROVE is on.'
+  const approved = await confirmDialog(
+    'Enable ONLINE RESEARCH for this session?\n\nSearch queries and requested page URLs will leave this Mac. Every web_search and web_fetch call will still require explicit approval, even when AUTO-APPROVE is on.',
+    { okLabel: 'ENABLE' }
   );
   if (!approved) onlineResearchToggle.checked = false;
 });
@@ -252,7 +253,7 @@ function setAppMode(mode, persist = true, refreshHistory = true) {
 async function chooseAppMode(mode) {
   if (busy || mode === appMode) return;
   const conversation = await window.api.getConversation();
-  if (conversation.length && !confirm(`Switch to ${mode.toUpperCase()} and start a new session?\n\nYour current chat is already saved in History.`)) return;
+  if (conversation.length && !(await confirmDialog(`Switch to ${mode.toUpperCase()} and start a new session?\n\nYour current chat is already saved in History.`, { okLabel: 'SWITCH' }))) return;
   setAppMode(mode);
   if (conversation.length) await newSession();
   else {
@@ -265,6 +266,44 @@ $('cwd-btn').addEventListener('click', async () => {
   const res = await window.api.pickCwd();
   if (res.ok) setCwd(res.path);
 });
+
+// In-app replacement for window.confirm() — native dialogs break keyboard
+// focus in the renderer on Windows (Electron/Chromium). Returns a promise that
+// resolves true (OK) or false (Cancel). Enter confirms, Escape cancels.
+function confirmDialog(message, { okLabel = 'OK', cancelLabel = 'CANCEL', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const modal = $('confirm-modal');
+    const okBtn = $('confirm-ok');
+    const cancelBtn = $('confirm-cancel');
+    $('confirm-message').textContent = message;
+    okBtn.textContent = okLabel;
+    cancelBtn.textContent = cancelLabel;
+    okBtn.classList.toggle('deny', danger);
+    okBtn.classList.toggle('approve', !danger);
+    modal.classList.remove('hidden');
+    okBtn.focus();
+
+    function cleanup(result) {
+      modal.classList.add('hidden');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey, true);
+      resolve(result);
+    }
+    function onOk() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+    function onBackdrop(e) { if (e.target === modal) cleanup(false); }
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cleanup(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); cleanup(true); }
+    }
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey, true);
+  });
+}
 
 function setCwd(p) {
   cwd = p;
@@ -283,7 +322,7 @@ window.api.onCheckpointState(({ available, cwd: ckptCwd }) => {
 
 undoBtn.addEventListener('click', async () => {
   if (busy || undoBtn.disabled) return;
-  if (!confirm('Restore all files in this folder to the checkpoint taken before the last run?\n\n(The current state is checkpointed first — press UNDO again to re-apply the run.)')) return;
+  if (!(await confirmDialog('Restore all files in this folder to the checkpoint taken before the last run?\n\n(The current state is checkpointed first — press UNDO again to re-apply the run.)', { okLabel: 'RESTORE' }))) return;
   const res = await window.api.undoCheckpoint(cwd);
   if (res.ok) {
     addInfo(`UNDO: restored working tree to the ${res.restoredFrom} checkpoint (was: ${res.changes}). A pre-undo checkpoint was saved — UNDO again to swap back.`);
@@ -314,7 +353,7 @@ $('review-keep-btn').addEventListener('click', () => {
 $('review-diff-btn').addEventListener('click', showDiff);
 
 $('review-discard-btn').addEventListener('click', async () => {
-  if (!confirm('Discard this run? All files return to the pre-run checkpoint.')) return;
+  if (!(await confirmDialog('Discard this run? All files return to the pre-run checkpoint.', { okLabel: 'DISCARD', danger: true }))) return;
   const res = await window.api.undoCheckpoint(cwd);
   hideReview();
   if (res.ok) addInfo('REVIEW: run discarded — files restored to the pre-run checkpoint (UNDO again re-applies it).');
@@ -391,9 +430,9 @@ function renderChatItem(c) {
     del.className = 'chat-del';
     del.textContent = '✕';
     del.title = 'Delete this chat';
-    del.addEventListener('click', (e) => {
+    del.addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (confirm('Delete this chat?')) deleteChat(c.id);
+      if (await confirmDialog('Delete this chat?', { okLabel: 'DELETE', danger: true })) deleteChat(c.id);
     });
 
     item.addEventListener('click', () => loadChat(c.id));

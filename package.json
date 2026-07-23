@@ -9,7 +9,9 @@
     "start": "electron .",
     "test": "node --test",
     "dist": "electron-builder --mac dmg zip",
-    "deploy": "electron-builder --mac dir && rm -rf '/Applications/Brittain Code.app' && cp -R 'dist/mac-arm64/Brittain Code.app' /Applications/ && echo 'Deployed to /Applications'"
+    "deploy": "electron-builder --mac dir && rm -rf '/Applications/Brittain Code.app' && cp -R 'dist/mac-arm64/Brittain Code.app' /Applications/ && echo 'Deployed to /Applications'",
+    "dist:win": "electron-builder --win --x64",
+    "dist:all": "electron-builder --mac dmg zip --win --x64"
   },
   "build": {
     "appId": "com.brittain.code",
@@ -39,7 +41,12 @@
     "afterSign": "scripts/afterSign.js",
     "win": {
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon-1024.png"
     },
