@@ -10,6 +10,7 @@ const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTR
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
+const { readActiveMission, writeActiveMission, interruptRunningMission } = require('./missions');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 // The context window we actually request from Ollama. Without an explicit
@@ -87,6 +88,28 @@ function fitToWindow(msgs, maxTokens) {
 }
 
 let win = null;
+let activeMission = null;
+
+function publishMission() {
+  if (win && !win.isDestroyed()) win.webContents.send('mission:update', activeMission);
+}
+
+function updateMission(patch) {
+  if (!activeMission) return null;
+  activeMission = { ...activeMission, ...patch };
+  writeActiveMission(settingsUserDataDir, activeMission);
+  publishMission();
+  return activeMission;
+}
+
+function recoverMission() {
+  activeMission = readActiveMission(settingsUserDataDir);
+  const interrupted = interruptRunningMission(activeMission);
+  if (interrupted !== activeMission) {
+    activeMission = interrupted;
+    writeActiveMission(settingsUserDataDir, activeMission);
+  }
+}
 
 // ---------- conversation state (lives in main so tool messages stay in history) ----------
 let conversation = [];            // ollama-format messages, excluding system
@@ -243,6 +266,7 @@ const mcp = new McpManager();
 app.whenReady().then(() => {
   settingsUserDataDir = app.getPath('userData');
   runtimeSettings = loadSettings(settingsUserDataDir);
+  recoverMission();
   initTools(settingsUserDataDir);
   // MCP servers connect in the background; status via /mcp
   mcp.startAll(settingsUserDataDir).then((results) => {
@@ -252,7 +276,14 @@ app.whenReady().then(() => {
   });
   createWindow();
 });
-app.on('before-quit', () => { stopAllManagedProcesses(); mcp.stopAll(); });
+app.on('before-quit', () => {
+  if (activeMission?.status === 'running') updateMission({
+    status: 'interrupted', currentPhase: 'interrupted', endedAt: new Date().toISOString(),
+    lastEvent: 'Brittain Code closed before this mission finished.',
+  });
+  stopAllManagedProcesses();
+  mcp.stopAll();
+});
 app.on('window-all-closed', () => app.quit());
 
 // ---------- ollama helpers ----------
@@ -1844,7 +1875,7 @@ function wholeGoalVerificationTask(goal, plan) {
   };
 }
 
-async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, loopLog }) {
+async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, loopLog, onProgress = () => {} }) {
   const info = (text) => win.webContents.send('stream:info', text);
   const state = (text) => win.webContents.send('stream:state', text);
   const verifierModel = subModel || 'qwen3:8b';
@@ -1852,6 +1883,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
   const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
 
   conversation.push({ role: 'user', content: `CODER LOOP (max ${max}): ${goal}` });
+  onProgress({ currentPhase: 'planning', lastEvent: 'Inspecting the project and preparing a plan.' });
   state(`planning coder loop (${model})`);
   info(`Supervisor ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
   const submittedPlan = await runOrchestratorPlan(model, goal, cwd, verifierModel, !!onlineResearch, !!think, baselineStatus, max);
@@ -1873,6 +1905,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
     const isRepair = !!feedback;
     if (isRepair) usage.metrics.repairs += 1;
     info(`━ Coder loop iteration ${iteration}/${max}: ${task.title}${isRepair ? ' (repair)' : ''} ━`);
+    onProgress({ currentPhase: isRepair ? 'repair' : 'implementation', currentIteration: iteration, lastEvent: `${isRepair ? 'Repairing' : 'Implementing'}: ${task.title}` });
     state(`coder loop ${iteration}/${max} (${coderModel})`);
 
     const attempt = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think, feedback);
@@ -1888,6 +1921,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
     if (isRepair) result.repairs += 1;
 
     const gitEvidence = await collectOrchestrationGitEvidence(cwd);
+    onProgress({ currentPhase: 'verification', currentIteration: iteration, lastEvent: `Verifying: ${task.title}` });
     state(`verifying coder loop ${iteration}/${max} (${verifierModel})`);
     const verdict = await runOrchestrationVerifier(
       verifierModel,
@@ -1928,6 +1962,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
       evidence: results.flatMap((entry) => entry.coderResult.evidence),
     };
     const finalEvidence = await collectOrchestrationGitEvidence(cwd);
+    onProgress({ currentPhase: 'verification', currentIteration: iteration, lastEvent: 'Running final whole-goal verification.' });
     state(`final coder-loop verification (${verifierModel})`);
     finalVerdict = await runOrchestrationVerifier(
       verifierModel,
@@ -2079,6 +2114,104 @@ ipcMain.handle('chat:loop', async (_e, { model, coderModel, useCoder, subModel, 
   }
 });
 
+// ---------- durable missions (/mission) ----------
+// Missions intentionally reuse the bounded coder loop. They add a visible,
+// persisted control plane without creating a second, less-tested agent engine.
+ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
+  if (activeMission?.status === 'running') return { ok: false, error: 'A mission is already running. Use /mission status or /mission stop.' };
+  if (!model) return { ok: false, error: 'Select a model first.' };
+  if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
+  if (!goal?.trim()) return { ok: false, error: 'A mission goal is required.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+
+  const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
+  const startedAt = new Date().toISOString();
+  activeMission = {
+    id: `mission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    status: 'running',
+    goal: goal.trim(),
+    projectPath: cwd,
+    startedAt,
+    endedAt: null,
+    maxIterations: max,
+    currentIteration: 0,
+    currentPhase: 'starting',
+    lastEvent: 'Preparing mission.',
+    models: { main: model, coder: coderModel, verifier: subModel || 'qwen3:8b' },
+    onlineResearch: !!onlineResearch,
+    finalReport: null,
+  };
+  writeActiveMission(settingsUserDataDir, activeMission);
+  publishMission();
+
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
+  const loopLog = { mutations: new Set(), commands: [], verified: false };
+
+  try {
+    await maybeAutoBranch(cwd, goal, !!autoBranch);
+    await createCheckpoint(cwd);
+    const result = await runCoderGoalLoop({
+      model,
+      coderModel,
+      subModel,
+      goal: goal.trim(),
+      cwd,
+      autoApprove,
+      think,
+      onlineResearch,
+      max,
+      loopLog,
+      onProgress: (progress) => updateMission(progress),
+    });
+    await emitRunReport(cwd, loopLog);
+    const stopped = stopRequested || result.stopped;
+    updateMission({
+      status: stopped ? 'stopped' : result.complete ? 'completed' : 'failed',
+      currentPhase: stopped ? 'stopped' : result.complete ? 'completed' : 'incomplete',
+      endedAt: new Date().toISOString(),
+      lastEvent: stopped ? 'Mission stopped by user.' : result.complete ? 'Mission verified complete.' : 'Mission reached its iteration limit without verification.',
+      finalReport: result.report || null,
+    });
+    return { ...result, stopped };
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      runOutcome = 'stopped';
+      updateMission({
+        status: 'stopped', currentPhase: 'stopped', endedAt: new Date().toISOString(),
+        lastEvent: 'Mission stopped by user.',
+      });
+      return { ok: true, stopped: true };
+    }
+    runOutcome = 'failed';
+    const error = String(err.message || err);
+    updateMission({
+      status: 'failed', currentPhase: 'failed', endedAt: new Date().toISOString(),
+      lastEvent: error, finalReport: error,
+    });
+    return { ok: false, error };
+  } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
+    try { await publishPersistedConversationContext(model); } catch {}
+    currentAbort = null;
+    win.webContents.send('stream:done');
+  }
+});
+
+ipcMain.handle('mission:get', () => ({ ok: true, mission: activeMission }));
+
+ipcMain.handle('mission:stop', () => {
+  if (!activeMission || activeMission.status !== 'running') return { ok: false, error: 'There is no running mission.' };
+  updateMission({ currentPhase: 'stopping', lastEvent: 'Stopping after the current operation.' });
+  stopRequested = true;
+  if (currentAbort) currentAbort.abort();
+  for (const [id, resolve] of pendingApprovals) { resolve(false); pendingApprovals.delete(id); }
+  for (const [id, resolve] of pendingQuestions) { resolve(null); pendingQuestions.delete(id); }
+  return { ok: true };
+});
+
 ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch }) => {
   if (!model) return { ok: false, error: 'Select an orchestrator model first.' };
   if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
@@ -2209,6 +2342,7 @@ function preview(s) {
 
 // ---------- misc ipc ----------
 ipcMain.on('chat:stop', () => {
+  if (activeMission?.status === 'running') updateMission({ currentPhase: 'stopping', lastEvent: 'Stopping after the current operation.' });
   stopRequested = true;
   if (currentAbort) currentAbort.abort();
   // release any pending approval as denied, any pending question as cancelled

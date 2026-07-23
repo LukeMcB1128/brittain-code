@@ -28,6 +28,27 @@ test('coder loop is wired through renderer, preload, main workflow, and benchmar
   assert.match(grader, /ORCHESTRATE\|CODER LOOP/);
 });
 
+test('missions wrap the bounded coder loop with persisted status and explicit stop controls', () => {
+  const renderer = source('renderer/app.js');
+  const preload = source('preload.js');
+  const main = source('main.js');
+  const packageJson = JSON.parse(source('package.json'));
+
+  assert.match(renderer, /\/mission \[iterations] <goal>/);
+  assert.match(renderer, /window\.api\.missionStart/);
+  assert.match(renderer, /window\.api\.missionStop/);
+  assert.match(renderer, /chat\.appendChild\(missionCard\)/);
+  assert.match(renderer, /missionControl =/);
+  assert.match(renderer, /busy && !missionControl/);
+  assert.match(preload, /missionStart: \(payload\) => ipcRenderer\.invoke\('mission:start'/);
+  assert.match(preload, /missionStop: \(\) => ipcRenderer\.invoke\('mission:stop'/);
+  assert.match(main, /ipcMain\.handle\('mission:start'/);
+  assert.match(main, /runCoderGoalLoop\(\{/);
+  assert.match(main, /ipcMain\.handle\('mission:stop'/);
+  assert.match(main, /interruptRunningMission/);
+  assert.equal(packageJson.build.files.includes('missions.js'), true);
+});
+
 test('Code and Chat modes are wired through UI, persistence, and the agent boundary', () => {
   const html = source('renderer/index.html');
   const renderer = source('renderer/app.js');

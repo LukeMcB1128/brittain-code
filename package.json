@@ -19,6 +19,7 @@
     "files": [
       "main.js",
       "settings.js",
+      "missions.js",
       "attachments.js",
       "ollama-recovery.js",
       "tools.js",
