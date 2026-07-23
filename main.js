@@ -593,7 +593,7 @@ function scanThinkingForPsychosis(thinking) {
 // ---------- agent loop ----------
 function chatSystemPrompt(onlineResearch = false) {
   const lines = [
-    "You are Brittain, a thoughtful general-purpose assistant running locally on the user's Mac.",
+    "You are Brittain, a thoughtful general-purpose assistant running locally on the user's computer.",
     'This is Chat mode. You have no working directory and no access to project files, shell commands, Git, or project memory.',
     '',
     'Rules:',
@@ -621,7 +621,7 @@ function chatSystemPrompt(onlineResearch = false) {
 
 function systemPrompt(cwd, model = '', onlineResearch = false) {
   const lines = [
-    "You are Brittain Code, an expert coding agent running fully offline on the user's Mac (macOS, zsh).",
+    "You are Brittain Code, an expert coding agent running fully offline on the user's computer (either macOS, zsh; or windows, PowerShell).",
     `Working directory: ${cwd} — use paths relative to it.`,
     '',
     'Rules:',

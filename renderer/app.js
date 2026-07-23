@@ -221,7 +221,7 @@ reviewToggle.addEventListener('change', () => localStorage.setItem('reviewMode',
 onlineResearchToggle.addEventListener('change', async () => {
   if (!onlineResearchToggle.checked) return;
   const approved = await confirmDialog(
-    'Enable ONLINE RESEARCH for this session?\n\nSearch queries and requested page URLs will leave this Mac. Every web_search and web_fetch call will still require explicit approval, even when AUTO-APPROVE is on.',
+    'Enable ONLINE RESEARCH for this session?\n\nSearch queries and requested page URLs will leave this computer. Every web_search and web_fetch call will still require explicit approval, even when AUTO-APPROVE is on.',
     { okLabel: 'ENABLE' }
   );
   if (!approved) onlineResearchToggle.checked = false;
