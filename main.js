@@ -472,6 +472,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
   const toolCalls = [];
   let stats = null;
   const repetitionState = { value: 0 };
+  const thinkingState = { value: 0 };
 
   for (;;) {
     const { done, value } = await reader.read();
@@ -488,10 +489,10 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
       if (msg.thinking) {
         thinking += msg.thinking;
         if (!silent) win.webContents.send('stream:thinking', msg.thinking);
-        const thinkHit = scanThinkingForPsychosis(thinking);
+        const thinkHit = scanThinkingForPsychosis(thinking, thinkingState);
         if (thinkHit) {
           try { await reader.cancel(); } catch {}
-          throw new PsychosisDetectedError(thinkHit.reason, thinkHit.excerpt);
+          throw new PsychosisDetectedError(thinkHit.reason, thinkHit.excerpt, thinkHit.recovery);
         }
       }
       if (msg.content) {
@@ -500,7 +501,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
         const hit = scanContentForPsychosis(content, repetitionState);
         if (hit) {
           try { await reader.cancel(); } catch {}
-          throw new PsychosisDetectedError(hit.reason, hit.excerpt);
+          throw new PsychosisDetectedError(hit.reason, hit.excerpt, hit.recovery || 'compact');
         }
       }
       if (msg.tool_calls) toolCalls.push(...msg.tool_calls);
@@ -569,10 +570,15 @@ function parseRawToolCalls(content) {
 // honestly. Runs inside streamChat itself, so every caller (main agent,
 // subagent, verifier, coder) is protected with no per-call-site changes.
 class PsychosisDetectedError extends Error {
-  constructor(reason, excerpt) {
+  // recovery: 'compact'  — context is degraded; a sanity reset helps (glitch
+  //                        tokens, self-talk leaking into files, repetition).
+  // recovery: 'directive' — context is FINE, the model is dithering. Compaction
+  //                        does nothing here; it needs an instruction to commit.
+  constructor(reason, excerpt, recovery = 'compact') {
     super(reason);
     this.name = 'PsychosisDetectedError';
     this.excerpt = excerpt;
+    this.recovery = recovery;
   }
 }
 
@@ -609,15 +615,55 @@ function scanContentForPsychosis(content, repetitionState) {
   return null;
 }
 
+// ---------- deliberation loops ----------
+// A model can be perfectly coherent and still be stuck: re-deciding the same
+// approach over and over, planning without ever calling a tool, until it runs
+// out of budget mid-sentence. Observed live at 31 restart phrases / 0 tool
+// calls / 0 lines written. That is NOT context degradation, so compaction is
+// the wrong medicine — it needs an instruction to commit and act.
+//
+// One "wait, let me reconsider" is healthy chain-of-thought. Six is a loop.
+const DELIBERATION_RESTART_RE = /(?:let me (?:write|do|start|plan|create|just|first)|(?:actually|wait),?\s+(?:let me|i realize|i should|i'll)|let me reconsider|think about this differently|be more (?:strategic|careful)|let me take a (?:different|step))/gi;
+const DELIBERATION_MAX_RESTARTS = 6;
+// Generous backstop for genuine deep reasoning; only catches true runaway.
+const THINKING_BUDGET_CHARS = 12_000;
+
+function countDeliberationRestarts(thinking) {
+  DELIBERATION_RESTART_RE.lastIndex = 0;
+  return (thinking.match(DELIBERATION_RESTART_RE) || []).length;
+}
+
 // Reasoning traces legitimately say things like "Wait, let me reconsider" —
 // that's normal chain-of-thought, not psychosis. Only glitch tokens (mojibake
-// is mojibake regardless of channel) are checked in `thinking`; self-talk and
-// repetition are scoped to the final answer, matching how SELF_TALK is tuned
-// (a comment-prefixed phrase leaking into code, not prose reasoning aloud).
-function scanThinkingForPsychosis(thinking) {
+// is mojibake regardless of channel) are checked for corruption in `thinking`;
+// self-talk and verbatim repetition stay scoped to the final answer, matching
+// how SELF_TALK is tuned (a comment-prefixed phrase leaking into code).
+// Deliberation loops are the exception: they only exist in the thinking channel.
+function scanThinkingForPsychosis(thinking, thinkingState = { value: 0 }) {
   const tail = thinking.slice(-300);
-  if (GLITCH_TOKEN_RE.test(tail)) return { reason: 'raw byte-fallback/replacement token in reasoning', excerpt: tail.slice(-120) };
-  if (GLITCH_FULLWIDTH_RE.test(tail)) return { reason: 'full-width punctuation in reasoning where ASCII was expected', excerpt: tail.slice(-120) };
+  if (GLITCH_TOKEN_RE.test(tail)) return { reason: 'raw byte-fallback/replacement token in reasoning', excerpt: tail.slice(-120), recovery: 'compact' };
+  if (GLITCH_FULLWIDTH_RE.test(tail)) return { reason: 'full-width punctuation in reasoning where ASCII was expected', excerpt: tail.slice(-120), recovery: 'compact' };
+
+  // Both checks below are throttled: re-scanning a growing string on every
+  // token would be O(n) per chunk.
+  if (thinking.length - thinkingState.value >= 500) {
+    thinkingState.value = thinking.length;
+    const restarts = countDeliberationRestarts(thinking);
+    if (restarts >= DELIBERATION_MAX_RESTARTS) {
+      return {
+        reason: `deliberation loop — ${restarts} restarts ("let me…", "actually, let me…") without acting`,
+        excerpt: tail.slice(-160),
+        recovery: 'directive',
+      };
+    }
+    if (thinking.length >= THINKING_BUDGET_CHARS) {
+      return {
+        reason: `reasoning exceeded ${THINKING_BUDGET_CHARS.toLocaleString()} chars without producing a tool call or answer`,
+        excerpt: tail.slice(-160),
+        recovery: 'directive',
+      };
+    }
+  }
   return null;
 }
 
@@ -657,6 +703,8 @@ function systemPrompt(cwd, model = '', onlineResearch = false) {
     '',
     'Rules:',
     '- Explore before changing code: list and read the relevant files first. Never guess at file contents or paths.',
+    '- Never infer what code does — read it. One read_file beats three paragraphs of reasoning about what a file probably contains.',
+    '- Commit to an approach and act. If you notice yourself reconsidering a choice you already made, stop deliberating and make the smallest change that tests it. Plans are cheap; a tool result is evidence.',
     '- Verify your work: read a file back after editing it, or run a command that proves the change works. Do not claim success without evidence from a tool result.',
     '- Edit existing code with edit_file: copy the exact old text from the file and give the new text. Use write_file only for new files or full rewrites of files you have read completely. Never write placeholders like "... existing code ...".',
     '- Commands run in zsh with a 60 second timeout; do not start interactive programs or servers that never exit.',
@@ -748,6 +796,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   const temperature = chatMode ? runtimeSettings.chatTemperature : runtimeSettings.codeTemperature;
 
   let psychosisRetried = false;
+  let deliberationNudges = 0;
   {
     for (let step = 0; step < maxAgentSteps; step++) {
       let content, thinking, toolCalls, stats;
@@ -757,6 +806,24 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
         if (err.name !== 'PsychosisDetectedError') throw err;
         usage.metrics.psychosisDetections = (usage.metrics.psychosisDetections || 0) + 1;
         win.webContents.send('stream:info', `⚠ LIVE GUARD: ${err.message} — excerpt: "${err.excerpt}"\nGeneration stopped immediately.`);
+
+        // A deliberation loop is not context corruption — the model is simply
+        // dithering, so compacting would throw away good context and change
+        // nothing. Tell it to commit and act instead.
+        if (err.recovery === 'directive') {
+          if (deliberationNudges >= 2) {
+            win.webContents.send('stream:info', 'Still looping after 2 nudges — stopping this turn. Try a smaller, more concrete request, or a different model.');
+            break;
+          }
+          deliberationNudges++;
+          conversation.push({
+            role: 'user',
+            content: 'You are planning in circles instead of acting. Stop deliberating now. Do not re-evaluate your approach again. Take the single smallest concrete action that tests your current best hypothesis — call one tool (read the actual file rather than reasoning about it, or make one minimal edit) — then reassess from the real result.',
+          });
+          win.webContents.send('stream:info', `Injected a commit-and-act directive (${deliberationNudges}/2) and retrying.`);
+          continue;
+        }
+
         if (psychosisRetried) {
           win.webContents.send('stream:info', 'Detected again after recovery — stopping this turn. Consider switching models or starting a new session.');
           break;
@@ -1198,7 +1265,7 @@ function subagentSystemPrompt(cwd) {
     'You have read-only exploration tools. You cannot edit code, create research logs, run shell commands, or ask the user questions.',
     '',
     'Strategy — follow this order:',
-    '1. list_directory (or analyze_file_structure) first to see what files exist.',
+    '1. browse_files first to see what files exist.',
     '2. search_files with SHORT single-word patterns: search "history", never "chat history persistence logic". Multi-word phrases almost never match code.',
     '3. read_file the promising files and base your answer on what you actually read.',
     'If a search finds nothing, do not retry it with similar words — switch tactics (list the directory, read the most likely file).',
@@ -1482,7 +1549,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
     { role: 'system', content: orchestratorSystemPrompt(cwd, onlineResearch, taskBudget) },
     {
       role: 'user',
-      content: `GOAL:\n${goal}\n\nWORKING TREE AT START:\n${baselineStatus || '(clean or not a Git repository)'}${taskBudget ? `\n\nCODER LOOP BUDGET:\nAt most ${taskBudget} implementation or repair iterations.` : ''}\n\nInspect the project and submit the implementation plan.`,
+      content: `GOAL:\n${goal}\n\nWORKING TREE AT START:\n${baselineStatus || '(clean or not a Git repository)'}${taskBudget ? `\n\nMISSION TASK BUDGET:\nAt most ${taskBudget} implementation or repair iterations.` : ''}\n\nInspect the project and submit the implementation plan.`,
     },
   ];
   let lastContent = '';
@@ -1603,7 +1670,7 @@ function buildCoderHandoff(coderResult, verifierFeedback = '') {
     .filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name))
     .flatMap(evidencePaths), 30);
   const inspectedPaths = unique(evidence
-    .filter((entry) => ['read_file', 'read_git_diff', 'list_directory', 'analyze_file_structure'].includes(entry.name))
+    .filter((entry) => ['read_file', 'read_git_diff', 'browse_files', 'file_metadata'].includes(entry.name))
     .flatMap((entry) => [entry.args?.path]), 30);
   const checks = evidence
     .filter((entry) => entry.name === 'run_project_check' || entry.name === 'run_command')
@@ -1727,7 +1794,7 @@ async function collectOrchestrationGitEvidence(cwd) {
 
 const ORCHESTRATION_MUTATING_TOOLS = new Set([
   'write_file', 'edit_file', 'edit_files', 'append_file', 'create_directory',
-  'delete_file', 'copy_file', 'move_file', 'replace_in_file',
+  'delete_file', 'copy_file', 'move_file',
 ]);
 
 function evidencePaths(entry) {
@@ -1914,7 +1981,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
   const baseline = await gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd);
   const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
 
-  conversation.push({ role: 'user', content: `CODER LOOP (max ${max}): ${goal}` });
+  conversation.push({ role: 'user', content: `MISSION (max ${max}): ${goal}` });
   onProgress({ currentPhase: 'planning', lastEvent: 'Inspecting the project and preparing a plan.' });
   state(`planning coder loop (${model})`);
   info(`Supervisor ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
@@ -2049,9 +2116,8 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
   return { ok: true, report, complete };
 }
 
-ipcMain.handle('chat:loop', async (_e, { model, coderModel, useCoder, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
+ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
   if (!model) return { ok: false, error: 'Select a model first.' };
-  if (useCoder && !coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
   if (!goal?.trim()) return { ok: false, error: 'A loop goal is required.' };
   if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
   stopRequested = false;
@@ -2073,22 +2139,6 @@ ipcMain.handle('chat:loop', async (_e, { model, coderModel, useCoder, subModel, 
     : '';
 
   try {
-    if (useCoder) {
-      const result = await runCoderGoalLoop({
-        model,
-        coderModel,
-        subModel,
-        goal: goal.trim(),
-        cwd,
-        autoApprove,
-        think,
-        onlineResearch,
-        max,
-        loopLog,
-      });
-      await emitRunReport(cwd, loopLog);
-      return result;
-    }
     await maybePrecompact(model); // a loop may start on an already-bloated chat
     let feedback = '';
     for (let i = 1; i <= max; i++) {

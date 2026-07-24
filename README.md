@@ -79,7 +79,7 @@ Type these in the message box:
 | `/model <name>` | Switch model (partial match) |
 | `/coder [name]` | Show or set the writable coding-worker model (default qwen3-coder:30b when installed) |
 | `/subagent [name]` | Show or set the subagent/verifier model (default qwen3:8b) |
-| `/loop [--coder] [n] <goal>` | Work toward a goal for up to n iterations (default 8). Add `--coder` to have the selected model plan while the coder implements verifier-guided tasks and repairs. Turn AUTO-APPROVE on for unattended runs |
+| `/loop [n] <goal>` | Work toward a goal with the selected model for up to n iterations (default 8). Turn AUTO-APPROVE on for unattended runs |
 | `/orchestrate <goal>` | Use the selected model as a read-only planner, delegate sequential tasks to the coder model, and verify each task with the subagent model |
 | `/mission [n] <goal>` | Run a persisted, visible coder mission for up to n iterations; `/mission status` inspects it and `/mission stop` cancels it |
 | `/usage` | Show context remaining and token spend across planner/main agent, scouts, coders, and verifier |
@@ -91,9 +91,7 @@ Type these in the message box:
 
 `/orchestrate` separates planning from implementation while keeping inference local by default. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. Tasks run sequentially to avoid loading multiple large models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at the configured compaction threshold, with at most two compactions per stage; every coder task still starts with a fresh context. The final chat response stays concise; use DIFF when you want the complete patch and working-tree detail.
 
-`/loop --coder` uses the same scoped planner, coder, and evidence-based verifier, but spends one loop iteration on each implementation or repair attempt. It advances through the plan only after the current task is verified and can keep repairing until the iteration cap. After every planned task passes, a final whole-goal verification either completes the loop or creates a final verifier-guided repair task. Plain `/loop` keeps its original single-model, conversation-preserving behavior.
-
-`/mission` is the durable, project-bound version of `/loop --coder`: it records its goal, project, models, phase, latest evidence, and final report under Brittain Code’s application-data directory. It keeps the same tool permissions and approval rules as ordinary Code mode. Only one mission can run at a time; closing the app marks an active mission as interrupted rather than attempting to resume it. Missions do not run after the app exits and have no messaging, scheduling, or external-notification integration.
+`/loop` is the original single-model, conversation-preserving loop. For planned, verifier-guided implementation and repair work, use `/mission`: it records its goal, project, models, phase, latest evidence, and final report under Brittain Code’s application-data directory. It keeps the same tool permissions and approval rules as ordinary Code mode. Only one mission can run at a time; closing the app marks an active mission as interrupted rather than attempting to resume it. Missions do not run after the app exits and have no messaging, scheduling, or external-notification integration.
 
 The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is enabled, with the same per-request approval boundary as ordinary chats. Coding workers and verifiers never receive network tools. Restart Brittain Code after installing a new Ollama model so the model list refreshes; for example, `gpt-oss:20b` can then be selected in the main dropdown, with `/coder gpt-oss:20b`, or with `/subagent gpt-oss:20b` for role-by-role comparison.
 

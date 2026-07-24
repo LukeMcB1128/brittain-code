@@ -1192,7 +1192,6 @@ window.api.onApprovalRequest(({ id, name, args, network, sensitive, destructive 
     : name === 'revert_to_last_commit' ? `Restore ${args.path || 'the entire working tree'} to HEAD.\n\nTracked changes will be saved in a recoverable named Git stash first.\nUntracked files: ${args.include_untracked ? 'INCLUDED — they will leave the working tree and enter the stash' : 'preserved'}\nIgnored files and submodule contents: preserved`
     : name === 'run_command' ? args.command
     : name === 'write_file' || name === 'append_file' ? `${args.path}\n\n${(args.content || '').slice(0, 600)}`
-    : name === 'replace_in_file' ? `${args.path}\n\nfind: ${args.pattern}\nreplace: ${args.replacement}`
     : name === 'edit_file' ? `${args.path}\n\n- ${String(args.old_string || '').slice(0, 300)}\n+ ${String(args.new_string || '').slice(0, 300)}`
     : args.source ? `${args.source} → ${args.destination}`
     : String(args.path || JSON.stringify(args));
@@ -1541,7 +1540,7 @@ const SLASH_HELP = [
   '/diff — show the git diff for the working directory',
   '/commit <message> — stage all changes and commit',
   '/graph — show a visual tree of the git commit history',
-  '/loop [--coder] [n] <goal> — repeat until verified; --coder delegates planned implementation and repairs to the selected coder model',
+  '/loop [n] <goal> — repeat a single model until verified',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
   '/mission [iterations] <goal> — run a visible, persisted bounded coding mission; use /mission status or /mission stop',
   '/model <name> — switch model (partial match ok)',
@@ -1619,27 +1618,18 @@ async function handleSlash(raw) {
       if (busy) return;
       if (!modelSelect.value) return addError('No model selected.');
       if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
-      let useCoder = false;
       let iterations = appSettings?.defaultLoopIterations || 8;
       let goal = arg;
-      const coderFlag = goal.match(/^--coder(?:\s+|$)/i);
-      if (coderFlag) {
-        useCoder = true;
-        goal = goal.slice(coderFlag[0].length).trim();
-      }
       const m = goal.match(/^(\d+)\s+([\s\S]+)/);
       if (m) { iterations = parseInt(m[1], 10); goal = m[2].trim(); }
-      if (!goal) return addError('Usage: /loop [--coder] [iterations] <goal> — e.g. /loop --coder 10 make all tests pass');
-      if (useCoder && !coderModel) return addError('No coder model selected. Use /coder <name>.');
+      if (!goal) return addError('Usage: /loop [iterations] <goal> — e.g. /loop 10 make all tests pass');
       if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the loop will pause for every risky tool call. Turn it on for unattended runs.');
 
-      addMessage('user', `${useCoder ? 'CODER LOOP' : 'LOOP'} (max ${iterations}): ${goal}`);
+      addMessage('user', `LOOP (max ${iterations}): ${goal}`);
       startRun();
       try {
         const res = await window.api.loop({
           model: modelSelect.value,
-          coderModel,
-          useCoder,
           subModel,
           goal,
           cwd,

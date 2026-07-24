@@ -23,7 +23,7 @@ All agent tools live in `tools.js` — schemas (`TOOL_DEFS`), the approval list 
 
 ### 1. Code Modification Safety
 - **Uniqueness Check**: Before executing `edit_file`, you must ensure your `old_string` is completely unique within the target file. If the snippet (e.g., `return true;`) appears multiple times, pad your `old_string` with 2–3 lines of surrounding context code to guarantee a precise, single match.
-- **Bulk Changes**: Use `replace_in_file` only for global variable renames or project-wide structural updates. For fine-grained refactoring, default to `edit_file`.
+- **Bulk Changes**: Use `edit_file` with `replace_all` for global variable renames or project-wide structural updates. For fine-grained refactoring, default to a unique literal match; use regex mode only when necessary.
 
 ### 2. Process & Testing Safeguards (Anti-Hang Protocol)
 Because your shell environment terminates commands after 60 seconds and forbids blocking interactive interfaces:

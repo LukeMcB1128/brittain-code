@@ -92,8 +92,8 @@ if (raw.cwd && path.resolve(raw.cwd) !== benchDir) {
   process.exit(2);
 }
 
-const READ_TOOLS = new Set(['read_file', 'get_file_lines', 'search_in_file', 'file_info', 'list_directory', 'find_files', 'search_files', 'analyze_file_structure', 'get_file_type', 'count_lines']);
-const MUTATE_TOOLS = new Set(['write_file', 'edit_file', 'edit_files', 'append_file', 'replace_in_file', 'delete_file', 'move_file', 'copy_file']);
+const READ_TOOLS = new Set(['read_file', 'get_file_lines', 'browse_files', 'search_files', 'file_metadata']);
+const MUTATE_TOOLS = new Set(['write_file', 'edit_file', 'edit_files', 'append_file', 'delete_file', 'move_file', 'copy_file']);
 function parseArgs(value) { if (typeof value === 'string') { try { return JSON.parse(value); } catch { return {}; } } return value || {}; }
 function pathsOf(args) {
   const paths = [];
@@ -176,7 +176,7 @@ const generatedTokens = sum('gen');
 const wallTimeMs = Number(metrics.wallTimeMs) || null;
 const toolErrors = Number(metrics.toolErrors) || toolErrorsFromTranscript;
 const toolCalls = Number(metrics.toolCalls) || calls.length;
-const hasTeamWorkflowMessage = convo.some((message) => message.role === 'user' && /^(?:ORCHESTRATE|CODER LOOP)\b/i.test(String(message.content || '')));
+const hasTeamWorkflowMessage = convo.some((message) => message.role === 'user' && /^(?:ORCHESTRATE|MISSION)\b/i.test(String(message.content || '')));
 const mode = Number(metrics.orchestrations) > 0 || Number(metrics.coderLoopIterations) > 0 || hasTeamWorkflowMessage ? 'team' : 'solo';
 const plannerModel = raw.model || '(unknown)';
 const coderModel = mode === 'team' ? raw.coderModel || '(unknown)' : null;

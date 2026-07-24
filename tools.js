@@ -301,6 +301,16 @@ function globToRegex(glob) {
   return new RegExp('^' + esc + '$');
 }
 
+function fileTypeForPath(p) {
+  const typeMap = {
+    '.js': 'javascript', '.ts': 'typescript', '.jsx': 'javascript-react', '.tsx': 'typescript-react',
+    '.html': 'html', '.css': 'css', '.json': 'json', '.md': 'markdown', '.txt': 'text',
+    '.py': 'python', '.java': 'java', '.cpp': 'cpp', '.c': 'c', '.go': 'go', '.rs': 'rust',
+    '.rb': 'ruby', '.sh': 'shell', '.sql': 'sql', '.yaml': 'yaml', '.yml': 'yaml', '.xml': 'xml',
+  };
+  return typeMap[path.extname(p).toLowerCase()] || 'unknown';
+}
+
 const PROJECT_CHECK_NAME = /^(?:test|lint|typecheck|type-check|check|build|verify|ci)(?::|$)|^format:check$/i;
 
 function packageRunner(dir, pkg) {
@@ -603,7 +613,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'edit_file',
-      description: 'Replace one exact snippet of text in a file with new text. old_string must match the file exactly (including whitespace and indentation) and must appear exactly once, unless replace_all is true. This is the preferred tool for editing existing code.',
+      description: 'Replace text in an existing file. By default old_string must match exactly and appear once. Set replace_all for a global replacement; set is_regex and optional flags to match a regular expression. Use edit_files for atomic coordinated edits.',
       parameters: {
         type: 'object',
         properties: {
@@ -611,6 +621,8 @@ const TOOL_DEFS = [
           old_string: { type: 'string', description: 'The exact existing text to replace — copy it verbatim from the file' },
           new_string: { type: 'string', description: 'The replacement text' },
           replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false)' },
+          is_regex: { type: 'boolean', description: 'Treat old_string as a JavaScript regular expression (default false).' },
+          flags: { type: 'string', description: 'Regular-expression flags when is_regex is true (default: none; replace_all adds "g").' },
         },
         required: ['path', 'old_string', 'new_string'],
       },
@@ -647,11 +659,18 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
-      name: 'list_directory',
-      description: 'List files and folders in a directory. Directories end with /.',
+      name: 'browse_files',
+      description: 'Browse a project directory as a tree, glob-filtered file list, or largest-files list. Skips .git and node_modules.',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string', description: 'Directory path (default: working directory)' } },
+        properties: {
+          path: { type: 'string', description: 'Directory path (default: working directory).' },
+          depth: { type: 'number', description: 'Tree/search depth from 1 to 8 (default: 1).' },
+          glob: { type: 'string', description: 'Optional glob for files, such as "*.js" or "src/**/*.ts".' },
+          include_files: { type: 'boolean', description: 'Include files in tree mode (default: true).' },
+          sort: { type: 'string', enum: ['name', 'size'], description: 'Use "size" to list largest matching files rather than a tree (default: name).' },
+          max_results: { type: 'number', description: 'Maximum returned files from 1 to 500 (default: 200).' },
+        },
       },
     },
   },
@@ -686,12 +705,17 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'search_files',
-      description: 'Search for a text pattern in files under the working directory (like grep -rn). Returns matching lines with file and line number.',
+      description: 'Search one file or a project tree for text or a regular expression. Supports glob filtering, context lines, and result limits. Skips .git and node_modules.',
       parameters: {
         type: 'object',
         properties: {
-          pattern: { type: 'string', description: 'Text or regex to search for' },
-          path: { type: 'string', description: 'Directory to search in (default: working directory)' },
+          pattern: { type: 'string', description: 'Text to search for, or a regular expression when is_regex is true.' },
+          path: { type: 'string', description: 'File or directory path (default: working directory).' },
+          file_pattern: { type: 'string', description: 'Optional glob filter when path is a directory.' },
+          context_lines: { type: 'number', description: 'Lines of context before and after each match from 0 to 10 (default: 0).' },
+          max_results: { type: 'number', description: 'Maximum matches from 1 to 300 (default: 100).' },
+          is_regex: { type: 'boolean', description: 'Treat pattern as a JavaScript regular expression (default: false).' },
+          case_sensitive: { type: 'boolean', description: 'Use case-sensitive matching (default: false).' },
         },
         required: ['pattern'],
       },
@@ -812,26 +836,15 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
-      name: 'search_in_file',
-      description: 'Search for a text pattern in a specific file and return matching lines with line numbers.',
+      name: 'file_metadata',
+      description: 'Inspect a file or directory: size, timestamps, permissions, type, and line count for text files. Optionally include a cryptographic hash.',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'File path to search in' },
-          pattern: { type: 'string', description: 'Text or regex to search for' },
+          path: { type: 'string', description: 'File or directory path.' },
+          include_hash: { type: 'boolean', description: 'Include a content hash for files (default: false).' },
+          hash_algorithm: { type: 'string', enum: ['sha256', 'sha1', 'md5'], description: 'Hash algorithm when include_hash is true (default: sha256).' },
         },
-        required: ['path', 'pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'file_info',
-      description: 'Get information about a file including size, modification time, and permissions.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'File path to get info for' } },
         required: ['path'],
       },
     },
@@ -869,21 +882,6 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
-      name: 'find_files',
-      description: 'Find files matching a glob pattern in the working directory (e.g. "*.js", "src/**/*.css").',
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Glob pattern to match files (e.g., "*.js", "src/**/*")' },
-          path: { type: 'string', description: 'Directory to search in (default: working directory)' },
-        },
-        required: ['pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
       name: 'get_file_lines',
       description: 'Get specific lines from a file (1-based, inclusive). Defaults to 10 lines if end is omitted.',
       parameters: {
@@ -894,48 +892,6 @@ const TOOL_DEFS = [
           end: { type: 'number', description: 'Ending line number (1-based, inclusive)' },
         },
         required: ['path', 'start'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'replace_in_file',
-      description: 'Find-and-replace literal text everywhere in a file. The pattern is treated as plain text, not regex, unless is_regex is true. For precise single edits to code, prefer edit_file.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path to modify' },
-          pattern: { type: 'string', description: 'Literal text to find (or a JavaScript regex if is_regex is true)' },
-          replacement: { type: 'string', description: 'Replacement text' },
-          is_regex: { type: 'boolean', description: 'Treat pattern as a regular expression (default false)' },
-          flags: { type: 'string', description: 'Regex flags when is_regex is true (default "g")' },
-        },
-        required: ['path', 'pattern', 'replacement'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'count_lines',
-      description: 'Count lines in a file.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'File path' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_file_type',
-      description: 'Determine the file type based on its extension.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'File path' } },
-        required: ['path'],
       },
     },
   },
@@ -1107,75 +1063,12 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
-      name: 'calculate_file_hash',
-      description: 'Calculate the hash of a file using the specified algorithm.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Path to the file.' },
-          algorithm: { type: 'string', description: 'Hashing algorithm (e.g., sha256, md5, sha1). Defaults to sha256.' },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
       name: 'list_processes',
       description: 'List running processes, optionally filtered by a pattern. Always requires approval because command arguments can contain credentials or private data.',
       parameters: {
         type: 'object',
         properties: {
           pattern: { type: 'string', description: 'Pattern to filter processes by name.' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'analyze_file_structure',
-      description: 'Generate a tree view of a directory structure. Skips .git and node_modules. Useful for understanding project layout before deeper exploration.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Directory to analyze (default: working directory)' },
-          depth: { type: 'number', description: 'Maximum depth to recurse (default: 3, max: 8)' },
-          include_files: { type: 'boolean', description: 'Include individual files in the tree, not just directories (default: true)' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'pattern_search_deep',
-      description: 'Search for a pattern in files with filtering by file type, context lines, and result limits. More targeted than search_files.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Text or regex pattern to search for' },
-          path: { type: 'string', description: 'Directory to search in (default: working directory)' },
-          file_pattern: { type: 'string', description: 'Glob pattern to filter which files to search (e.g. "*.js", "src/**/*.ts")' },
-          context_lines: { type: 'number', description: 'Number of lines of context to include before and after each match (default: 2)' },
-          max_results: { type: 'number', description: 'Maximum number of matching lines to return (default: 50)' },
-          is_regex: { type: 'boolean', description: 'Treat pattern as a regular expression (default: false)' },
-        },
-        required: ['pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'find_largest_files',
-      description: 'Find the largest files in a directory (skips .git and node_modules).',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Directory path to search in' },
-          count: { type: 'number', description: 'Number of largest files to return (default: 10)' },
         },
       },
     },
@@ -1271,7 +1164,6 @@ const RISKY_TOOLS = new Set([
   'delete_file',
   'copy_file',
   'move_file',
-  'replace_in_file',
   'edit_file',
   'edit_files',
   'create_git_branch',
@@ -1318,13 +1210,57 @@ async function executeTool(name, args, cwd) {
         + selfTalkNote(content)
         + futilityNote;
     }
-    case 'list_directory': {
-      const p = resolveInside(cwd, args.path);
-      const entries = fs.readdirSync(p, { withFileTypes: true })
-        .filter((e) => e.name !== '.git' && e.name !== 'node_modules')
-        .map((e) => (e.isDirectory() ? e.name + '/' : e.name))
-        .sort();
-      return truncate(entries.join('\n') || '(empty directory)');
+    case 'browse_files': {
+      const root = resolveInside(cwd, args.path);
+      if (!fs.statSync(root).isDirectory()) return `Error: ${args.path || root} is not a directory.`;
+      const maxDepth = Math.min(Math.max(Math.round(Number(args.depth) || 1), 1), 8);
+      const maxResults = Math.min(Math.max(Math.round(Number(args.max_results) || 200), 1), 500);
+      const fileGlob = args.glob ? globToRegex(String(args.glob)) : null;
+      const includeFiles = args.include_files !== false;
+      const matchesGlob = (filePath) => {
+        if (!fileGlob) return true;
+        const rel = path.relative(root, filePath).split(path.sep).join('/');
+        return fileGlob.test(rel) || fileGlob.test(path.basename(filePath));
+      };
+      if (args.sort === 'size') {
+        const files = [];
+        const collect = (dir, depth) => {
+          let entries;
+          try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+          for (const entry of entries) {
+            if (entry.name === '.git' || entry.name === 'node_modules') continue;
+            const candidate = path.join(dir, entry.name);
+            if (entry.isDirectory() && depth < maxDepth) collect(candidate, depth + 1);
+            else if (entry.isFile() && matchesGlob(candidate)) {
+              try { files.push({ path: candidate, size: fs.statSync(candidate).size }); } catch {}
+            }
+          }
+        };
+        collect(root, 1);
+        return truncate(files.sort((a, b) => b.size - a.size).slice(0, maxResults)
+          .map((file) => `${path.relative(cwd, file.path)}: ${file.size} bytes`).join('\n') || '(no files found)');
+      }
+      const lines = [path.basename(root) + '/'];
+      let shownFiles = 0;
+      const tree = (dir, prefix, depth) => {
+        if (depth > maxDepth || shownFiles >= maxResults) return;
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        entries = entries.filter((entry) => entry.name !== '.git' && entry.name !== 'node_modules')
+          .filter((entry) => entry.isDirectory() || (includeFiles && matchesGlob(path.join(dir, entry.name))))
+          .sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1));
+        for (let index = 0; index < entries.length && shownFiles < maxResults; index++) {
+          const entry = entries[index];
+          const last = index === entries.length - 1;
+          const child = path.join(dir, entry.name);
+          lines.push(prefix + (last ? '└── ' : '├── ') + entry.name + (entry.isDirectory() ? '/' : ''));
+          if (entry.isDirectory()) tree(child, prefix + (last ? '    ' : '│   '), depth + 1);
+          else shownFiles++;
+        }
+      };
+      tree(root, '', 1);
+      if (shownFiles >= maxResults) lines.push(`… file result limit reached (${maxResults})`);
+      return truncate(lines.join('\n'));
     }
     case 'run_command': {
       return new Promise((resolve) => {
@@ -1399,18 +1335,46 @@ async function executeTool(name, args, cwd) {
       return truncate(JSON.stringify(result, null, 2));
     }
     case 'search_files': {
-      const dir = resolveInside(cwd, args.path);
-      return new Promise((resolve) => {
-        execFile(
-          'grep',
-          ['-rn', '--exclude-dir=.git', '--exclude-dir=node_modules', '-I', '-m', '200', '-e', args.pattern, '.'],
-          { cwd: dir, timeout: 30_000, maxBuffer: 4_000_000 },
-          (err, stdout) => {
-            if (err && !stdout) return resolve('No matches found.');
-            resolve(truncate(stdout));
-          }
-        );
+      const target = resolveInside(cwd, args.path);
+      const maxResults = Math.min(Math.max(Math.round(Number(args.max_results) || 100), 1), 300);
+      const contextLines = Math.min(Math.max(Math.round(Number(args.context_lines) || 0), 0), 10);
+      const fileGlob = args.file_pattern ? globToRegex(String(args.file_pattern)) : null;
+      let matcher;
+      try {
+        const source = args.is_regex ? String(args.pattern) : String(args.pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        matcher = new RegExp(source, args.case_sensitive ? '' : 'i');
+      } catch (err) {
+        return `Error: invalid search expression: ${err.message}`;
+      }
+      const candidates = [];
+      if (fs.statSync(target).isFile()) candidates.push(target);
+      else walkDir(target, (filePath) => {
+        const rel = path.relative(target, filePath).split(path.sep).join('/');
+        if (!fileGlob || fileGlob.test(rel) || fileGlob.test(path.basename(filePath))) candidates.push(filePath);
       });
+      const results = [];
+      for (const filePath of candidates) {
+        if (results.length >= maxResults) break;
+        let lines;
+        try {
+          if (fs.statSync(filePath).size > 2_000_000) continue;
+          lines = fs.readFileSync(filePath, 'utf8').split('\n');
+        } catch { continue; }
+        for (let index = 0; index < lines.length && results.length < maxResults; index++) {
+          if (!matcher.test(lines[index])) continue;
+          const rel = path.relative(cwd, filePath);
+          if (!contextLines) results.push(`${rel}:${index + 1}: ${lines[index]}`);
+          else {
+            const start = Math.max(0, index - contextLines);
+            const end = Math.min(lines.length - 1, index + contextLines);
+            results.push(`--- ${rel} ---\n` + lines.slice(start, end + 1).map((line, offset) => {
+              const lineNo = start + offset + 1;
+              return `${lineNo === index + 1 ? '>' : ' '} ${lineNo}: ${line}`;
+            }).join('\n'));
+          }
+        }
+      }
+      return results.length ? truncate(results.join(contextLines ? '\n\n' : '\n')) : 'No matches found.';
     }
     case 'search_local_docs': {
       const query = String(args.query || '');
@@ -1517,26 +1481,27 @@ async function executeTool(name, args, cwd) {
       fs.unlinkSync(p);
       return `Deleted file ${p}`;
     }
-    case 'search_in_file': {
-      const p = resolveInside(cwd, args.path);
-      const lines = fs.readFileSync(p, 'utf8').split('\n');
-      const regex = new RegExp(args.pattern);
-      const results = [];
-      for (let i = 0; i < lines.length && results.length < 200; i++) {
-        if (regex.test(lines[i])) results.push(`${i + 1}: ${lines[i]}`);
-      }
-      return results.length ? truncate(results.join('\n')) : 'No matches found.';
-    }
-    case 'file_info': {
+    case 'file_metadata': {
       const p = resolveInside(cwd, args.path);
       const stat = fs.statSync(p);
-      return JSON.stringify({
+      const metadata = {
+        path: path.relative(cwd, p) || '.',
         size: stat.size,
         modified: stat.mtime.toISOString(),
-        isDirectory: stat.isDirectory(),
-        isFile: stat.isFile(),
+        created: stat.birthtime.toISOString(),
+        is_directory: stat.isDirectory(),
+        is_file: stat.isFile(),
         permissions: stat.mode.toString(8),
-      });
+        type: stat.isDirectory() ? 'directory' : fileTypeForPath(p),
+      };
+      if (stat.isFile() && stat.size <= 2_000_000) {
+        try { metadata.line_count = fs.readFileSync(p, 'utf8').split('\n').length; } catch {}
+      }
+      if (args.include_hash && stat.isFile()) {
+        const algorithm = args.hash_algorithm || 'sha256';
+        metadata.hash = { algorithm, value: crypto.createHash(algorithm).update(fs.readFileSync(p)).digest('hex') };
+      }
+      return JSON.stringify(metadata, null, 2);
     }
     case 'copy_file': {
       const source = resolveInside(cwd, args.source);
@@ -1552,16 +1517,6 @@ async function executeTool(name, args, cwd) {
       fs.renameSync(source, dest);
       return `Moved ${source} to ${dest}`;
     }
-    case 'find_files': {
-      const dir = resolveInside(cwd, args.path);
-      const re = globToRegex(args.pattern);
-      const out = [];
-      walkDir(dir, (f) => {
-        const rel = path.relative(dir, f);
-        if (re.test(rel) || re.test(path.basename(f))) out.push(path.relative(cwd, f));
-      });
-      return truncate(out.slice(0, 500).join('\n')) || '(no files found)';
-    }
     case 'get_file_lines': {
       const p = resolveInside(cwd, args.path);
       const lines = fs.readFileSync(p, 'utf8').split('\n');
@@ -1576,12 +1531,28 @@ async function executeTool(name, args, cwd) {
       const newS = String(args.new_string ?? '');
       if (!oldS) return 'Error: old_string must not be empty.';
       if (oldS === newS) return 'Error: old_string and new_string are identical.';
-      // exact match first; fall back to trailing-whitespace-normalized match
+      // Exact match first; regex mode keeps global replacement under the same
+      // guarded editing path, while literal mode can normalize trailing space.
       const trimLines = s => s.split('\n').map(l => l.trimEnd()).join('\n');
       let updated;
-      let count = content.split(oldS).length - 1;
+      let count = 0;
       let fuzzy = false;
-      if (count === 0) {
+      if (args.is_regex) {
+        let flags = String(args.flags || '');
+        if (args.replace_all && !flags.includes('g')) flags += 'g';
+        try {
+          const countFlags = flags.replace(/g/g, '') + 'g';
+          count = [...content.matchAll(new RegExp(oldS, countFlags))].length;
+          if (!count) return `Error: old_string regex not found in ${p}.`;
+          if (count > 1 && !args.replace_all) return `Error: old_string regex appears ${count} times in ${p}. Include more context or set replace_all to true.`;
+          updated = content.replace(new RegExp(oldS, flags), newS);
+        } catch (err) {
+          return `Error: invalid regular expression: ${err.message}`;
+        }
+      } else {
+        count = content.split(oldS).length - 1;
+      }
+      if (!args.is_regex && count === 0) {
         const normContent = trimLines(content);
         const normOld = trimLines(oldS);
         count = normContent.split(normOld).length - 1;
@@ -1589,9 +1560,12 @@ async function executeTool(name, args, cwd) {
         if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times (after whitespace normalization) in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
         updated = normContent.split(normOld).join(trimLines(newS));
         fuzzy = true;
-      } else {
+      } else if (!args.is_regex) {
         if (count > 1 && !args.replace_all) return `Error: old_string appears ${count} times in ${p}. Include more surrounding lines to make it unique, or set replace_all to true.`;
         updated = content.split(oldS).join(newS);
+      }
+      if (updated.length > content.length * 3 + 100_000) {
+        return `Error: this edit would grow the file from ${content.length} to ${updated.length} chars — refusing.`;
       }
       const tmp = p + '.~check' + path.extname(p);
       try {
@@ -1672,66 +1646,6 @@ async function executeTool(name, args, cwd) {
       return `Batch edit complete: ${total} replacement(s) across ${files.size} file(s).\n`
         + results.map((result) => `- ${result.path}: ${result.replacements}`).join('\n')
         + '\nSyntax checks: OK' + notes;
-    }
-    case 'replace_in_file': {
-      const p = resolveForWrite(cwd, args.path);
-      const content = fs.readFileSync(p, 'utf8');
-      const pat = String(args.pattern ?? '');
-      const rep = String(args.replacement ?? '');
-      if (!pat) return 'Error: pattern must not be empty.';
-      let updated, count;
-      if (args.is_regex) {
-        const regex = new RegExp(pat, args.flags || 'g');
-        const matches = content.match(regex);
-        count = matches ? matches.length : 0;
-        if (!count) return `No matches for pattern in ${p} — file unchanged.`;
-        updated = content.replace(regex, rep);
-      } else {
-        count = content.split(pat).length - 1;
-        if (!count) return `No matches for text in ${p} — file unchanged.`;
-        updated = content.split(pat).join(rep);
-      }
-      // sanity guard: a bad pattern can explode the file (seen: 837k-line blowup)
-      if (updated.length > content.length * 3 + 100_000) {
-        return `Error: this replacement would grow the file from ${content.length} to ${updated.length} chars — refusing. The pattern is matching far more than intended.`;
-      }
-      const tmp = p + '.~check' + path.extname(p);
-      try {
-        fs.writeFileSync(tmp, updated, 'utf8');
-        const check = await syntaxCheck(tmp);
-        if (!check.ok) return `Replacement rejected — syntax error (original file unchanged):\n${check.msg}`;
-      } finally {
-        try { fs.unlinkSync(tmp); } catch {}
-      }
-      fs.writeFileSync(p, updated, 'utf8');
-      return `Replaced ${count} occurrence(s) in ${p}\nSyntax check: OK`;
-    }
-    case 'count_lines': {
-      const p = resolveInside(cwd, args.path);
-      const content = fs.readFileSync(p, 'utf8');
-      return `Total lines: ${content.split('\n').length}`;
-    }
-    case 'get_file_type': {
-      const p = resolveInside(cwd, args.path);
-      if (fs.statSync(p).isDirectory()) return 'directory';
-      const typeMap = {
-        '.js': 'javascript', '.ts': 'typescript', '.jsx': 'javascript-react', '.tsx': 'typescript-react',
-        '.html': 'html', '.css': 'css', '.json': 'json', '.md': 'markdown', '.txt': 'text',
-        '.py': 'python', '.java': 'java', '.cpp': 'cpp', '.c': 'c', '.go': 'go', '.rs': 'rust',
-        '.rb': 'ruby', '.sh': 'shell', '.sql': 'sql', '.yaml': 'yaml', '.yml': 'yaml', '.xml': 'xml',
-      };
-      return typeMap[path.extname(p).toLowerCase()] || 'unknown';
-    }
-    case 'find_largest_files': {
-      const dir = resolveInside(cwd, args.path);
-      const count = args.count || 10;
-      const files = [];
-      walkDir(dir, (f) => {
-        try { files.push({ path: f, size: fs.statSync(f).size }); } catch {}
-      });
-      files.sort((a, b) => b.size - a.size);
-      const result = files.slice(0, count).map((f) => `${path.relative(cwd, f.path)}: ${f.size} bytes`);
-      return result.join('\n') || '(no files found)';
     }
     case 'get_environment_variables': {
       if (!args.name) return 'Error: an exact environment variable name is required.';
@@ -2020,18 +1934,6 @@ async function executeTool(name, args, cwd) {
       gitArgs.push('-n', String(Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 20));
       return gitRun(gitArgs, cwd).then((res) => (res.ok ? truncate(res.out) : `Error: ${res.err}`));
     }
-    case 'calculate_file_hash': {
-      const p = resolveInside(cwd, args.path);
-      const algorithm = args.algorithm || 'sha256';
-      try {
-        const fileBuffer = fs.readFileSync(p);
-        const hashSum = crypto.createHash(algorithm);
-        hashSum.update(fileBuffer);
-        return `${algorithm.toUpperCase()}: ${hashSum.digest('hex')}`;
-      } catch (err) {
-        return `Error: ${err.message}`;
-      }
-    }
     case 'initiate_research_session': {
       const p = resolveInside(cwd, 'RESEARCH_LOG.md');
       const content = `# Research Session: ${args.objective}\n\n## Observations\n`;
@@ -2180,71 +2082,6 @@ async function executeTool(name, args, cwd) {
         clearTimeout(timer);
       }
     }
-    case 'analyze_file_structure': {
-      const dir = resolveInside(cwd, args.path);
-      const maxDepth = Math.min(args.depth ?? 3, 8);
-      const includeFiles = args.include_files !== false;
-      const lines = [path.basename(dir) + '/'];
-      function buildTree(d, prefix, depth) {
-        if (depth > maxDepth) return;
-        let entries;
-        try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-        entries = entries.filter(e => e.name !== '.git' && e.name !== 'node_modules').sort((a, b) => {
-          if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
-          return a.name.localeCompare(b.name);
-        });
-        for (let i = 0; i < entries.length; i++) {
-          const e = entries[i];
-          const last = i === entries.length - 1;
-          const connector = last ? '└── ' : '├── ';
-          const childPrefix = last ? '    ' : '│   ';
-          if (e.isDirectory()) {
-            lines.push(prefix + connector + e.name + '/');
-            buildTree(path.join(d, e.name), prefix + childPrefix, depth + 1);
-          } else if (includeFiles) {
-            lines.push(prefix + connector + e.name);
-          }
-        }
-      }
-      buildTree(dir, '', 1);
-      return truncate(lines.join('\n'));
-    }
-    case 'pattern_search_deep': {
-      const dir = resolveInside(cwd, args.path);
-      const ctxLines = Math.min(args.context_lines ?? 2, 10);
-      const maxResults = Math.min(args.max_results ?? 50, 300);
-      const fileRe = args.file_pattern ? globToRegex(args.file_pattern) : null;
-      let searchRe;
-      try {
-        searchRe = args.is_regex ? new RegExp(args.pattern) : new RegExp(args.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-      } catch (e) {
-        return `Error: invalid regex pattern: ${e.message}`;
-      }
-      const allMatches = [];
-      walkDir(dir, (filePath) => {
-        if (allMatches.length >= maxResults) return;
-        if (fileRe) {
-          const rel = path.relative(dir, filePath);
-          if (!fileRe.test(rel) && !fileRe.test(path.basename(filePath))) return;
-        }
-        let content;
-        try { content = fs.readFileSync(filePath, 'utf8'); } catch { return; }
-        const lines = content.split('\n');
-        for (let i = 0; i < lines.length && allMatches.length < maxResults; i++) {
-          if (searchRe.test(lines[i])) {
-            const start = Math.max(0, i - ctxLines);
-            const end = Math.min(lines.length - 1, i + ctxLines);
-            const ctx = lines.slice(start, end + 1).map((l, idx) => {
-              const lineNum = start + idx + 1;
-              const marker = (start + idx === i) ? '>' : ' ';
-              return `${marker} ${lineNum}: ${l}`;
-            }).join('\n');
-            allMatches.push(`--- ${path.relative(cwd, filePath)} ---\n${ctx}`);
-          }
-        }
-      });
-      return allMatches.length ? truncate(allMatches.join('\n\n')) : 'No matches found.';
-    }
     case 'list_processes': {
       const pattern = args.pattern ? new RegExp(args.pattern, 'i') : null;
       return new Promise((resolve) => {
@@ -2276,11 +2113,9 @@ function gitRun(args, cwd, env) {
 // The restricted toolset available to subagents (run_subagent): read/search/
 // analyze only. No writes, shell, ask_user, or nesting.
 const SUBAGENT_TOOL_NAMES = new Set([
-  'read_file', 'list_directory', 'search_files', 'search_in_file', 'find_files',
-  'search_local_docs',
-  'get_file_lines', 'file_info', 'count_lines', 'get_file_type',
-  'analyze_file_structure', 'pattern_search_deep', 'find_largest_files',
-  'get_git_log', 'read_git_diff', 'calculate_file_hash', 'check_port_usage',
+  'read_file', 'browse_files', 'search_files', 'search_local_docs',
+  'get_file_lines', 'file_metadata',
+  'get_git_log', 'read_git_diff', 'check_port_usage',
 ]);
 const SUBAGENT_TOOLS = TOOL_DEFS.filter((d) => SUBAGENT_TOOL_NAMES.has(d.function.name));
 
@@ -2343,10 +2178,8 @@ const ORCHESTRATOR_TOOLS = [
 
 const CODER_TOOL_NAMES = new Set([
   'read_file', 'write_file', 'edit_file', 'edit_files', 'append_file',
-  'create_directory', 'delete_file', 'copy_file', 'move_file', 'replace_in_file',
-  'list_directory', 'search_files', 'search_in_file', 'find_files',
-  'search_local_docs', 'get_file_lines', 'file_info', 'count_lines',
-  'get_file_type', 'analyze_file_structure', 'pattern_search_deep',
+  'create_directory', 'delete_file', 'copy_file', 'move_file',
+  'browse_files', 'search_files', 'search_local_docs', 'get_file_lines', 'file_metadata',
   'run_command', 'run_project_check', 'git_status', 'read_git_diff',
 ]);
 const CODER_TOOLS = TOOL_DEFS.filter((d) => CODER_TOOL_NAMES.has(d.function.name));
