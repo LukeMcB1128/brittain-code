@@ -250,6 +250,7 @@ function setAppMode(mode, persist = true, refreshHistory = true) {
     ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
     : 'Describe a task... (Enter to send, Shift+Enter for newline)';
   if (persist) localStorage.setItem('appMode', appMode);
+  syncMissionCard();
   refreshGit();
   if (refreshHistory) loadChatHistory();
 }
@@ -316,6 +317,7 @@ function setCwd(p) {
   $('cwd-label').textContent = parts.slice(-2).join('/') || p;
   $('cwd-btn').title = p;
   undoBtn.disabled = true; // checkpoints are per-folder; a new DIR has none yet
+  syncMissionCard();
   refreshGit();
 }
 
@@ -1099,9 +1101,33 @@ function missionStatusText(mission) {
   ].join('\n');
 }
 
+function normalizedMissionPath(value) {
+  const normalized = String(value || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  // Windows paths are case-insensitive; leave POSIX paths untouched.
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function shouldDisplayMission(mission = latestMission) {
+  return appMode === 'code'
+    && !!cwd
+    && !!mission?.projectPath
+    && normalizedMissionPath(cwd) === normalizedMissionPath(mission.projectPath);
+}
+
+function clearMissionCard() {
+  missionCard?.remove();
+  missionCard = null;
+}
+
+function syncMissionCard() {
+  if (!shouldDisplayMission()) return clearMissionCard();
+  upsertMissionCard(latestMission);
+}
+
 function upsertMissionCard(mission) {
   if (!mission) return;
   latestMission = mission;
+  if (!shouldDisplayMission(mission)) return clearMissionCard();
   if (!missionCard) {
     missionCard = document.createElement('section');
     missionCard.className = 'mission-card';
