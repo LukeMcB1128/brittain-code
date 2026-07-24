@@ -1,0 +1,14 @@
+Repair and harden the fraud-scoring pipeline in pipeline.py.
+
+This task is about ML-style reasoning, not external libraries. Keep it fully standard-library and deterministic.
+
+Contract:
+- split_rows(rows, validation_ratio, seed) must validate inputs, be deterministic for the same seed, vary across different seeds, and return detached train/validation rows without mutating caller input.
+- Rows contain id, tx_count, chargeback_ratio, avg_amount, and label. Validate them strictly.
+- train_model(rows) must require both classes and compute distinct positive/negative centroids from the labeled training rows only.
+- choose_threshold(scored_rows) must choose the threshold that maximizes validation F1. Break ties by higher precision, then lower threshold.
+- fit_pipeline(rows, validation_ratio, seed) must train only on the training split, calibrate only on the validation split, and return { model, threshold, metrics } with deterministic numeric metrics.
+- predict(model_bundle, rows) returns one 0/1 prediction per row.
+- save_model() and load_model() must round-trip without aliases and reject malformed snapshots.
+
+Do not add third-party dependencies. Do not modify test_pipeline.py. Verify with the repository's declared test check.

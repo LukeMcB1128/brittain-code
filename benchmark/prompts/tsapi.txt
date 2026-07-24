@@ -1,0 +1,11 @@
+Complete and harden the TypeScript API layer across api.ts and directory.ts.
+
+Contract:
+- requestJson(fetchImpl, url, init) must set Accept: application/json, preserve caller headers, parse JSON success responses, and map non-2xx responses to a typed ApiError.
+- 304 responses must preserve ETag information and produce a distinguishable not-modified result.
+- ApiError must classify 429 as retryable with a useful code, and distinguish 404 from generic API failures.
+- listAllUsers(fetchImpl, baseUrl, etag) must follow cursor pagination in order, reject cursor loops and malformed pages, and return detached user data plus the correct ETag.
+- syncDirectory(fetchImpl, baseUrl, cache) must reuse cached data on 304 without aliasing caller objects.
+- createInvite(fetchImpl, baseUrl, email, idempotencyKey) must validate inputs before fetch, send JSON with the correct headers, and require a nonempty idempotency key.
+
+Do not add dependencies. Do not modify test.ts. Verify with the repository's declared test check.
