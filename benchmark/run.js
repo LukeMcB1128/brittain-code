@@ -14,6 +14,7 @@ Usage:
   node benchmark/run.js --models 'local:*' --tasks all
   node benchmark/run.js --models ollama:laguna-xs-2.1:latest,openai:gpt-5.6-sol --tasks cart,feature
   node benchmark/run.js --models 'local:*,openai:gpt-5.6-sol' --tasks all --promote-top 5 --total-repeats 3
+  node benchmark/run.js --resume 2026-07-24T21-44-02-212Z
 
 Flags:
   --models <list>           Comma-separated model specs. Bare names default to ollama.
@@ -28,6 +29,7 @@ Flags:
   --temperature <n>         Sampling temperature (default 0.2)
   --think <on|off>          Enable provider thinking when supported (default on)
   --max-steps <n>           Max agent steps per run (default 30)
+  --resume <batch>          Resume an existing batch id or manifest path
   --list-local-models       Print Ollama model names and exit
   --dry-run                 Show the plan without executing runs
   --help                    Show this help
@@ -57,6 +59,7 @@ function parseArgs(argv) {
     else if (arg === '--context-cap') args.contextCap = Number(argv[++i]);
     else if (arg === '--temperature') args.temperature = Number(argv[++i]);
     else if (arg === '--max-steps') args.maxSteps = Number(argv[++i]);
+    else if (arg === '--resume') args.resume = argv[++i];
     else if (arg === '--think') {
       const value = String(argv[++i] || '').toLowerCase();
       args.think = value === 'on' ? true : value === 'off' ? false : args.think;
@@ -116,6 +119,25 @@ function ensureFixture(taskId, fixtureRoot) {
   return dir;
 }
 
+function resolveResumeManifest(resumeArg, outputRoot) {
+  const explicit = path.resolve(resumeArg);
+  if (fs.existsSync(explicit) && fs.statSync(explicit).isFile()) return explicit;
+  const asBatchDir = path.join(outputRoot, resumeArg, 'manifest.json');
+  if (fs.existsSync(asBatchDir)) return asBatchDir;
+  throw new Error(`Could not find resume manifest for ${resumeArg}`);
+}
+
+function runKey(runSpec) {
+  return [runSpec.phase, runSpec.repeat, runSpec.modelSpec, runSpec.taskId].join('|');
+}
+
+function upsertManifestRun(manifest, entry) {
+  const key = runKey(entry);
+  const index = manifest.runs.findIndex((run) => runKey(run) === key);
+  if (index >= 0) manifest.runs[index] = entry;
+  else manifest.runs.push(entry);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) return help();
@@ -134,20 +156,41 @@ async function main() {
     return;
   }
 
-  const taskIds = resolveTasks(args.tasks || 'all');
-  const modelSpecs = await expandModelSpecs(args.models, providers);
-  if (!modelSpecs.length) throw new Error('No models resolved from --models.');
+  let taskIds = resolveTasks(args.tasks || 'all');
+  let modelSpecs = args.resume ? [] : await expandModelSpecs(args.models, providers);
+  if (!args.resume && !modelSpecs.length) throw new Error('No models resolved from --models.');
 
-  const batchId = new Date().toISOString().replace(/[:.]/g, '-');
-  const batchDir = path.join(outputRoot, batchId);
-  const chatDir = path.join(batchDir, 'chats');
-  const manifestPath = path.join(batchDir, 'manifest.json');
+  let batchId = new Date().toISOString().replace(/[:.]/g, '-');
+  let batchDir = path.join(outputRoot, batchId);
+  let chatDir = path.join(batchDir, 'chats');
+  let manifestPath = path.join(batchDir, 'manifest.json');
+  let manifest;
+  let resumed = false;
+
+  if (args.resume) {
+    manifestPath = resolveResumeManifest(args.resume, outputRoot);
+    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    batchDir = path.dirname(manifestPath);
+    batchId = manifest.batchId || path.basename(batchDir);
+    chatDir = path.join(batchDir, 'chats');
+    taskIds = manifest.taskIds;
+    modelSpecs = manifest.modelSpecs;
+    args.temperature = manifest.settings?.temperature ?? args.temperature;
+    args.think = manifest.settings?.think ?? args.think;
+    args.contextCap = manifest.settings?.contextCap ?? args.contextCap;
+    args.maxSteps = manifest.settings?.maxSteps ?? args.maxSteps;
+    args.promoteTop = manifest.settings?.promoteTop ?? args.promoteTop;
+    args.repeats = manifest.settings?.initialRepeats ?? args.repeats;
+    args.totalRepeats = manifest.settings?.totalRepeats ?? args.totalRepeats;
+    resumed = true;
+  }
+
   initTools(path.join(batchDir, 'tool-state'));
   fs.mkdirSync(chatDir, { recursive: true });
 
   const initialRepeats = args.promoteTop ? 1 : args.repeats;
   const totalRepeats = args.promoteTop ? Math.max(initialRepeats, args.totalRepeats || 3) : args.repeats;
-  const manifest = {
+  manifest = manifest || {
     batchId,
     startedAt: new Date().toISOString(),
     fixtureRoot,
@@ -166,20 +209,53 @@ async function main() {
     runs: [],
     rankings: [],
   };
+  manifest.fixtureRoot = fixtureRoot;
+  manifest.outputRoot = batchDir;
+  manifest.taskIds = taskIds;
+  manifest.modelSpecs = modelSpecs;
+  manifest.settings = {
+    initialRepeats,
+    totalRepeats,
+    promoteTop: args.promoteTop || null,
+    temperature: args.temperature,
+    think: args.think,
+    contextCap: args.contextCap || null,
+    maxSteps: args.maxSteps,
+  };
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
-  console.log(`Batch ${batchId}`);
+  console.log(`${resumed ? 'Resuming' : 'Batch'} ${batchId}`);
   console.log(`Tasks : ${taskIds.join(', ')}`);
   console.log(`Models: ${modelSpecs.join(', ')}`);
   console.log(`Pass 1 repeats: ${initialRepeats}`);
   if (args.promoteTop) console.log(`Promotion: top ${args.promoteTop} continue to ${totalRepeats} total repeats`);
   if (args.dryRun) return;
 
-  const batchRecords = [];
+  const batchRecords = manifest.runs
+    .filter((run) => run.chatId && run.taskId !== undefined && run.total !== undefined)
+    .map((run) => ({
+      phase: run.phase,
+      repeat: run.repeat,
+      modelSpec: run.modelSpec,
+      taskId: run.taskId,
+      fixtureDir: run.fixtureDir || null,
+      chatPath: run.chatPath,
+      chatId: run.chatId,
+      gradeRecord: {
+        task: run.taskId,
+        total: run.total,
+        fullPass: !!run.fullPass,
+        zeroed: !!run.zeroed,
+      },
+    }));
+  const completedKeys = new Set(manifest.runs.filter((run) => run.chatId && run.total !== undefined).map(runKey));
   const runQueue = [];
   for (let repeat = 1; repeat <= initialRepeats; repeat++) {
     for (const modelSpec of modelSpecs) {
-      for (const taskId of taskIds) runQueue.push({ phase: 'initial', repeat, modelSpec, taskId });
+      for (const taskId of taskIds) {
+        const spec = { phase: 'initial', repeat, modelSpec, taskId };
+        if (!completedKeys.has(runKey(spec))) runQueue.push(spec);
+      }
     }
   }
 
@@ -213,7 +289,7 @@ async function main() {
       gradeRecord: graded.record,
     };
     batchRecords.push(record);
-    manifest.runs.push({
+    upsertManifestRun(manifest, {
       phase: runSpec.phase,
       repeat: runSpec.repeat,
       modelSpec: runSpec.modelSpec,
@@ -223,12 +299,30 @@ async function main() {
       zeroed: graded.record.zeroed,
       chatId: result.chatId,
       chatPath: result.chatPath,
+      fixtureDir,
     });
     fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   }
 
   try {
-    for (const runSpec of runQueue) await executeRun(runSpec);
+    for (const runSpec of runQueue) {
+      try {
+        await executeRun(runSpec);
+      } catch (err) {
+        const message = err.stack || err.message || String(err);
+        console.error(`[run error] ${runSpec.modelSpec} :: ${runSpec.taskId} :: repeat ${runSpec.repeat}`);
+        console.error(message);
+        upsertManifestRun(manifest, {
+          phase: runSpec.phase,
+          repeat: runSpec.repeat,
+          modelSpec: runSpec.modelSpec,
+          taskId: runSpec.taskId,
+          error: message,
+          failedAt: new Date().toISOString(),
+        });
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      }
+    }
 
     if (args.promoteTop && totalRepeats > initialRepeats) {
       const rankings = rankModels(batchRecords.filter((record) => record.phase === 'initial'), modelSpecs, taskIds);
@@ -238,7 +332,26 @@ async function main() {
       console.log(`Promoted: ${promoted.join(', ')}`);
       for (let repeat = initialRepeats + 1; repeat <= totalRepeats; repeat++) {
         for (const modelSpec of promoted) {
-          for (const taskId of taskIds) await executeRun({ phase: 'promoted', repeat, modelSpec, taskId });
+          for (const taskId of taskIds) {
+            const spec = { phase: 'promoted', repeat, modelSpec, taskId };
+            if (completedKeys.has(runKey(spec))) continue;
+            try {
+              await executeRun(spec);
+            } catch (err) {
+              const message = err.stack || err.message || String(err);
+              console.error(`[run error] ${spec.modelSpec} :: ${spec.taskId} :: repeat ${spec.repeat}`);
+              console.error(message);
+              upsertManifestRun(manifest, {
+                phase: spec.phase,
+                repeat: spec.repeat,
+                modelSpec: spec.modelSpec,
+                taskId: spec.taskId,
+                error: message,
+                failedAt: new Date().toISOString(),
+              });
+              fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+            }
+          }
         }
       }
     }

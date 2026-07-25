@@ -179,10 +179,12 @@ const wallTimeMs = Number(metrics.wallTimeMs) || null;
 const toolErrors = Number(metrics.toolErrors) || toolErrorsFromTranscript;
 const toolCalls = Number(metrics.toolCalls) || calls.length;
 const hasTeamWorkflowMessage = convo.some((message) => message.role === 'user' && /^(?:ORCHESTRATE|MISSION)\b/i.test(String(message.content || '')));
-const mode = Number(metrics.orchestrations) > 0 || Number(metrics.coderLoopIterations) > 0 || hasTeamWorkflowMessage ? 'team' : 'solo';
+const explicitMode = raw.mode === 'team' || raw.mode === 'solo' ? raw.mode : null;
+const hasRecordedTeamRoles = Boolean(raw.coderModel || raw.verifierModel || raw.subModel || Number(usage.coder?.calls) > 0 || Number(usage.verifier?.calls) > 0);
+const mode = explicitMode || (Number(metrics.orchestrations) > 0 || hasTeamWorkflowMessage || hasRecordedTeamRoles ? 'team' : 'solo');
 const plannerModel = raw.model || '(unknown)';
 const coderModel = mode === 'team' ? raw.coderModel || '(unknown)' : null;
-const verifierModel = mode === 'team' ? raw.subModel || '(unknown)' : null;
+const verifierModel = mode === 'team' ? raw.verifierModel || raw.subModel || '(unknown)' : null;
 const modelLabel = mode === 'team' ? `${plannerModel} → ${coderModel} → ${verifierModel}` : plannerModel;
 
 const ratioPoints = (pass, total, points) => Math.round((total ? pass / total : 0) * points);

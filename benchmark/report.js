@@ -15,8 +15,61 @@ const mean = (values) => {
   return usable.length ? Math.round((usable.reduce((sum, value) => sum + value, 0) / usable.length) * 10) / 10 : null;
 };
 
+function stripOllamaPrefix(value) {
+  return String(value ?? '').replace(/\bollama:/g, '');
+}
+
+function canonicalThink(settings = {}) {
+  return settings.think === undefined ? 'unknown' : settings.think ? 'on' : 'off';
+}
+
+function canonicalContext(settings = {}) {
+  return settings.contextCap || settings.requestedContextCap || null;
+}
+
+function unique(values) {
+  return [...new Set(values)];
+}
+
+function mergedDisplayLabel(entries) {
+  const baseLabel = entries[0]?.baseLabel || entries[0]?.modelLabel || entries[0]?.label || '(unknown)';
+  const allLabels = unique(entries.map((entry) => entry.label));
+  const contextFragments = unique(allLabels.map((label) => {
+    const match = String(label).match(/\(([^)]*ctx[^)]*)\)/);
+    return match ? match[1] : null;
+  }).filter(Boolean));
+  const settingParts = [];
+  if (contextFragments.length === 1 && entries.every((entry) => /\bctx\b/.test(String(entry.label)))) settingParts.push(contextFragments[0]);
+  if (entries[0]?.think !== 'unknown') settingParts.push(entries[0].think === 'on' ? 'think on' : 'think off');
+  return settingParts.length ? `${baseLabel} (${settingParts.join(', ')})` : baseLabel;
+}
+
+function canonicalGroupKey(row) {
+  const settings = row.settings || {};
+  return [
+    row.task || 'unknown',
+    number(row.taskVersion, 0),
+    row.mode || 'unknown',
+    stripOllamaPrefix(row.modelLabel || row.model || '(unknown)'),
+    canonicalThink(settings),
+  ].join('|');
+}
+
 function normalize(row) {
-  if (row.schemaVersion === 3) return row;
+  if (row.schemaVersion === 3) {
+    const model = stripOllamaPrefix(row.model || '');
+    const plannerModel = stripOllamaPrefix(row.plannerModel || row.model || '');
+    const coderModel = row.coderModel ? stripOllamaPrefix(row.coderModel) : row.coderModel;
+    const verifierModel = row.verifierModel ? stripOllamaPrefix(row.verifierModel) : row.verifierModel;
+    return {
+      ...row,
+      model: model || row.model,
+      plannerModel: plannerModel || row.plannerModel || row.model,
+      coderModel,
+      verifierModel,
+      modelLabel: stripOllamaPrefix(row.modelLabel || row.model || '(unknown)'),
+    };
+  }
   if (row.schemaVersion === 2) {
     return {
       ...row,
@@ -57,25 +110,30 @@ function normalize(row) {
 function aggregate(rows) {
   const groups = new Map();
   for (const row of rows) {
-    const key = row.configKey || [row.task, row.mode, row.modelLabel].join('|');
+    const key = canonicalGroupKey(row);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
   return [...groups.entries()].map(([key, runs]) => {
     const totals = runs.map((run) => number(run.total));
     const settings = runs[0].settings || {};
+    const baseLabel = runs[0].modelLabel;
+    const thinkState = canonicalThink(settings);
+    const contextCaps = unique(runs.map((run) => canonicalContext(run.settings || {})).filter(Boolean));
+    const everyRunHasSameContext = contextCaps.length === 1 && runs.every((run) => canonicalContext(run.settings || {}) === contextCaps[0]);
     const settingParts = [];
-    if (settings.contextCap) settingParts.push(`${Math.round(settings.contextCap / 1024)}k ctx`);
+    if (everyRunHasSameContext) settingParts.push(`${Math.round(contextCaps[0] / 1024)}k ctx`);
     if (settings.think !== undefined) settingParts.push(settings.think ? 'think on' : 'think off');
-    const displayLabel = settingParts.length ? `${runs[0].modelLabel} (${settingParts.join(', ')})` : runs[0].modelLabel;
+    const displayLabel = settingParts.length ? `${baseLabel} (${settingParts.join(', ')})` : baseLabel;
     return {
       key,
+      baseLabel,
       task: runs[0].task,
       taskVersion: number(runs[0].taskVersion, 1),
       taskLanguage: runs[0].taskLanguage || 'unknown',
       suiteVersion: number(runs[0].suiteVersion, 0),
       mode: runs[0].mode,
-      think: settings.think === undefined ? 'unknown' : settings.think ? 'on' : 'off',
+      think: thinkState,
       label: displayLabel,
       modelLabel: runs[0].modelLabel,
       runs: runs.length,
@@ -99,19 +157,23 @@ function aggregate(rows) {
 function averageAcrossTasks(groups, totalTaskCount) {
   const configs = new Map();
   for (const group of groups) {
-    const key = [group.mode, group.think, group.label].join('|');
+    const key = [group.mode, group.think, group.baseLabel || group.modelLabel || group.label].join('|');
     if (!configs.has(key)) configs.set(key, []);
     configs.get(key).push(group);
   }
   return [...configs.values()].map((entries) => {
     const byTask = new Map(entries.map((entry) => [entry.task, entry]));
     const qualified = [...byTask.values()].length === totalTaskCount && [...byTask.values()].every((entry) => entry.runs >= 3);
+    const baseLabel = entries[0].baseLabel || entries[0].modelLabel || entries[0].label;
+    const mergedLabel = mergedDisplayLabel(entries);
     return {
       ...entries[0],
+      baseLabel,
       task: 'all',
       taskCount: byTask.size,
       totalTaskCount,
       qualified,
+      label: mergedLabel,
       runs: entries.reduce((sum, entry) => sum + entry.runs, 0),
       median: mean(entries.map((entry) => entry.median)),
       min: Math.min(...entries.map((entry) => entry.min)),
@@ -189,18 +251,26 @@ function heatmap(groups, taskChoice, modeChoice, thinkChoice, tasks) {
     && (modeChoice === 'all' || group.mode === modeChoice)
     && (thinkChoice === 'all' || group.think === thinkChoice));
   if (!filtered.length || taskChoice !== 'all') return '<p class="muted empty-view">Task matrix is available when viewing all tasks.</p>';
-  const labels = [...new Set(filtered.map((group) => group.label))].sort((a, b) => {
-    const scoreA = mean(filtered.filter((group) => group.label === a).map((group) => group.median)) || 0;
-    const scoreB = mean(filtered.filter((group) => group.label === b).map((group) => group.median)) || 0;
-    return scoreB - scoreA || a.localeCompare(b);
-  });
+  const modelGroups = new Map();
+  for (const group of filtered) {
+    const key = group.baseLabel || group.modelLabel || group.label;
+    if (!modelGroups.has(key)) modelGroups.set(key, []);
+    modelGroups.get(key).push(group);
+  }
+  const labels = [...modelGroups.entries()]
+    .sort((a, b) => {
+      const scoreA = mean(a[1].map((group) => group.median)) || 0;
+      const scoreB = mean(b[1].map((group) => group.median)) || 0;
+      return scoreB - scoreA || a[0].localeCompare(b[0]);
+    })
+    .map(([key, entries]) => ({ key, label: mergedDisplayLabel(entries), entries }));
   const cell = (group) => {
     if (!group) return '<td class="heat empty">—</td>';
     const alpha = Math.max(0.08, number(group.median) / 100);
     return `<td class="heat" style="background:rgba(9,105,218,${alpha})"><b>${group.median}</b><small>n=${group.runs}</small></td>`;
   };
-  const rows = labels.map((label) => {
-    const row = tasks.map((task) => filtered.find((group) => group.label === label && group.task === task));
+  const rows = labels.map(({ key, label, entries }) => {
+    const row = tasks.map((task) => entries.find((group) => group.task === task));
     const qualified = row.every((entry) => entry && entry.runs >= 3);
     return `<tr><th class="left">${esc(label)}${qualified ? ' <span class="badge">qualified</span>' : ''}</th>${row.map(cell).join('')}</tr>`;
   }).join('');

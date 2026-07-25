@@ -101,7 +101,6 @@ async function runSingleBenchmark({
 
   for (let step = 0; step < maxSteps; step++) {
     metrics.loopIterations += 1;
-    metrics.coderLoopIterations += 1;
     const { assistantMessage, usage } = await provider.respond({
       model: providerModel,
       systemPrompt: system,
@@ -180,7 +179,11 @@ async function runSingleBenchmark({
     cwd: fixtureDir,
     title: `${task.title} — ${provider.label(providerModel)}`,
     timestamp: nowIso(),
+    mode: 'solo',
     model: provider.label(providerModel),
+    plannerModel: provider.label(providerModel),
+    coderModel: null,
+    verifierModel: null,
     think: !!think,
     onlineResearch: false,
     autoApprove: true,

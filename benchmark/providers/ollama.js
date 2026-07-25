@@ -9,15 +9,33 @@ class OllamaProvider {
     return `ollama:${model}`;
   }
 
+  shouldRetry(err) {
+    const message = String(err?.message || err || '');
+    return /fetch failed|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|UND_ERR|aborted|terminated/i.test(message);
+  }
+
   async json(route, body, signal) {
-    const res = await fetch(this.baseUrl + route, {
-      method: body ? 'POST' : 'GET',
-      headers: { 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined,
-      signal,
-    });
-    if (!res.ok) throw new Error(`Ollama ${route} failed: ${res.status} ${await res.text()}`);
-    return res.json();
+    const attempts = [0, 1500, 4000];
+    let lastError;
+    for (let index = 0; index < attempts.length; index++) {
+      if (attempts[index]) {
+        await new Promise((resolve) => setTimeout(resolve, attempts[index]));
+      }
+      try {
+        const res = await fetch(this.baseUrl + route, {
+          method: body ? 'POST' : 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          body: body ? JSON.stringify(body) : undefined,
+          signal,
+        });
+        if (!res.ok) throw new Error(`Ollama ${route} failed: ${res.status} ${await res.text()}`);
+        return res.json();
+      } catch (err) {
+        lastError = err;
+        if (!this.shouldRetry(err) || index === attempts.length - 1) throw err;
+      }
+    }
+    throw lastError;
   }
 
   async listModels() {
