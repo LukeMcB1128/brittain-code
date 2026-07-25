@@ -80,6 +80,9 @@ async function runSingleBenchmark({
   chatDir,
 }) {
   const runStartedAt = Date.now();
+  const effectiveThink = typeof provider.effectiveThink === 'function'
+    ? !!provider.effectiveThink({ model: providerModel, requested: !!think })
+    : !!think;
   const conversation = [{ role: 'user', content: promptText }];
   const system = systemPrompt(promptText);
   const aggregateUsage = { prompt: 0, gen: 0, calls: 0, loadMs: 0, promptEvalMs: 0, generationMs: 0, totalMs: 0 };
@@ -108,7 +111,7 @@ async function runSingleBenchmark({
       tools: CODER_TOOLS,
       contextCap,
       temperature,
-      think,
+      think: effectiveThink,
       signal,
     });
 
@@ -164,7 +167,12 @@ async function runSingleBenchmark({
     }
   }
 
-  const runtime = await provider.runtimeMetadata(providerModel, { contextCap, temperature });
+  const runtime = await provider.runtimeMetadata(providerModel, {
+    contextCap,
+    temperature,
+    think: effectiveThink,
+    requestedThink: !!think,
+  });
   const runMetrics = {
     main: aggregateUsage,
     metrics: {
@@ -184,7 +192,7 @@ async function runSingleBenchmark({
     plannerModel: provider.label(providerModel),
     coderModel: null,
     verifierModel: null,
-    think: !!think,
+    think: effectiveThink,
     onlineResearch: false,
     autoApprove: true,
     runtime,

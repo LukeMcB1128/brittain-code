@@ -90,15 +90,19 @@ You can now run a whole batch in one command and let Brittainmark create fixture
 node benchmark/run.js --models 'local:*' --tasks all
 node benchmark/run.js --models 'local:*,openai:gpt-5.6-sol' --tasks all --promote-top 5 --total-repeats 3
 node benchmark/run.js --models qwen2.5-coder:1.5b,openai:gpt-5.6-sol --tasks cart,feature
+node benchmark/run.js --models anthropic:claude-haiku-4-5,anthropic:claude-sonnet-4-5 --tasks all
 node benchmark/run.js --list-local-models
 ```
 
 Notes:
 
+- The runner automatically loads a repository-root `.env` file. It is gitignored; shell environment values take precedence over it.
 - Quote `local:*` in `zsh` so the shell does not expand the `*`.
 - Bare model names default to Ollama, so `qwen2.5-coder:1.5b` is treated as a local model.
 - Use explicit prefixes for non-local providers, for example `openai:gpt-5.6-sol`.
 - OpenAI runs require `OPENAI_API_KEY` in the environment. `OPENAI_BASE_URL` is also supported for compatible endpoints.
+- Anthropic runs require `ANTHROPIC_API_KEY`; `ANTHROPIC_BASE_URL`, `ANTHROPIC_VERSION`, `ANTHROPIC_MAX_TOKENS`, and `ANTHROPIC_THINKING_BUDGET` are optional overrides.
+- The Anthropic adapter uses the Messages API's native client-side tool calls, so Claude receives and uses the same Brittain Code tools as local and OpenAI models. With `--think on`, it enables manual extended thinking for Claude 4.5 models (including Haiku 4.5) and adaptive thinking for supported Claude 4.6+ models. Unsupported model IDs are accurately recorded as `think off`.
 - `--promote-top 5 --total-repeats 3` runs every model once, ranks them, then continues only the top five until they reach three total runs.
 - Batch outputs are written under `benchmark/runs/<timestamp>/` with a `manifest.json` plus saved chats for every run.
 

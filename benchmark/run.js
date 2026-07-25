@@ -6,6 +6,30 @@ const { prepareFixture, resetFixture } = require('./setup');
 const { runSingleBenchmark, gradeChat, rankModels, slug, stopAllManagedProcesses, initTools } = require('./runner');
 const { OllamaProvider } = require('./providers/ollama');
 const { OpenAIProvider } = require('./providers/openai');
+const { AnthropicProvider } = require('./providers/anthropic');
+
+function loadDotEnv(file) {
+  if (!fs.existsSync(file)) return;
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    if (process.env[key] !== undefined) continue;
+    let value = rawValue.trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+      if (rawValue.trim().startsWith('"')) value = value.replace(/\\n/g, '\n');
+    } else {
+      value = value.replace(/\s+#.*$/, '').trim();
+    }
+    process.env[key] = value;
+  }
+}
+
+loadDotEnv(path.join(__dirname, '..', '.env'));
 
 function help() {
   console.log(`Brittainmark automation
@@ -13,6 +37,7 @@ function help() {
 Usage:
   node benchmark/run.js --models 'local:*' --tasks all
   node benchmark/run.js --models ollama:laguna-xs-2.1:latest,openai:gpt-5.6-sol --tasks cart,feature
+  node benchmark/run.js --models anthropic:claude-haiku-4-5,anthropic:claude-sonnet-4-5 --tasks all
   node benchmark/run.js --models 'local:*,openai:gpt-5.6-sol' --tasks all --promote-top 5 --total-repeats 3
   node benchmark/run.js --resume 2026-07-24T21-44-02-212Z
 
@@ -86,10 +111,11 @@ async function expandModelSpecs(modelArg, providers) {
       for (const model of await providers.ollama.listModels()) specs.push(`ollama:${model}`);
       continue;
     }
-    if (/^(ollama|local|openai):/.test(raw)) {
+    if (/^(ollama|local|openai|anthropic):/.test(raw)) {
       const [provider, ...rest] = raw.split(':');
       if (provider === 'ollama' || provider === 'local') specs.push(`ollama:${rest.join(':')}`);
       else if (provider === 'openai') specs.push(`openai:${rest.join(':')}`);
+      else if (provider === 'anthropic') specs.push(`anthropic:${rest.join(':')}`);
       continue;
     }
     specs.push(`ollama:${raw}`);
@@ -102,6 +128,7 @@ function providerForSpec(spec, providers) {
   const model = rest.join(':');
   if (provider === 'ollama') return { provider: providers.ollama, model };
   if (provider === 'openai') return { provider: providers.openai, model };
+  if (provider === 'anthropic') return { provider: providers.anthropic, model };
   throw new Error(`Unsupported model spec: ${spec}`);
 }
 
@@ -148,6 +175,7 @@ async function main() {
   const providers = {
     ollama: new OllamaProvider(),
     openai: new OpenAIProvider(),
+    anthropic: new AnthropicProvider(),
   };
 
   if (args.listLocalModels) {
