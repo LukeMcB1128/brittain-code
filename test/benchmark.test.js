@@ -8,6 +8,32 @@ const cp = require('node:child_process');
 const { TASKS } = require('../benchmark/tasks');
 const { writeReport, aggregate, normalize } = require('../benchmark/report');
 
+// A row shaped like what the V3 grader actually writes. Only rows carrying
+// suiteVersion 3 AND the current task version count toward the live
+// leaderboard — everything else is archived — so tests that exercise the
+// current report must start from this shape.
+function currentRow(overrides = {}) {
+  return {
+    schemaVersion: 3,
+    suiteVersion: 3,
+    graderVersion: 3,
+    scoreModel: 'brittainmark-v3',
+    taskLanguage: 'javascript',
+    mode: 'solo',
+    model: 'model-a',
+    modelLabel: 'model-a',
+    settings: { think: false, contextCap: 131072 },
+    zeroed: false,
+    zeroedReasons: [],
+    fullPass: false,
+    correctness: 55,
+    safety: 10,
+    reliability: 6,
+    efficiency: 2,
+    ...overrides,
+  };
+}
+
 test('benchmark task fixtures are versioned, protected, and intentionally incomplete', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-benchmark-suite-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -18,12 +44,17 @@ test('benchmark task fixtures are versioned, protected, and intentionally incomp
     const manifest = JSON.parse(fs.readFileSync(path.join(dir, '.brittain-benchmark.json'), 'utf8'));
     assert.equal(manifest.task, id);
     assert.equal(manifest.version, task.version);
-    assert.equal(task.protectedFiles.includes('test.js'), true);
+    // The spec file is language-specific (test.js / test.ts / test_*.py), but
+    // whatever it is called it must be protected from the model.
+    const specFile = task.protectedFiles.find((file) => /(^|\/)(test[._-]|.*[._-]test\.)/i.test(file));
+    assert.ok(specFile, `${id} must protect a spec/test file`);
     assert.equal(task.protectedFiles.includes('package.json'), true);
     assert.equal(fs.existsSync(path.join(__dirname, '..', 'benchmark', task.promptFile)), true);
     assert.equal(task.targetFiles.every((file) => task.allowedFiles.includes(file)), true);
+    assert.equal(fs.existsSync(path.join(dir, specFile)), true, `${id} fixture must contain ${specFile}`);
     const packageJson = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
-    assert.equal(packageJson.scripts.test, 'node test.js');
+    assert.equal(typeof packageJson.scripts.test, 'string');
+    assert.notEqual(packageJson.scripts.test.trim(), '');
 
     const result = task.evaluate(dir);
     assert.equal(result.visible.total > 0, true);
@@ -33,10 +64,15 @@ test('benchmark task fixtures are versioned, protected, and intentionally incomp
 });
 
 test('benchmark suite contains the complete harder coding generation', () => {
-  assert.deepEqual(Object.keys(TASKS), ['cart', 'feature', 'debug', 'economy', 'outbox']);
+  assert.deepEqual(Object.keys(TASKS), ['cart', 'feature', 'debug', 'economy', 'outbox', 'fraudml', 'tsapi']);
   assert.deepEqual(
     Object.fromEntries(Object.entries(TASKS).map(([id, task]) => [id, task.version])),
-    { cart: 4, feature: 3, debug: 3, economy: 3, outbox: 1 },
+    { cart: 4, feature: 3, debug: 3, economy: 3, outbox: 2, fraudml: 1, tsapi: 1 },
+  );
+  // V3 widened the suite past JavaScript — keep that coverage from regressing.
+  assert.deepEqual(
+    [...new Set(Object.values(TASKS).map((task) => task.language))].sort(),
+    ['javascript', 'python', 'typescript'],
   );
 });
 
@@ -86,44 +122,21 @@ test('benchmark report uses readable charts and task, mode, and thinking filters
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const results = path.join(dir, 'results.json');
   const report = path.join(dir, 'report.html');
-  fs.writeFileSync(results, JSON.stringify([{
-    schemaVersion: 2,
-    configKey: 'cart|solo|model-a|think=false',
-    task: 'cart',
-    taskVersion: TASKS.cart.version,
-    mode: 'solo',
-    modelLabel: 'model-a',
-    settings: { think: false, contextCap: 131072 },
-    total: 90,
-    correctness: 55,
-    reliability: 13,
-    efficiency: 12,
-    wallTimeMs: 1000,
-    fullPass: true,
-  }, {
-    schemaVersion: 2,
-    configKey: 'feature|solo|model-a|think=false',
-    task: 'feature',
-    taskVersion: TASKS.feature.version,
-    mode: 'solo',
-    modelLabel: 'model-a',
-    settings: { think: false, contextCap: 131072 },
-    total: 70,
-    correctness: 40,
-    reliability: 10,
-    efficiency: 10,
-    wallTimeMs: 3000,
-    fullPass: false,
-  }]));
+  fs.writeFileSync(results, JSON.stringify([
+    currentRow({ task: 'cart', taskVersion: TASKS.cart.version, total: 90, correctness: 55, reliability: 13, efficiency: 12, wallTimeMs: 1000, fullPass: true }),
+    currentRow({ task: 'feature', taskVersion: TASKS.feature.version, total: 70, correctness: 40, reliability: 10, efficiency: 10, wallTimeMs: 3000, fullPass: false }),
+  ]));
   writeReport(results, report);
   const html = fs.readFileSync(report, 'utf8');
   assert.match(html, /class="score-chart"/);
-  assert.match(html, /class="legend-item"/);
+  assert.match(html, /<select id="task">/);
+  assert.match(html, /<select id="mode">/);
   assert.match(html, /<select id="think">/);
-  assert.match(html, new RegExp(`tasks 2/${Object.keys(TASKS).length}`));
+  assert.match(html, /2 current V3 runs · 0 archived runs/);
+  assert.match(html, new RegExp(`requires all ${Object.keys(TASKS).length} tasks`));
   assert.match(html, /data-view-key="feature\|all\|all"/);
   assert.match(html, new RegExp(`cart v${TASKS.cart.version}`));
-  assert.match(html, /Archived test versions \(0 runs\)/);
+  assert.match(html, /Archived results \(0 runs\)/);
   assert.doesNotMatch(html, /rotate\(-35/);
 });
 
@@ -133,13 +146,13 @@ test('benchmark report excludes older task versions from the current leaderboard
   const results = path.join(dir, 'results.json');
   const report = path.join(dir, 'report.html');
   fs.writeFileSync(results, JSON.stringify([
-    { schemaVersion: 2, configKey: 'old', task: 'cart', taskVersion: TASKS.cart.version - 1, mode: 'solo', modelLabel: 'old-model', total: 99, correctness: 55, reliability: 15, efficiency: 15, settings: { think: false } },
-    { schemaVersion: 2, configKey: 'new', task: 'cart', taskVersion: TASKS.cart.version, mode: 'solo', modelLabel: 'new-model', total: 80, correctness: 50, reliability: 12, efficiency: 10, settings: { think: false } },
+    currentRow({ task: 'cart', taskVersion: TASKS.cart.version - 1, model: 'old-model', modelLabel: 'old-model', total: 99, correctness: 55, reliability: 15, efficiency: 15 }),
+    currentRow({ task: 'cart', taskVersion: TASKS.cart.version, model: 'new-model', modelLabel: 'new-model', total: 80, correctness: 50, reliability: 12, efficiency: 10 }),
   ]));
   writeReport(results, report);
   const html = fs.readFileSync(report, 'utf8');
-  assert.match(html, /1 current runs · 1 archived runs/);
-  assert.match(html, /Archived test versions \(1 runs\)/);
-  assert.match(html, /Historical runs are preserved for reference/);
+  assert.match(html, /1 current V3 runs · 1 archived runs/);
+  assert.match(html, /Archived results \(1 runs\)/);
+  assert.match(html, /preserved here for reference only/);
   assert.match(html, /old-model/);
 });

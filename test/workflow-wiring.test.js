@@ -30,7 +30,11 @@ test('mission owns the durable coder workflow while loop stays single-model', ()
   assert.match(main, /reachedToolCap/);
 
   assert.match(grader, /metrics\.coderLoopIterations/);
-  assert.match(grader, /ORCHESTRATE\|MISSION/);
+  // Team scoring is claimed only by an explicitly recorded team run or a real
+  // orchestration in the telemetry. It must NOT be inferred from the chat
+  // title, which used to promote ordinary solo runs to team runs.
+  assert.match(grader, /const mode = explicitMode \|\| \(Number\(metrics\.orchestrations\) > 0 \? 'team' : 'solo'\)/);
+  assert.doesNotMatch(grader, /ORCHESTRATE\|MISSION/);
 });
 
 test('missions wrap the bounded coder loop with persisted status and explicit stop controls', () => {
