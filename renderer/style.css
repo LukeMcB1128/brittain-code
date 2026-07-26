@@ -388,6 +388,26 @@ button:active { background: var(--border); }
 .subagent.collapsed pre { display: none; }
 .subagent.collapsed .sub-log { display: none; }
 
+.mission-card {
+  border: 1px solid var(--accent);
+  background: var(--bg-panel);
+  margin: 10px 12px;
+  padding: 10px;
+  font-family: var(--mono);
+}
+
+.mission-head { display: flex; gap: 8px; font-size: 10px; letter-spacing: 1px; }
+.mission-title { color: var(--accent); font-weight: 700; }
+.mission-status { color: var(--yellow); margin-left: auto; }
+.mission-card[data-status="completed"] { border-color: var(--green); }
+.mission-card[data-status="completed"] .mission-status { color: var(--green); }
+.mission-card[data-status="failed"], .mission-card[data-status="interrupted"] { border-color: var(--red); }
+.mission-card[data-status="failed"] .mission-status, .mission-card[data-status="interrupted"] .mission-status { color: var(--red); }
+.mission-goal { color: var(--text); font-size: 12px; margin-top: 8px; }
+.mission-detail, .mission-event { color: var(--text-dim); font-size: 10px; margin-top: 5px; }
+.mission-actions { display: flex; gap: 6px; margin-top: 9px; }
+.mission-stop { color: var(--red); border-color: var(--red); }
+
 /* tool call cards */
 .tool {
   font-family: var(--mono);

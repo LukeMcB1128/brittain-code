@@ -28,6 +28,8 @@ let currentChatId = null;
 let appSettings = null;
 let settingsDefaults = null;
 let currentModels = [];
+let missionCard = null;
+let latestMission = null;
 
 setAppMode(appMode, false, false);
 
@@ -99,6 +101,8 @@ setAppMode(appMode, false, false);
 
   // Load chat history
   loadChatHistory();
+  const missionRes = await window.api.missionGet();
+  if (missionRes.ok && missionRes.mission) upsertMissionCard(missionRes.mission);
   
   // Show startup message on boot
   showStartupMessage();
@@ -246,6 +250,7 @@ function setAppMode(mode, persist = true, refreshHistory = true) {
     ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
     : 'Describe a task... (Enter to send, Shift+Enter for newline)';
   if (persist) localStorage.setItem('appMode', appMode);
+  syncMissionCard();
   refreshGit();
   if (refreshHistory) loadChatHistory();
 }
@@ -312,6 +317,7 @@ function setCwd(p) {
   $('cwd-label').textContent = parts.slice(-2).join('/') || p;
   $('cwd-btn').title = p;
   undoBtn.disabled = true; // checkpoints are per-folder; a new DIR has none yet
+  syncMissionCard();
   refreshGit();
 }
 
@@ -561,6 +567,8 @@ async function deleteChat(chatId) {
     await window.api.reset();
     currentChatId = null;
     chat.innerHTML = '';
+    missionCard = null;
+    if (latestMission) upsertMissionCard(latestMission);
     toolCount = 0;
     $('tool-count').textContent = '0';
     $('ctx-tokens').textContent = '0';
@@ -571,6 +579,7 @@ async function deleteChat(chatId) {
 
 function renderConversation(conversation) {
   chat.innerHTML = '';
+  missionCard = null;
   for (const msg of conversation) {
     if (msg.role === 'user') {
       const imgs = (msg.images || []).map((b, i) => `data:${msg.imageTypes?.[i] || 'image/png'};base64,${b}`);
@@ -601,6 +610,7 @@ function renderConversation(conversation) {
       }
     }
   }
+  if (latestMission) upsertMissionCard(latestMission);
 }
 
 // ---------- attachments ----------
@@ -722,10 +732,11 @@ stopBtn.addEventListener('click', () => window.api.stop());
 
 async function send() {
   const text = input.value.trim();
-  if ((!text && !attachmentCount()) || busy) return;
+  const missionControl = /^\/mission\s+(?:status|stop)\s*$/i.test(text);
+  if ((!text && !attachmentCount()) || (busy && !missionControl)) return;
   if (text.startsWith('/')) {
     input.value = '';
-    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate') || text.includes('/mcp')) {
+    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
       hideStartupMessage();
     }
     return handleSlash(text);
@@ -1074,6 +1085,82 @@ window.api.onDone(() => {
   if (busy) setState('idle');
 });
 
+function missionStatusText(mission) {
+  const elapsedEnd = mission.endedAt ? new Date(mission.endedAt).getTime() : Date.now();
+  const elapsedStart = new Date(mission.startedAt || elapsedEnd).getTime();
+  const elapsedSeconds = Math.max(0, Math.floor((elapsedEnd - elapsedStart) / 1000));
+  const elapsed = elapsedSeconds >= 60
+    ? `${Math.floor(elapsedSeconds / 60)}m ${elapsedSeconds % 60}s`
+    : `${elapsedSeconds}s`;
+  return [
+    `MISSION · ${String(mission.status || 'unknown').toUpperCase()}`,
+    mission.goal || '(no goal recorded)',
+    `Project: ${mission.projectPath || '(unknown)'}`,
+    `Progress: ${mission.currentIteration || 0}/${mission.maxIterations || 0} · ${mission.currentPhase || 'unknown'} · ${elapsed}`,
+    `Last event: ${mission.lastEvent || '(none)'}`,
+  ].join('\n');
+}
+
+function normalizedMissionPath(value) {
+  const normalized = String(value || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  // Windows paths are case-insensitive; leave POSIX paths untouched.
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function shouldDisplayMission(mission = latestMission) {
+  return appMode === 'code'
+    && !!cwd
+    && !!mission?.projectPath
+    && normalizedMissionPath(cwd) === normalizedMissionPath(mission.projectPath);
+}
+
+function clearMissionCard() {
+  missionCard?.remove();
+  missionCard = null;
+}
+
+function syncMissionCard() {
+  if (!shouldDisplayMission()) return clearMissionCard();
+  upsertMissionCard(latestMission);
+}
+
+function upsertMissionCard(mission) {
+  if (!mission) return;
+  latestMission = mission;
+  if (!shouldDisplayMission(mission)) return clearMissionCard();
+  if (!missionCard) {
+    missionCard = document.createElement('section');
+    missionCard.className = 'mission-card';
+    missionCard.innerHTML = [
+      '<div class="mission-head"><span class="mission-title">MISSION</span><span class="mission-status"></span></div>',
+      '<div class="mission-goal"></div>',
+      '<div class="mission-detail"></div>',
+      '<div class="mission-event"></div>',
+      '<div class="mission-actions"><button type="button" class="mini mission-refresh">STATUS</button><button type="button" class="mini mission-stop">STOP</button></div>',
+    ].join('');
+    missionCard.querySelector('.mission-refresh').addEventListener('click', async () => {
+      const res = await window.api.missionGet();
+      if (res.ok && res.mission) upsertMissionCard(res.mission);
+    });
+    missionCard.querySelector('.mission-stop').addEventListener('click', async () => {
+      const res = await window.api.missionStop();
+      if (!res.ok) addError(res.error);
+    });
+  }
+  const projectName = String(mission.projectPath || '').split(/[\\/]/).filter(Boolean).pop() || '(unknown project)';
+  missionCard.dataset.status = mission.status || 'unknown';
+  missionCard.querySelector('.mission-status').textContent = String(mission.status || 'unknown').toUpperCase();
+  missionCard.querySelector('.mission-goal').textContent = mission.goal || '(no goal recorded)';
+  missionCard.querySelector('.mission-detail').textContent = `${projectName} · ${mission.currentIteration || 0}/${mission.maxIterations || 0} · ${mission.currentPhase || 'starting'}`;
+  missionCard.querySelector('.mission-event').textContent = mission.lastEvent || '';
+  missionCard.querySelector('.mission-stop').classList.toggle('hidden', mission.status !== 'running');
+  // appendChild moves an existing node, keeping the mission card alongside the
+  // most recent work whenever the user refreshes it or the mission advances.
+  chat.appendChild(missionCard);
+}
+
+window.api.onMissionUpdate((mission) => upsertMissionCard(mission));
+
 function shortArgs(name, args) {
   if (args.questions) {
     const first = String(args.questions[0]?.question || '');
@@ -1105,7 +1192,6 @@ window.api.onApprovalRequest(({ id, name, args, network, sensitive, destructive 
     : name === 'revert_to_last_commit' ? `Restore ${args.path || 'the entire working tree'} to HEAD.\n\nTracked changes will be saved in a recoverable named Git stash first.\nUntracked files: ${args.include_untracked ? 'INCLUDED — they will leave the working tree and enter the stash' : 'preserved'}\nIgnored files and submodule contents: preserved`
     : name === 'run_command' ? args.command
     : name === 'write_file' || name === 'append_file' ? `${args.path}\n\n${(args.content || '').slice(0, 600)}`
-    : name === 'replace_in_file' ? `${args.path}\n\nfind: ${args.pattern}\nreplace: ${args.replacement}`
     : name === 'edit_file' ? `${args.path}\n\n- ${String(args.old_string || '').slice(0, 300)}\n+ ${String(args.new_string || '').slice(0, 300)}`
     : args.source ? `${args.source} → ${args.destination}`
     : String(args.path || JSON.stringify(args));
@@ -1258,6 +1344,8 @@ async function newSession() {
   await window.api.reset();
   compactWarned = false;
   chat.innerHTML = '';
+  missionCard = null;
+  if (latestMission) upsertMissionCard(latestMission);
   toolCount = 0;
   $('tool-count').textContent = '0';
   $('ctx-tokens').textContent = '0';
@@ -1452,8 +1540,9 @@ const SLASH_HELP = [
   '/diff — show the git diff for the working directory',
   '/commit <message> — stage all changes and commit',
   '/graph — show a visual tree of the git commit history',
-  '/loop [--coder] [n] <goal> — repeat until verified; --coder delegates planned implementation and repairs to the selected coder model',
+  '/loop [n] <goal> — repeat a single model until verified',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
+  '/mission [iterations] <goal> — run a visible, persisted bounded coding mission; use /mission status or /mission stop',
   '/model <name> — switch model (partial match ok)',
   '/coder [name] — show or set the writable coding-worker model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
@@ -1482,7 +1571,7 @@ async function handleSlash(raw) {
   const [cmd, ...rest] = raw.slice(1).split(' ');
   const arg = rest.join(' ').trim();
   const normalizedCmd = cmd.toLowerCase();
-  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'orchestrate', 'commit', 'coder', 'subagent', 'memory']);
+  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory']);
   if (appMode === 'chat' && codeOnlyCommands.has(normalizedCmd)) {
     return addError(`/${normalizedCmd} is only available in Code mode.`);
   }
@@ -1529,27 +1618,18 @@ async function handleSlash(raw) {
       if (busy) return;
       if (!modelSelect.value) return addError('No model selected.');
       if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
-      let useCoder = false;
       let iterations = appSettings?.defaultLoopIterations || 8;
       let goal = arg;
-      const coderFlag = goal.match(/^--coder(?:\s+|$)/i);
-      if (coderFlag) {
-        useCoder = true;
-        goal = goal.slice(coderFlag[0].length).trim();
-      }
       const m = goal.match(/^(\d+)\s+([\s\S]+)/);
       if (m) { iterations = parseInt(m[1], 10); goal = m[2].trim(); }
-      if (!goal) return addError('Usage: /loop [--coder] [iterations] <goal> — e.g. /loop --coder 10 make all tests pass');
-      if (useCoder && !coderModel) return addError('No coder model selected. Use /coder <name>.');
+      if (!goal) return addError('Usage: /loop [iterations] <goal> — e.g. /loop 10 make all tests pass');
       if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the loop will pause for every risky tool call. Turn it on for unattended runs.');
 
-      addMessage('user', `${useCoder ? 'CODER LOOP' : 'LOOP'} (max ${iterations}): ${goal}`);
+      addMessage('user', `LOOP (max ${iterations}): ${goal}`);
       startRun();
       try {
         const res = await window.api.loop({
           model: modelSelect.value,
-          coderModel,
-          useCoder,
           subModel,
           goal,
           cwd,
@@ -1600,6 +1680,54 @@ async function handleSlash(raw) {
         endRun();
       }
       return res;
+    }
+
+    case 'mission': {
+      const command = arg.toLowerCase();
+      if (command === 'status') {
+        const res = await window.api.missionGet();
+        if (!res.ok || !res.mission) return addInfo('No mission has been started in this app profile.');
+        upsertMissionCard(res.mission);
+        return addInfo(missionStatusText(res.mission));
+      }
+      if (command === 'stop') {
+        const res = await window.api.missionStop();
+        return res.ok ? addInfo('Mission stop requested.') : addError(res.error);
+      }
+      if (busy) return;
+      if (!modelSelect.value) return addError('No model selected.');
+      if (!coderModel) return addError('No coder model selected. Use /coder <name>.');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      let iterations = appSettings?.defaultLoopIterations || 8;
+      let goal = arg;
+      const match = goal.match(/^(\d+)\s+([\s\S]+)/);
+      if (match) { iterations = parseInt(match[1], 10); goal = match[2].trim(); }
+      if (!goal) return addError('Usage: /mission [iterations] <goal> — e.g. /mission 12 add CSV export and verify it');
+      if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the mission will pause for every risky tool call. Turn it on for unattended runs.');
+
+      addMessage('user', `MISSION (max ${iterations}): ${goal}`);
+      startRun();
+      try {
+        const res = await window.api.missionStart({
+          model: modelSelect.value,
+          coderModel,
+          subModel,
+          goal,
+          cwd,
+          autoApprove: autoApprove.checked,
+          autoBranch: autoBranchToggle.checked,
+          onlineResearch: onlineResearchToggle.checked,
+          think: thinkToggle.checked,
+          maxIterations: iterations,
+        });
+        if (!res.ok) addError(res.error);
+        else if (res.report) renderMarkdown(addMessage('assistant', res.report), res.report);
+      } catch (err) {
+        addError('Mission failed: ' + (err.message || err));
+      } finally {
+        endRun();
+      }
+      return saveChat();
     }
 
     case 'commit': {

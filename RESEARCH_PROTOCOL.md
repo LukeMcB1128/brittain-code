@@ -7,7 +7,7 @@ Every research session must follow a structured iterative cycle:
 
 1.  **Initiation**: Define a clear, bounded objective. Use `initiate_research_session(objective)`.
 2.  **Hypothesis Generation**: Before performing any file operations, state a hypothesis about what you expect to find or what the underlying cause of a behavior might be.
-3.  **Exploration**: Use discovery tools (`list_directory`, `find_files`, `search_files`) to navigate the codebase.
+3.  **Exploration**: Use discovery tools (`browse_files`, `search_files`) to navigate the codebase.
 4.  **Observation & Evidence**: As you encounter relevant code, patterns, or errors, record them using `record_observation(observation, evidence_path)`. **Never record an observation without a specific file path as evidence.**
 5.  **Verification**: Actively seek to disprove or confirm your hypotheses by examining related files or running diagnostic commands.
 6.  **Synthesis & Finalization**: Once the objective is met or progress has plateaued, summarize the findings and use `finalize_research(summary)` to generate the final report.
@@ -35,6 +35,6 @@ The report is the permanent record of the completed investigation. It consists o
 
 ## 3. Principles of Deep Research
 - **Traceability**: Every claim must be traceable to a specific line of code or command output.
-- **Breadth then Depth**: Start with wide-scale directory/file searches to understand context, then move to fine-grained `read_file` or `search_in_file` operations.
+- **Breadth then Depth**: Start with wide-scale directory/file searches to understand context, then move to fine-grained `read_file` or targeted `search_files` operations.
 - **Avoid Noise**: Do not log trivial information (e.g., "Found file index.js"). Only log observations that contribute to the research objective.
 - **Self-Correction**: If an exploration path leads to a dead end, explicitly record that "No relevant patterns were found in [path]" to prevent re-exploring the same area.

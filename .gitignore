@@ -1,7 +1,12 @@
 node_modules/
 dist/
 .DS_Store
+.env
+.env.*
+!.env.example
 RESEARCH_LOG.md
 results.json
 report.html
 .playwright-mcp/
+benchmark/fixtures/
+benchmark/runs/

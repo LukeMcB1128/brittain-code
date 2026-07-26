@@ -31,12 +31,11 @@ contextBridge.exposeInMainWorld('api', {
   settingsSave: (settings) => ipcRenderer.invoke('settings:save', settings),
   settingsTestEndpoint: (endpoint) => ipcRenderer.invoke('settings:testEndpoint', endpoint),
   compact: (payload) => ipcRenderer.invoke('chat:compact', payload),
-  loop: (payload = {}) => ipcRenderer.invoke('chat:loop', {
-    ...payload,
-    useCoder: !!payload.useCoder,
-    coderModel: payload.coderModel || '',
-  }),
+  loop: (payload = {}) => ipcRenderer.invoke('chat:loop', payload),
   orchestrate: (payload) => ipcRenderer.invoke('chat:orchestrate', payload),
+  missionStart: (payload) => ipcRenderer.invoke('mission:start', payload),
+  missionGet: () => ipcRenderer.invoke('mission:get'),
+  missionStop: () => ipcRenderer.invoke('mission:stop'),
   exportChat: () => ipcRenderer.invoke('chat:export'),
   historyList: () => ipcRenderer.invoke('history:list'),
   historySave: (meta, conversation) => ipcRenderer.invoke('history:save', meta, conversation),
@@ -59,4 +58,5 @@ contextBridge.exposeInMainWorld('api', {
   onDone: (cb) => ipcRenderer.on('stream:done', () => cb()),
   onApprovalRequest: (cb) => ipcRenderer.on('approval:request', (_e, d) => cb(d)),
   onQuestionRequest: (cb) => ipcRenderer.on('question:request', (_e, d) => cb(d)),
+  onMissionUpdate: (cb) => ipcRenderer.on('mission:update', (_e, mission) => cb(mission)),
 });

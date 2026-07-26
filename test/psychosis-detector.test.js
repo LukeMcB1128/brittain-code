@@ -82,3 +82,75 @@ test('psychosis: PsychosisDetectedError carries reason as message and excerpt se
   assert.equal(err.excerpt, 'const x = 1;');
   assert.ok(err instanceof Error);
 });
+
+// ---------- deliberation loops (a distinct failure mode: coherent but stuck) ----------
+
+// Condensed from a real trace: a model that produced 31 restart phrases, zero
+// tool calls, and zero lines of code before running out of budget mid-sentence.
+const REAL_DELIBERATION_TRACE = [
+  'Let me analyze the code for these issues.',
+  'The debounce logic is broken because currentTime keeps getting reset.',
+  'Let me fix all these issues.',
+  'Actually, for a quick fix, let me focus on the toggle.',
+  'Actually, let me think about what is most impactful and least risky.',
+  'Let me do instanced rendering for both 2D and 3D modes.',
+  'Let me write the code. This will be a significant rewrite.',
+  'Actually, let me be more strategic. Let me first fix the toggle bug.',
+  'Let me write the fixes now. I will do them in a single large edit.',
+  'Actually, let me think about this differently.',
+  'OK let me just do it properly with instanced rendering.',
+  'Actually, I realize I should be more careful about scope.',
+  'Wait, I need to be careful about the size of this edit.',
+  'Actually, let me just do one big comprehensive rewrite.',
+  'Let me plan the exact changes.',
+].join('\n');
+
+test('deliberation: a real looping trace is caught and routed to directive recovery', () => {
+  const hit = scanThinkingForPsychosis(REAL_DELIBERATION_TRACE, { value: 0 });
+  assert.ok(hit, 'expected the looping trace to trigger');
+  assert.match(hit.reason, /deliberation loop/);
+  assert.equal(hit.recovery, 'directive', 'compaction is the wrong fix for dithering');
+});
+
+test('deliberation: normal chain-of-thought with one or two course-corrections is NOT flagged', () => {
+  const healthy = [
+    'The user wants a scrollbar. Let me start by reading the CSS to see how the container is sized.',
+    'Wait, let me reconsider — the overflow is probably on the parent, not the child.',
+    'I will read styles.css and confirm before changing anything.',
+  ].join('\n');
+  assert.equal(scanThinkingForPsychosis(healthy, { value: 0 }), null);
+});
+
+test('deliberation: long but productive reasoning under the budget is not flagged', () => {
+  // 6k chars of substantive reasoning, no restart phrases
+  const dense = ('The parser handles nested arrays by tracking depth. '.repeat(120));
+  assert.ok(dense.length > 5000 && dense.length < 12000);
+  assert.equal(scanThinkingForPsychosis(dense, { value: 0 }), null);
+});
+
+test('deliberation: runaway reasoning trips the char budget even without restart phrases', () => {
+  const runaway = 'x'.repeat(12_500);
+  const hit = scanThinkingForPsychosis(runaway, { value: 0 });
+  assert.ok(hit);
+  assert.match(hit.reason, /exceeded/);
+  assert.equal(hit.recovery, 'directive');
+});
+
+test('deliberation: glitch tokens in reasoning still route to compaction, not directive', () => {
+  const hit = scanThinkingForPsychosis('value is getTitle．Content here', { value: 0 });
+  assert.ok(hit);
+  assert.equal(hit.recovery, 'compact', 'corruption needs a sanity reset, not a pep talk');
+});
+
+test('deliberation: scan is throttled — state advances only past the interval', () => {
+  const state = { value: 0 };
+  scanThinkingForPsychosis('short'.repeat(10), state); // 50 chars, under 500
+  assert.equal(state.value, 0, 'should not have scanned yet');
+  scanThinkingForPsychosis('y'.repeat(600), state);
+  assert.equal(state.value, 600, 'should have scanned and recorded position');
+});
+
+test('deliberation: PsychosisDetectedError defaults to compact and accepts directive', () => {
+  assert.equal(new PsychosisDetectedError('r', 'e').recovery, 'compact');
+  assert.equal(new PsychosisDetectedError('r', 'e', 'directive').recovery, 'directive');
+});

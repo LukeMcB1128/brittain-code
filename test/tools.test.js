@@ -72,12 +72,38 @@ test('orchestration roles receive deliberately scoped toolsets', () => {
 
   assert.equal(coderNames.has('read_file'), true);
   assert.equal(coderNames.has('edit_file'), true);
+  assert.equal(coderNames.has('browse_files'), true);
+  assert.equal(coderNames.has('search_files'), true);
+  assert.equal(coderNames.has('file_metadata'), true);
+  assert.equal(coderNames.has('replace_in_file'), false);
   assert.equal(coderNames.has('run_project_check'), true);
   assert.equal(coderNames.has('web_search'), false);
   assert.equal(coderNames.has('run_subagent'), false);
   assert.equal(coderNames.has('get_environment_variables'), false);
   assert.equal(coderNames.has('revert_to_last_commit'), false);
   assert.deepEqual(coderNames, CODER_TOOL_NAMES);
+});
+
+test('canonical browse, search, and metadata tools cover the retired read-only helpers', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(cwd, 'src'));
+  fs.writeFileSync(path.join(cwd, 'src', 'sample.js'), 'const alpha = 1;\nconst beta = alpha;\n');
+  fs.writeFileSync(path.join(cwd, 'notes.txt'), 'alpha note\n');
+
+  const tree = await executeTool('browse_files', { path: '.', depth: 2, glob: '*.js' }, cwd);
+  assert.match(tree, /src\//);
+  assert.match(tree, /sample\.js/);
+  assert.doesNotMatch(tree, /notes\.txt/);
+
+  const search = await executeTool('search_files', { path: 'src/sample.js', pattern: 'alpha', context_lines: 1 }, cwd);
+  assert.match(search, /sample\.js/);
+  assert.match(search, /> 1: const alpha/);
+
+  const metadata = JSON.parse(await executeTool('file_metadata', { path: 'src/sample.js', include_hash: true }, cwd));
+  assert.equal(metadata.type, 'javascript');
+  assert.equal(metadata.line_count, 3);
+  assert.equal(metadata.hash.algorithm, 'sha256');
 });
 
 test('folder-free Chat mode receives only conversation and research tools', () => {
@@ -479,7 +505,7 @@ test('write_file leaves an existing JavaScript file unchanged after invalid synt
   assert.equal(fs.readFileSync(target, 'utf8'), 'const value = 1;\n');
 });
 
-test('append_file and replace_in_file also roll back invalid JavaScript', async (t) => {
+test('append_file and edit_file regex mode also roll back invalid JavaScript', async (t) => {
   const cwd = tempProject();
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   const target = path.join(cwd, 'valid.js');
@@ -490,12 +516,13 @@ test('append_file and replace_in_file also roll back invalid JavaScript', async 
   assert.match(appendResult, /Append rejected/);
   assert.equal(fs.readFileSync(target, 'utf8'), original);
 
-  const replaceResult = await executeTool('replace_in_file', {
+  const editResult = await executeTool('edit_file', {
     path: 'valid.js',
-    pattern: 'const value = 1;',
-    replacement: 'const = ;',
+    old_string: 'const\\s+value\\s*=\\s*1;',
+    new_string: 'const = ;',
+    is_regex: true,
   }, cwd);
-  assert.match(replaceResult, /Replacement rejected/);
+  assert.match(editResult, /Edit rejected/);
   assert.equal(fs.readFileSync(target, 'utf8'), original);
 });
 
