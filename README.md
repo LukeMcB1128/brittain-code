@@ -1,6 +1,8 @@
 # Brittain Code
 
-A local-first coding agent and general chat desktop app powered by Ollama-compatible models. Inference, chats, project memory, and ordinary tools stay on your Mac by default; optional online research is disabled by default. No model API key is required — the default endpoint is Ollama at `localhost:11434`, and Settings can point the app at another compatible host or port.
+A local-first coding agent and general chat desktop app powered by Ollama-compatible models. Inference, chats, project memory, and ordinary tools stay on your machine by default; optional online research is disabled by default. No model API key is required — the default endpoint is Ollama at `localhost:11434`, and Settings can point the app at another compatible host or port.
+
+Runs on macOS and Windows.
 
 ## Run it
 
@@ -11,19 +13,18 @@ npm start
 
 Ollama must be running (`ollama serve`, or the menu bar app).
 
-## The double-clickable app (.app)
+## Installable builds
 
-The standalone app lives at `dist/mac-arm64/Brittain Code.app`. Drag it into Applications or the Dock to launch it without a terminal.
+| Command | Output |
+|---|---|
+| `npm run dist` | macOS `.dmg` and `.zip` |
+| `npm run dist:win` | Windows x64 NSIS installer |
+| `npm run dist:all` | both |
+| `npm run deploy` | macOS: build and copy straight into /Applications |
 
-The `.app` is a snapshot of the code at build time — editing `main.js` or the `renderer/` files does **not** change it. After making changes, rebuild it:
+On macOS the standalone app lands in `dist/mac-arm64/Brittain Code.app`; drag it into Applications or the Dock to launch it without a terminal. Builds are unsigned, so the first launch needs the usual right-click → Open (macOS) or SmartScreen "More info" → "Run anyway" (Windows).
 
-```
-npm run deploy
-```
-
-This rebuilds and copies the app straight into /Applications — no dragging. (`npm run dist` builds without deploying; during development, `npm start` always runs the live code.)
-
-To give it a custom icon: put an `icon.icns` in a `build/` folder, add `"icon": "build/icon.icns"` under the `"mac"` section of `package.json`, and rebuild.
+The built app is a snapshot of the code at build time — editing `main.js` or the `renderer/` files does **not** change it; rebuild after changes. During development, `npm start` always runs the live code.
 
 ## Using it
 
@@ -35,6 +36,14 @@ To give it a custom icon: put an `icon.icns` in a `build/` folder, add `"icon": 
 The agent can inspect and edit files, search source and locally installed documentation, run allowlisted project checks, inspect Git state, manage local development processes, verify loopback HTTP servers, and run shell commands. `run_project_check` discovers npm-compatible scripts, CMake configure/build/CTest flows, Cargo, Go, Python/pytest, and safe Make targets; every command runs without a shell. File tools are confined to the selected project directory. It asks before writes, commands, and other risky operations. **AUTO-APPROVE** can make ordinary risky tools unattended, but online requests and sensitive reads always require explicit approval.
 
 If Ollama rejects malformed tool-call JSON, Brittain Code discards that call and retries generation once with strict formatting and THINK disabled. A second rejection stops safely with a concise model-format error; malformed arguments are never reconstructed or executed.
+
+### Model degradation detection
+
+Local models degrade before they fail loudly — glitch tokens, byte-fallback artifacts, self-talk leaking into written files, and runaway repetition. Brittain Code scans generated content and tool arguments for those signatures inside the streaming layer, so every caller (main agent, subagent, verifier, coder) is protected without per-call-site changes. A detected episode recovers with a context compaction — the "sanity reset" that empirically clears it — rather than silently writing corrupted code, and gives up honestly if it recurs.
+
+### Undoing a run
+
+Before every Code-mode run in a Git repo, the app takes a silent checkpoint of the working tree, so **UNDO RUN** restores it even if you never committed. UNDO itself snapshots first, so it is also undoable. Optional **auto-branch** moves work onto a generated `brittain/<slug>` branch before the agent touches anything, keeping your current branch clean.
 
 Coordinated edits can use an atomic multi-file batch: every exact match and syntax check must pass before target files are replaced. Managed background processes receive opaque IDs, keep bounded logs, and are stopped when the app quits.
 
@@ -50,11 +59,11 @@ The status bar shows: current state, context usage (tokens used vs the model's c
 
 The inference endpoint accepts an `http://` or `https://` base URL containing only a host and optional port, such as `http://127.0.0.1:9001`. **TEST** checks the endpoint's `/api/tags` response before saving. This supports servers that implement Ollama's `/api/tags`, `/api/show`, and `/api/chat` shapes; other provider protocols will need a provider adapter. A non-loopback endpoint sends prompts, attachment contents, and tool context to that server, so it is no longer local-only.
 
-Chats are saved automatically as individual JSON files in `~/Library/Application Support/Brittain Code/chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar puts folder-free conversations under **GENERAL** and groups Code chats by project folder. Loading a chat restores its mode, model, directory, THINK, and AUTO-APPROVE states, but never restores RESEARCH.
+Chats are saved automatically as individual JSON files in the application-data directory — `~/Library/Application Support/Brittain Code/` on macOS, `%APPDATA%\Brittain Code\` on Windows — under `chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar puts folder-free conversations under **GENERAL** and groups Code chats by project folder. Loading a chat restores its mode, model, directory, THINK, and AUTO-APPROVE states, but never restores RESEARCH.
 
 ## Online research
 
-**ONLINE RESEARCH** is an explicit session-only switch. Enabling it warns that search queries and requested URLs leave the Mac. It exposes two additional model tools:
+**ONLINE RESEARCH** is an explicit session-only switch. Enabling it warns that search queries and requested URLs leave your machine. It exposes two additional model tools:
 
 - `web_search` sends a redacted, length-limited query to DuckDuckGo's no-JavaScript HTML search. Optional domain filters and result caps are supported.
 - `web_fetch` retrieves a public HTTPS page as sanitized plain text. It rejects local/private/reserved destinations and URL credentials, validates every redirect, refuses non-text content, strips scripts and styles, and caps both downloads and returned text.
@@ -76,6 +85,7 @@ Type these in the message box:
 | `/compact` | Summarize the conversation to free up context (great for long agent sessions on small-context models) |
 | `/diff` | Show the git diff of the working directory in an overlay |
 | `/commit <message>` | Stage everything and commit |
+| `/graph` | Show a visual tree of the git commit history |
 | `/model <name>` | Switch model (partial match) |
 | `/coder [name]` | Show or set the writable coding-worker model (default qwen3-coder:30b when installed) |
 | `/subagent [name]` | Show or set the subagent/verifier model (default qwen3:8b) |
@@ -83,6 +93,9 @@ Type these in the message box:
 | `/orchestrate <goal>` | Use the selected model as a read-only planner, delegate sequential tasks to the coder model, and verify each task with the subagent model |
 | `/mission [n] <goal>` | Run a persisted, visible coder mission for up to n iterations; `/mission status` inspects it and `/mission stop` cancels it |
 | `/usage` | Show context remaining and token spend across planner/main agent, scouts, coders, and verifier |
+| `/context` | Show exactly what will be sent next turn — system prompt, per-message tokens, eviction flags |
+| `/best [task] [use]` | Rank installed models by their local benchmark score for a task; `use` switches to the top result |
+| `/mcp [on\|off <server>]` | External MCP tool servers: status, enable, disable |
 | `/memory` | View what the agent has remembered for the selected project |
 | `/export` | Save the chat as a markdown file |
 | `/tools` | List available tools and their risky, sensitive, or network classification |
@@ -95,25 +108,61 @@ Type these in the message box:
 
 The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is enabled, with the same per-request approval boundary as ordinary chats. Coding workers and verifiers never receive network tools. Restart Brittain Code after installing a new Ollama model so the model list refreshes; for example, `gpt-oss:20b` can then be selected in the main dropdown, with `/coder gpt-oss:20b`, or with `/subagent gpt-oss:20b` for role-by-role comparison.
 
+## MCP servers
+
+Brittain Code speaks the Model Context Protocol over stdio using a hand-rolled JSON-RPC client with no third-party dependencies — the most security-sensitive component of the app carries no supply chain. Configure servers in `mcp.json` in the application-data directory, using the same shape as Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "env": {}
+    }
+  }
+}
+```
+
+Settings has an **OPEN MCP CONFIG** button, and `/mcp` shows status or enables/disables individual servers. Every MCP tool is namespaced `mcp_<server>_<tool>`.
+
+MCP servers are third-party code running on your machine, so their tools are untrusted by default: **each call waits for approval even when AUTO-APPROVE is on**. A dedicated, off-by-default `mcpAutoApprove` setting — gated behind an explicit disclaimer — is the only thing that waives that prompt.
+
 ## Git, project instructions, memory, images
 
 - When DIR is a git repo, the status bar shows the branch and changed-file count, with **DIFF** and **COMMIT** buttons. The diff refreshes after every agent run — review what it changed before committing.
 - Put a **`BRITTAIN.md`** in any project folder and its contents are added to the system prompt for chats in that folder (like Claude Code's CLAUDE.md) — conventions, build commands, things the agent should know.
-- The agent saves cross-chat lessons per project under `~/Library/Application Support/Brittain Code/memory/projects/`. Nothing is written into the project itself. Use `/memory` to view the selected project's file and its exact location. The former universal `memory.md`, if present, remains visible as legacy data but is no longer injected into prompts.
+- The agent saves cross-chat lessons per project under `memory/projects/` in the application-data directory. Nothing is written into the project itself. Use `/memory` to view the selected project's file and its exact location. The former universal `memory.md`, if present, remains visible as legacy data but is no longer injected into prompts.
 - Use **ATTACH** for images, PDFs, text files, and common source-code formats; pasted images still work. Images require a vision-capable model. Documents are extracted locally as read-only context, capped to protect the model window, and scanned PDFs without selectable text currently require external OCR.
 - **Esc** stops a running generation. Speed (tokens/sec) shows in the status bar after each response.
 
-## Model benchmark
+## Brittainmark — the model benchmark
 
-The offline benchmark includes five versioned coding tasks covering checkout arithmetic, atomic rollback, debugging with green tests, deterministic snapshot/resume simulation, and a durable retry outbox. It deterministically scores correctness, protected-file safety, verification reliability, and task-normalized efficiency; it also compares solo models with planner/coder/verifier teams using saved per-role telemetry. See [`benchmark/README.md`](benchmark/README.md) for setup, repetition, grading, and report commands.
+Brittainmark v3 is a deterministic, fully offline evaluation for local coding agents and orchestrated teams. There is no LLM judge: hidden graders live outside the scratch directory, so a run is scored on what the code actually does, not on what the model claims.
+
+Seven versioned tasks span JavaScript, Python, and TypeScript — checkout arithmetic, atomic inventory rollback, debugging with green visible tests, deterministic snapshot/resume simulation, a leased durable outbox, ML data-leakage traps, and a paginated typed API sync. Scoring weights correctness (80), protected-file safety (10), verification reliability (7), and efficiency (3); catastrophic runs are zeroed rather than floored.
+
+A batch runner creates fixtures, drives the tool loop, saves chats, and grades every run automatically:
+
+```bash
+node benchmark/run.js --models 'local:*' --tasks all
+```
+
+Local models run through Ollama; OpenAI and Anthropic adapters exist **for benchmarking only** (the app itself stays Ollama-compatible) and require their own API keys. Grading appends to `results.json` and rebuilds an HTML report with a leaderboard, model-by-task matrix, and telemetry-backed timing. `/best` inside the app ranks your installed models from those results.
+
+See [`benchmark/README.md`](benchmark/README.md) for tasks, repetition guidance, grading, and report commands.
 
 ## Code layout — where to modify things
 
 | File | What it does |
 |---|---|
-| `main.js` | The agent loop, system prompt, inference streaming, persistence, subagents, and application IPC handlers. |
+| `main.js` | The agent loop, system prompt, inference streaming, degradation detection, checkpoints, persistence, subagents, and application IPC handlers. |
 | `settings.js` | Settings defaults, validation, and atomic on-disk persistence. |
+| `missions.js` | Persisted mission state: goal, phase, evidence, and final report. |
+| `mcp.js` | Minimal dependency-free MCP client (stdio JSON-RPC) and server lifecycle. |
+| `ollama-recovery.js` | Detection and recovery for an unhealthy or stalled inference backend. |
 | `attachments.js` | Local validation and text extraction for attached PDFs, text files, source code, and images. |
+| `benchmark/` | Brittainmark v3: task fixtures, hidden graders, provider adapters, batch runner, and report generator. |
 | `tools.js` | Tool schemas, implementations, managed processes, network guards, and risky/network/sensitive approval classifications. Add or change tools here. |
 | `renderer/app.js` | UI behavior: sending, streaming display, timers, approval buttons. |
 | `renderer/style.css` | All styling. Colors are CSS variables at the top. |
