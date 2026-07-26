@@ -178,10 +178,12 @@ const generatedTokens = sum('gen');
 const wallTimeMs = Number(metrics.wallTimeMs) || null;
 const toolErrors = Number(metrics.toolErrors) || toolErrorsFromTranscript;
 const toolCalls = Number(metrics.toolCalls) || calls.length;
-const hasTeamWorkflowMessage = convo.some((message) => message.role === 'user' && /^(?:ORCHESTRATE|MISSION)\b/i.test(String(message.content || '')));
 const explicitMode = raw.mode === 'team' || raw.mode === 'solo' ? raw.mode : null;
-const hasRecordedTeamRoles = Boolean(raw.coderModel || raw.verifierModel || raw.subModel || Number(usage.coder?.calls) > 0 || Number(usage.verifier?.calls) > 0);
-const mode = explicitMode || (Number(metrics.orchestrations) > 0 || hasTeamWorkflowMessage || hasRecordedTeamRoles ? 'team' : 'solo');
+// A normal Brittain Code "code" chat is a solo benchmark run. The model may use
+// an auxiliary subagent tool, but that is agent behavior within the one chosen
+// model's run—not a user-configured benchmark team. Reserve team scoring for an
+// explicitly recorded team run or the app's dedicated orchestration workflow.
+const mode = explicitMode || (Number(metrics.orchestrations) > 0 ? 'team' : 'solo');
 const plannerModel = raw.model || '(unknown)';
 const coderModel = mode === 'team' ? raw.coderModel || '(unknown)' : null;
 const verifierModel = mode === 'team' ? raw.verifierModel || raw.subModel || '(unknown)' : null;
@@ -311,8 +313,11 @@ const record = {
   ranAt: raw.timestamp || null,
   gradedAt: new Date().toISOString(),
 };
-record.modelDigests = Object.fromEntries(Object.entries(runtime.roles || {}).map(([role, info]) => [role, info?.digest || null]));
-const roleFingerprint = Object.entries(runtime.roles || {}).map(([role, info]) => `${role}:${info?.digest || info?.name || '?'}`).join(',') || record.modelLabel;
+const executedRoles = mode === 'team'
+  ? Object.entries(runtime.roles || {})
+  : [['main', runtime.roles?.main || runtime.model || null]];
+record.modelDigests = Object.fromEntries(executedRoles.map(([role, info]) => [role, info?.digest || null]));
+const roleFingerprint = executedRoles.map(([role, info]) => `${role}:${info?.digest || info?.name || '?'}`).join(',') || record.modelLabel;
 record.configKey = [record.suiteVersion, record.task, record.taskVersion, record.mode, roleFingerprint, `think=${record.settings.think}`, `ctx=${record.settings.contextCap || '?'}`, `app=${runtime.appVersion || '?'}`].join('|');
 
 console.log('\nJSON ' + JSON.stringify(record));
