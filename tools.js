@@ -212,7 +212,11 @@ const DESTRUCTIVE_COMMAND_PATTERNS = [
   /\bkill(all)?\b\s+-9\s+-1\b/,
   /\blaunchctl\b|\bcrontab\b/,
   /\bnpm\s+(publish|unpublish)\b/,
-  />\s*\/(?:etc|usr|bin|sbin|dev|System|Library)\//, // redirect into system paths
+  />\s*\/(?:etc|usr|bin|sbin|System|Library)\//,  // redirect into system paths
+  // /dev is a system path, but the standard sinks are how ordinary read-only
+  // commands silence noise (`2>/dev/null`) — flagging those made every such
+  // command look destructive. Real device writes (`> /dev/disk0`) still match.
+  />\s*\/dev\/(?!null\b|stdout\b|stderr\b|tty\b|fd\/)/,
   /\b(?:mv|cp|rm|rmdir|touch|tee)\b[^|;&]*\s(?:\/(?!tmp\/)|~\/(?!$))/, // mutate absolute/home paths outside the project
 ];
 

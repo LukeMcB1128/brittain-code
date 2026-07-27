@@ -1078,7 +1078,7 @@ ipcMain.handle('checkpoint:undo', async (_e, cwd) => {
   const target = lastCheckpoint;
   if (!target || target.cwd !== cwd) return { ok: false, error: 'No checkpoint for this folder in this session.' };
   try {
-    const stat = await gitRun(['diff', '--shortstat', target.ref], cwd);
+    const stat = await gitRun(['diff', '--shortstat', target.ref, '--', '.'], cwd);
     // snapshot the CURRENT state first, so UNDO itself is undoable
     await createCheckpoint(cwd);
     // restore tracked content (worktree only — the user's index stays theirs)
@@ -1123,7 +1123,10 @@ async function emitRunReport(cwd, runLog) {
   const lines = ['\u2501 RUN REPORT \u2501'];
   let diffPart = '';
   if (lastCheckpoint && lastCheckpoint.cwd === cwd) {
-    const stat = await gitRun(['diff', '--stat', lastCheckpoint.ref], cwd);
+    // Scope to cwd: when the project folder sits INSIDE a larger repo (e.g.
+    // ~/Downloads is itself a repo), an unscoped diff reports every pending
+    // change anywhere in that repo — unrelated projects included.
+    const stat = await gitRun(['diff', '--stat', lastCheckpoint.ref, '--', '.'], cwd);
     if (stat.ok && stat.out.trim()) diffPart = stat.out.trim().split('\n').slice(-11).join('\n');
   }
   if (diffPart) lines.push(diffPart);
@@ -2162,8 +2165,8 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
       if (stopRequested) break;
 
       state(`verifying ${i}/${max} (${subModel || 'qwen3:8b'})…`);
-      const diff = await gitRun(['diff', '--stat'], cwd);
-      const status = await gitRun(['status', '--porcelain'], cwd);
+      const diff = await gitRun(['diff', '--stat', '--', '.'], cwd);
+      const status = await gitRun(['status', '--porcelain', '--', '.'], cwd);
       const verdict = await runVerifier(subModel || 'qwen3:8b', goal, lastContent, `${diff.out || ''}\n${status.out || ''}`.trim(), currentAbort.signal);
       if (stopRequested) break;
 
@@ -2741,7 +2744,10 @@ ipcMain.handle('git:status', async (_e, cwd) => {
   let branch = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
   if (!branch.ok) branch = await gitRun(['symbolic-ref', '--short', 'HEAD'], cwd);
   if (!branch.ok) return { ok: false }; // not a git repo
-  const status = await gitRun(['status', '--porcelain'], cwd);
+  // '-- .' keeps the count about THIS folder. Without it a project nested in a
+  // larger repo reports that repo's entire pending change set (ls-files below
+  // is already cwd-relative, so unscoped diffs were inconsistent with it too).
+  const status = await gitRun(['status', '--porcelain', '--', '.'], cwd);
   return {
     ok: true,
     branch: branch.out.trim(),
@@ -2750,8 +2756,8 @@ ipcMain.handle('git:status', async (_e, cwd) => {
 });
 
 ipcMain.handle('git:diff', async (_e, cwd) => {
-  const staged = await gitRun(['diff', '--cached'], cwd);
-  const unstaged = await gitRun(['diff'], cwd);
+  const staged = await gitRun(['diff', '--cached', '--', '.'], cwd);
+  const unstaged = await gitRun(['diff', '--', '.'], cwd);
   const untracked = await gitRun(['ls-files', '--others', '--exclude-standard'], cwd);
   const parts = [];
   if (staged.out.trim()) parts.push('═══ STAGED ═══\n' + staged.out);
