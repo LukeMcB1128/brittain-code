@@ -1811,6 +1811,31 @@ function evidencePaths(entry) {
   return paths;
 }
 
+// Workflow reports render as markdown in the chat, where a single newline is
+// NOT a line break — consecutive lines collapse into one paragraph. Facts are
+// therefore emitted as list items, and any value that may contain newlines
+// (shell commands, verifier prose) is flattened first so it cannot break out
+// of its bullet.
+function mdInline(value, max = 0) {
+  let text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (max && text.length > max) text = text.slice(0, max).trimEnd() + '…';
+  return text;
+}
+
+// Inline code for a path/command, with backticks in the value neutralized.
+function mdCode(value, max = 0) {
+  const text = mdInline(value, max).replace(/`/g, 'ˋ');
+  return text ? '`' + text + '`' : '';
+}
+
+// Absolute tool paths are unreadable in a report ("/Users/…/project/src/a.js").
+// Keep the last two segments, which is enough to disambiguate same-named files
+// without spilling the whole home directory into the chat.
+function shortPath(value) {
+  const parts = String(value ?? '').split(/[\\/]/).filter(Boolean);
+  return parts.slice(-2).join('/') || String(value ?? '');
+}
+
 function conciseTaskResult(result, index) {
   const changed = [...new Set(result.coderResult.evidence
     .filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name))
@@ -1825,15 +1850,16 @@ function conciseTaskResult(result, index) {
       const parsed = JSON.parse(entry.result);
       if (typeof parsed.exit_code === 'number') failed = parsed.exit_code !== 0;
     } catch {}
-    return `${String(label).slice(0, 100)} — ${failed ? 'issue reported' : 'completed'}`;
+    return `${mdCode(label, 80)} — ${failed ? '⚠ issue reported' : '✔ completed'}`;
   });
   const lines = [
-    `### ${index + 1}. ${result.task.title} — ${result.complete ? 'verified' : 'incomplete'}`,
-    `Changed: ${changed.length ? changed.join(', ') : 'no modified paths recorded by coding tools'}`,
-    `Checks: ${checks.length ? checks.join('; ') : 'no verification command recorded'}`,
+    `### ${index + 1}. ${mdInline(result.task.title, 120)} — ${result.complete ? '✔ verified' : '✖ incomplete'}`,
+    '',
+    `- **Changed:** ${changed.length ? changed.map((p) => mdCode(shortPath(p))).join(', ') : '_no modified paths recorded by coding tools_'}`,
+    `- **Checks:** ${checks.length ? checks.join(' · ') : '_no verification command recorded_'}`,
   ];
-  if (result.repairs) lines.push(`Repair attempts: ${result.repairs}`);
-  if (!result.complete) lines.push(`Remaining: ${String(result.verdict || 'Verifier did not return a verdict.').slice(0, 900)}`);
+  if (result.repairs) lines.push(`- **Repair attempts:** ${result.repairs}`);
+  if (!result.complete) lines.push(`- **Remaining:** ${mdInline(result.verdict || 'Verifier did not return a verdict.', 600)}`);
   lines.push('');
   return lines;
 }
@@ -2101,19 +2127,20 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
   }
   const finalEvidence = await collectOrchestrationGitEvidence(cwd);
   const report = capWorkflowText([
-    complete ? '## Coder loop complete' : '## Coder loop stopped with remaining work',
+    complete ? '## ✔ Coder loop complete' : '## ✖ Coder loop stopped with remaining work',
     '',
-    `Models: ${model} supervisor → ${coderModel} coder → ${verifierModel} verifier`,
-    `Iterations: ${iterationsUsed}/${max}`,
-    `Online research: ${onlineResearch ? 'supervisor only' : 'off'}`,
+    `- **Supervisor:** ${mdCode(model)} · **Coder:** ${mdCode(coderModel)} · **Verifier:** ${mdCode(verifierModel)}`,
+    `- **Iterations:** ${iterationsUsed}/${max}`,
+    `- **Online research:** ${onlineResearch ? 'supervisor only' : 'off'}`,
     '',
-    `Plan: ${plan.summary}`,
+    `**Plan:** ${mdInline(plan.summary, 700)}`,
     '',
     ...results.flatMap(conciseTaskResult),
-    `Final verification: ${complete ? 'GOAL_COMPLETE' : String(finalVerdict).slice(0, 1000)}`,
+    `**Final verification:** ${complete ? '`GOAL_COMPLETE`' : mdInline(finalVerdict, 800)}`,
     '',
-    `Working tree: ${conciseWorkingTree(finalEvidence)}`,
-    'Open DIFF to inspect the full patch and untracked paths.',
+    `**Working tree:** ${mdInline(conciseWorkingTree(finalEvidence), 600)}`,
+    '',
+    '_Open DIFF to inspect the full patch and untracked paths._',
   ].join('\n'), 6000);
   conversation.push({ role: 'assistant', content: report });
   return { ok: true, report, complete };
@@ -2402,18 +2429,19 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
         : `Final verifier found remaining whole-goal work:\n${finalVerdict.slice(0, 2000)}`);
     }
     const report = [
-      allComplete ? '## Orchestration complete' : '## Orchestration stopped with remaining work',
+      allComplete ? '## ✔ Orchestration complete' : '## ✖ Orchestration stopped with remaining work',
       '',
-      `Models: ${model} planner → ${coderModel} coder → ${verifierModel} verifier`,
-      `Online research: ${onlineResearch ? 'planner only' : 'off'}`,
+      `- **Planner:** ${mdCode(model)} · **Coder:** ${mdCode(coderModel)} · **Verifier:** ${mdCode(verifierModel)}`,
+      `- **Online research:** ${onlineResearch ? 'planner only' : 'off'}`,
       '',
-      `Plan: ${plan.summary}`,
+      `**Plan:** ${mdInline(plan.summary, 700)}`,
       '',
       ...results.flatMap(conciseTaskResult),
-      `Final verification: ${allComplete ? 'GOAL_COMPLETE' : String(finalVerdict).slice(0, 1000)}`,
+      `**Final verification:** ${allComplete ? '`GOAL_COMPLETE`' : mdInline(finalVerdict, 800)}`,
       '',
-      `Working tree: ${conciseWorkingTree(finalEvidence)}`,
-      'Open DIFF to inspect the full patch and untracked paths.',
+      `**Working tree:** ${mdInline(conciseWorkingTree(finalEvidence), 600)}`,
+      '',
+      '_Open DIFF to inspect the full patch and untracked paths._',
     ].join('\n').slice(0, 6000);
     conversation.push({ role: 'assistant', content: report });
     return { ok: true, report, complete: allComplete };

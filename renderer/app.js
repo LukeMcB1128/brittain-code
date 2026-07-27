@@ -830,6 +830,11 @@ function setState(s) {
 
 // ---------- message rendering ----------
 let currentAssistant = null; // the <div> receiving streamed tokens
+// Raw markdown source for the streaming bubble. Once we render markdown into
+// the element its textContent is the *rendered* text, so the source has to be
+// kept separately or every re-render would compound on its own output.
+let currentAssistantRaw = '';
+let mdRenderQueued = false;
 
 // Render markdown safely. Falls back to plain text if the libs failed to load.
 function renderMarkdown(el, text) {
@@ -844,8 +849,25 @@ function renderMarkdown(el, text) {
 // Convert the streaming assistant bubble from plain text to rendered markdown.
 function finalizeAssistant() {
   if (!currentAssistant) return;
-  renderMarkdown(currentAssistant, currentAssistant.textContent);
+  renderMarkdown(currentAssistant, currentAssistantRaw);
   currentAssistant = null;
+  currentAssistantRaw = '';
+}
+
+// Re-render the streaming bubble as markdown, at most once per animation frame
+// so a fast token stream cannot thrash innerHTML. An unclosed ``` fence mid
+// stream is fine — marked renders the partial block and it settles as more
+// tokens arrive.
+function scheduleMarkdownRender() {
+  if (mdRenderQueued || !currentAssistant) return;
+  mdRenderQueued = true;
+  requestAnimationFrame(() => {
+    mdRenderQueued = false;
+    if (!currentAssistant) return;
+    const nearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 120;
+    renderMarkdown(currentAssistant, currentAssistantRaw);
+    if (nearBottom) scrollDown();
+  });
 }
 
 function addMessage(role, text, images, attachments = []) {
@@ -1002,19 +1024,21 @@ window.api.onSubagent((d) => {
 window.api.onCleanContent((text) => {
   if (!currentAssistant) return;
   if (text) {
-    currentAssistant.textContent = text;
+    currentAssistantRaw = text;
+    scheduleMarkdownRender();
   } else {
     currentAssistant.closest('.msg')?.remove();
     currentAssistant = null;
+    currentAssistantRaw = '';
   }
 });
 
 // ---------- stream events ----------
 window.api.onToken((t) => {
   finalizeThinking();
-  if (!currentAssistant) currentAssistant = addMessage('assistant', '');
-  currentAssistant.textContent += t;
-  scrollDown();
+  if (!currentAssistant) { currentAssistant = addMessage('assistant', ''); currentAssistantRaw = ''; }
+  currentAssistantRaw += t;
+  scheduleMarkdownRender(); // live markdown, rather than raw text until the run ends
 });
 
 window.api.onToolCall(({ name, args }) => {
