@@ -30,6 +30,13 @@ let settingsDefaults = null;
 let currentModels = [];
 let missionCard = null;
 let latestMission = null;
+// Streaming-speech state. Declared with the rest of the module state because
+// stopSpeaking() is reachable from the top-level setAppMode() call below,
+// long before the Jarvis speech section is evaluated.
+let speechBuf = '';
+let spokenChars = 0;
+let speechCapped = false;
+let cachedVoice = null;
 
 setAppMode(appMode, false, false);
 
@@ -104,6 +111,7 @@ setAppMode(appMode, false, false);
   const missionRes = await window.api.missionGet();
   if (missionRes.ok && missionRes.mission) upsertMissionCard(missionRes.mission);
   
+  initJarvisMuteButton();
   // Show startup message on boot
   showStartupMessage();
 })();
@@ -239,16 +247,22 @@ codeModeBtn.addEventListener('click', () => chooseAppMode('code'));
 chatModeBtn.addEventListener('click', () => chooseAppMode('chat'));
 
 function setAppMode(mode, persist = true, refreshHistory = true) {
-  appMode = mode === 'chat' ? 'chat' : 'code';
+  appMode = mode === 'chat' ? 'chat' : mode === 'jarvis' ? 'jarvis' : 'code';
   document.body.dataset.mode = appMode;
   codeModeBtn.classList.toggle('active', appMode === 'code');
   chatModeBtn.classList.toggle('active', appMode === 'chat');
   codeModeBtn.setAttribute('aria-pressed', appMode === 'code' ? 'true' : 'false');
   chatModeBtn.setAttribute('aria-pressed', appMode === 'chat' ? 'true' : 'false');
-  $('sidebar-head').textContent = appMode === 'chat' ? 'CHAT HISTORY' : 'CODE HISTORY';
+  $('sidebar-head').textContent = appMode === 'chat' ? 'CHAT HISTORY' : appMode === 'jarvis' ? 'JARVIS HISTORY' : 'CODE HISTORY';
   input.placeholder = appMode === 'chat'
     ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
-    : 'Describe a task... (Enter to send, Shift+Enter for newline)';
+    : appMode === 'jarvis'
+      ? 'Talk to Jarvis... (Enter to send, Shift+Enter for newline)'
+      : 'Describe a task... (Enter to send, Shift+Enter for newline)';
+  // Ambient watching runs only while Jarvis is the active mode.
+  window.api.jarvisWatch(appMode === 'jarvis' && (appSettings ? appSettings.jarvisWatch !== false : true), cwd);
+  if (appMode === 'jarvis') warmUpSpeech();
+  else stopSpeaking();
   if (persist) localStorage.setItem('appMode', appMode);
   syncMissionCard();
   refreshGit();
@@ -270,6 +284,172 @@ async function chooseAppMode(mode) {
 $('cwd-btn').addEventListener('click', async () => {
   const res = await window.api.pickCwd();
   if (res.ok) setCwd(res.path);
+});
+
+// ---------- Jarvis: speech ----------
+// Uses the Web Speech API when the renderer provides it. If it is missing
+// (unverified in this Electron build at time of writing), speech is simply
+// skipped — Jarvis stays fully usable as text.
+let jarvisMuted = localStorage.getItem('jarvisMuted') === '1';
+function speechAvailable() {
+  return typeof window.speechSynthesis !== 'undefined' && typeof window.SpeechSynthesisUtterance !== 'undefined';
+}
+
+function pickJarvisVoice() {
+  if (!speechAvailable()) return null;
+  if (cachedVoice) return cachedVoice;
+  const voices = window.speechSynthesis.getVoices() || [];
+  if (!voices.length) return null;   // not loaded yet; voiceschanged re-picks
+  const wanted = appSettings?.jarvisVoice;
+  if (wanted) {
+    const exact = voices.find((v) => v.name === wanted);
+    if (exact) { cachedVoice = exact; return exact; }
+  }
+  // Daniel (en_GB) is the classic butler voice. macOS reports him as
+  // 'Daniel (English (United Kingdom))', so match on the leading name only.
+  cachedVoice = voices.find((v) => /^Daniel\b/.test(v.name || ''))
+    || voices.find((v) => /en[-_]GB/i.test(v.lang || ''))
+    || voices.find((v) => /^en/i.test(v.lang || ''))
+    || voices[0] || null;
+  return cachedVoice;
+}
+
+// Speaking raw model output is unbearable: it reads code, paths and markdown
+// aloud. Keep prose, drop everything meant for the eyes.
+function speakableText(raw) {
+  let t = String(raw || '');
+  t = t.replace(/```[\s\S]*?```/g, ' (code on screen) ');
+  t = t.replace(/`[^`]*`/g, ' ');
+  t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, ' ');
+  t = t.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+  t = t.replace(/^\s*[#>*-]+\s*/gm, '');
+  t = t.replace(/\*\*|__|\*|_/g, '');
+  t = t.replace(/(?:\/[\w.-]+){2,}/g, ' that path ');   // long file paths
+  t = t.replace(/https?:\/\/\S+/g, ' a link ');
+  t = t.replace(/\s+/g, ' ').trim();
+  return t.length > 700 ? t.slice(0, 700) + '… the rest is on screen.' : t;
+}
+
+const SPEAK_BUDGET = 900;   // spoken chars per reply, so Jarvis never monologues
+
+function speechEnabled() {
+  if (jarvisMuted || appMode !== 'jarvis' || !speechAvailable()) return false;
+  return !(appSettings && appSettings.jarvisSpeak === false);
+}
+
+// Chromium starts the platform speech service lazily, so the first utterance of
+// a session stalls for a beat. Entering Jarvis mode pays that cost up front, and
+// touching getVoices() kicks off the asynchronous voice load at the same time.
+function warmUpSpeech() {
+  if (!speechAvailable()) return;
+  try {
+    window.speechSynthesis.getVoices();
+    const u = new SpeechSynthesisUtterance('.');
+    u.volume = 0;
+    window.speechSynthesis.speak(u);
+  } catch { /* speech is a nicety, never a failure path */ }
+}
+
+function enqueueUtterance(text) {
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickJarvisVoice();
+    if (v) u.voice = v;
+    u.rate = 1.05;
+    window.speechSynthesis.speak(u);   // the engine queues; utterances play back to back
+  } catch { /* speech is a nicety, never a failure path */ }
+}
+
+function utter(raw) {
+  const text = speakableText(raw);
+  if (!text) return;
+  if (spokenChars >= SPEAK_BUDGET) {
+    if (!speechCapped) { speechCapped = true; enqueueUtterance('The rest is on screen.'); }
+    return;
+  }
+  spokenChars += text.length;
+  enqueueUtterance(text);
+}
+
+// A local model streams at maybe 20-60 tokens/sec, so waiting for the finished
+// reply left Jarvis silent for ten or twenty seconds and then talking at length.
+// Sentences go to the synthesiser as soon as they complete instead, so he starts
+// speaking about as quickly as the first sentence lands.
+function feedSpeech(chunk) {
+  if (!speechEnabled()) return;
+  speechBuf += chunk;
+  // Never read out the inside of a code fence that has not closed yet: only the
+  // text ahead of an unterminated fence is safe to speak.
+  const fences = (speechBuf.match(/```/g) || []).length;
+  const limit = fences % 2 === 1 ? speechBuf.lastIndexOf('```') : speechBuf.length;
+  if (limit <= 0) return;
+  const m = speechBuf.slice(0, limit).match(/^[\s\S]*(?:[.!?…]["')\]]?(?=\s)|\n)/);
+  if (!m || !m[0].trim()) return;
+  speechBuf = speechBuf.slice(m[0].length);
+  utter(m[0]);
+}
+
+// Speak the tail that never ended in punctuation, and reset the per-reply budget.
+function flushSpeech() {
+  if (speechEnabled() && speechBuf.trim()) utter(speechBuf);
+  speechBuf = '';
+  spokenChars = 0;
+  speechCapped = false;
+}
+
+// One-shot speech, for ambient announcements that do not stream.
+function speak(raw) {
+  if (!speechEnabled()) return;
+  const text = speakableText(raw);
+  if (text) enqueueUtterance(text);
+}
+
+function stopSpeaking() {
+  speechBuf = '';
+  spokenChars = 0;
+  speechCapped = false;
+  if (speechAvailable()) { try { window.speechSynthesis.cancel(); } catch {} }
+}
+
+function initJarvisMuteButton() {
+  const btn = $('jarvis-mute');
+  if (!btn) return;
+  btn.addEventListener('click', () => setJarvisMuted(!jarvisMuted));
+  setJarvisMuted(jarvisMuted);
+}
+
+function setJarvisMuted(muted) {
+  jarvisMuted = muted;
+  localStorage.setItem('jarvisMuted', muted ? '1' : '0');
+  const btn = $('jarvis-mute');
+  if (btn) {
+    btn.textContent = muted ? 'MUTED' : 'SPEAKING';
+    btn.classList.toggle('muted', muted);
+  }
+  if (muted) stopSpeaking();
+}
+
+// The voice list arrives asynchronously; re-pick once it does.
+if (speechAvailable() && window.speechSynthesis.addEventListener) {
+  window.speechSynthesis.addEventListener('voiceschanged', () => { cachedVoice = null; });
+}
+
+// ---------- Jarvis: ambient announcements ----------
+window.api.onJarvisAmbient(({ text, kind }) => {
+  if (appMode !== 'jarvis') return;
+  const div = document.createElement('div');
+  div.className = 'msg ambient';
+  const label = document.createElement('span');
+  label.className = 'label';
+  label.textContent = 'JARVIS · ' + String(kind || 'note').toUpperCase();
+  const body = document.createElement('span');
+  body.className = 'body';
+  body.textContent = text;
+  div.appendChild(label);
+  div.appendChild(body);
+  chat.appendChild(div);
+  scrollDown();
+  speak(text);
 });
 
 // In-app replacement for window.confirm() — native dialogs break keyboard
@@ -371,9 +551,7 @@ $('review-discard-btn').addEventListener('click', async () => {
 // ---------- chat history ----------
 async function loadChatHistory() {
   const allChats = await window.api.historyList();
-  const chats = allChats.filter((chatEntry) => appMode === 'chat'
-    ? chatEntry.mode === 'chat'
-    : chatEntry.mode !== 'chat');
+  const chats = allChats.filter((chatEntry) => (chatEntry.mode || 'code') === appMode);
   chats.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)); // newest first
   chatList.innerHTML = '';
 
@@ -764,6 +942,7 @@ async function send() {
   renderAttachmentPreview();
 
   input.value = '';
+  stopSpeaking();
   hideStartupMessage();
   addMessage('user', text || '(attached files)', shownImages, shownAttachments);
   startRun();
@@ -773,7 +952,7 @@ async function send() {
     subModel,
     text,
     mode: appMode,
-    cwd: appMode === 'code' ? cwd : null,
+    cwd: appMode === 'chat' ? null : cwd,
     autoApprove: appMode === 'code' && autoApprove.checked,
     autoBranch: appMode === 'code' && autoBranchToggle.checked,
     onlineResearch: onlineResearchToggle.checked,
@@ -849,6 +1028,7 @@ function renderMarkdown(el, text) {
 // Convert the streaming assistant bubble from plain text to rendered markdown.
 function finalizeAssistant() {
   if (!currentAssistant) return;
+  if (appMode === 'jarvis') flushSpeech();
   renderMarkdown(currentAssistant, currentAssistantRaw);
   currentAssistant = null;
   currentAssistantRaw = '';
@@ -1038,6 +1218,7 @@ window.api.onToken((t) => {
   finalizeThinking();
   if (!currentAssistant) { currentAssistant = addMessage('assistant', ''); currentAssistantRaw = ''; }
   currentAssistantRaw += t;
+  if (appMode === 'jarvis') feedSpeech(t);
   scheduleMarkdownRender(); // live markdown, rather than raw text until the run ends
 });
 
@@ -1789,6 +1970,37 @@ async function handleSlash(raw) {
       coderModel = match;
       localStorage.setItem('coderModel', match);
       return addInfo('Coder model set to ' + match);
+    }
+
+    case 'jarvis': {
+      if (busy) return;
+      const models = [...modelSelect.options].map((o) => o.value);
+      if (!arg) {
+        const last = appSettings?.jarvisModel;
+        return addError('Usage: /jarvis <model>' + (last ? `  (last used: ${last})` : '') + '\nInstalled: ' + models.join(', '));
+      }
+      const match = models.find((v) => v === arg) || models.find((v) => v.includes(arg));
+      if (!match) return addError(`No installed model matching "${arg}".`);
+      const conversation = await window.api.getConversation();
+      if (conversation.length && !(await confirmDialog('Switch to JARVIS and start a new session?\n\nYour current chat is already saved in History.', { okLabel: 'SWITCH' }))) return;
+      if (appMode !== 'jarvis') localStorage.setItem('preJarvisMode', appMode);
+      modelSelect.value = match;
+      localStorage.setItem('model', match);
+      localStorage.setItem('model:jarvis', match);
+      if (appSettings) { appSettings.jarvisModel = match; window.api.settingsSave(appSettings); }
+      setAppMode('jarvis');
+      if (conversation.length) await newSession();
+      else { showStartupMessage(); }
+      addInfo(`JARVIS online — ${match}.\nBroad read access to this machine (credential stores, keychains, browser profiles and secrets files are hard-blocked). No writes, no shell.\nAmbient watch is ${appSettings?.jarvisWatch === false ? 'off' : 'on'}. /exit to leave.`);
+      return;
+    }
+
+    case 'exit': {
+      if (appMode !== 'jarvis') return addError('Not in Jarvis mode.');
+      stopSpeaking();
+      setAppMode(localStorage.getItem('preJarvisMode') === 'chat' ? 'chat' : 'code');
+      await newSession();
+      return addInfo('Jarvis offline.');
     }
 
     case 'mcp': {

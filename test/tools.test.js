@@ -38,7 +38,8 @@ test('tool schemas have unique names and matching execution cases', () => {
 
   const source = fs.readFileSync(path.join(__dirname, '..', 'tools.js'), 'utf8');
   const implemented = new Set([...source.matchAll(/case '([^']+)'/g)].map((match) => match[1]));
-  const mainProcessTools = new Set(['ask_user', 'run_subagent']);
+  // executed in main.js, not tools.js — they need Ollama, usage counters, or the UI
+  const mainProcessTools = new Set(['ask_user', 'run_subagent', 'app_status']);
   for (const name of names) {
     if (!mainProcessTools.has(name)) assert.equal(implemented.has(name), true, `${name} needs an executeTool case`);
   }

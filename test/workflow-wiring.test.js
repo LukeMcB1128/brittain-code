@@ -70,10 +70,10 @@ test('Code and Chat modes are wired through UI, persistence, and the agent bound
   assert.match(html, /id="mode-chat"/);
   assert.match(renderer, /mode: appMode/);
   assert.match(renderer, /appMode === 'code' && !cwd/);
-  assert.match(renderer, /appMode === 'chat'\s*\? chatEntry\.mode === 'chat'\s*:\s*chatEntry\.mode !== 'chat'/);
-  assert.match(main, /mode: meta\.mode === 'chat' \? 'chat' : 'code'/);
-  assert.match(main, /const runMode = mode === 'chat' \? 'chat' : 'code'/);
-  assert.match(main, /const modeTools = chatMode \? CHAT_TOOLS : TOOL_DEFS/);
+  assert.match(renderer, /\(chatEntry\.mode \|\| 'code'\) === appMode/);
+  assert.match(main, /mode: meta\.mode === 'chat' \? 'chat' : meta\.mode === 'jarvis' \? 'jarvis' : 'code'/);
+  assert.match(main, /const runMode = mode === 'chat' \? 'chat' : mode === 'jarvis' \? 'jarvis' : 'code'/);
+  assert.match(main, /const modeTools = jarvisMode \? JARVIS_TOOLS : chatMode \? CHAT_TOOLS : TOOL_DEFS/);
   assert.match(main, /if \(!activeToolNames\.has\(name\)\)/);
 });
 

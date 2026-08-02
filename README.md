@@ -74,6 +74,51 @@ The inference model remains local while online research is enabled, but the sess
 
 Sensitive file reads (`.env`, private-key formats, credential files), process listings, and environment inspection also bypass AUTO-APPROVE. Environment values are redacted by default; explicitly revealed values and all other tool results become part of persisted chat history.
 
+## Jarvis (hidden)
+
+A persistent companion mode, entered by command rather than by button:
+
+```
+/jarvis <model>     enter Jarvis with that model (partial match ok)
+/exit               leave, returning to your previous mode
+```
+
+Jarvis is different from Code and Chat rather than a superset of either:
+
+- **Sees the whole machine.** Reads any file, not just the current project —
+  useful for "what was I doing in that other repo?"
+- **Hard-blocked from secrets.** Credential directories (`~/.ssh`, `~/.aws`,
+  `~/.gnupg`), keychains, browser profiles, message stores, and secret files
+  (`.env`, `*.pem`, `*.key`, shell history) are refused outright — not
+  prompted for. Anything read would persist in saved chat history, so this is a
+  wall rather than a question. Symlinks don't get around it.
+- **No hands.** No writes, no shell. Jarvis observes and advises; Code mode does
+  the work.
+- **Remembers you, not the project.** Its own global memory at
+  `jarvis/memory.md` in app data, separate from per-project agent memory.
+- **Its own history**, kept apart from Code and Chat chats.
+- **Speaks.** Replies are read aloud (macOS ships the `Daniel` en-GB voice).
+  Code blocks, paths and links are stripped before speaking. Toggle with the
+  **SPEAKING / MUTED** button; Esc stops speech.
+- **Watches while you work.** Ambient announcements when the branch changes,
+  when uncommitted work piles up or goes stale, or when a managed process
+  exits. These are canned lines, never model-generated — so they cost no tokens
+  and cannot fabricate — and they are rate limited (min 90s apart, max 8/hour).
+- **`app_status`** gives it a one-call digest: version, installed models, git
+  state, chat counts, benchmark leaders.
+
+### Watching external things (email, calendars, …)
+
+Jarvis has no email integration and stores no credentials. To have it announce
+external events, connect an MCP server and name its tools in settings:
+
+```json
+"jarvisWatchTools": ["mcp_gmail_unread_count"]
+```
+
+Naming a tool there is your standing consent for Jarvis to poll it in the
+background (max 5 tools). Nothing is polled by default.
+
 ## Slash commands
 
 Type these in the message box:

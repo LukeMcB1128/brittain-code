@@ -23,6 +23,11 @@ const DEFAULT_SETTINGS = Object.freeze({
   autoBranch: false,
   reviewMode: false,
   mcpAutoApprove: false,
+  jarvisModel: '',
+  jarvisSpeak: true,
+  jarvisVoice: '',
+  jarvisWatch: true,
+  jarvisWatchTools: [],
   globalCodeInstructions: '',
   globalChatInstructions: '',
   maxAgentSteps: 50,
@@ -85,6 +90,15 @@ function normalizeSettings(input = {}) {
     autoBranch: !!merged.autoBranch,
     reviewMode: !!merged.reviewMode,
     mcpAutoApprove: !!merged.mcpAutoApprove,
+    jarvisModel: cleanText(merged.jarvisModel, 200),
+    jarvisSpeak: !!merged.jarvisSpeak,
+    jarvisVoice: cleanText(merged.jarvisVoice, 120),
+    jarvisWatch: !!merged.jarvisWatch,
+    // MCP tool names Jarvis may poll in the background. Naming a tool here is
+    // the user's standing consent to call it without a per-call prompt.
+    jarvisWatchTools: Array.isArray(merged.jarvisWatchTools)
+      ? merged.jarvisWatchTools.filter((t) => typeof t === 'string' && t.trim()).slice(0, 5).map((t) => t.trim().slice(0, 120))
+      : [],
     globalCodeInstructions: cleanText(merged.globalCodeInstructions, 12_000),
     globalChatInstructions: cleanText(merged.globalChatInstructions, 12_000),
     maxAgentSteps: clampInteger(merged.maxAgentSteps, DEFAULT_SETTINGS.maxAgentSteps, 5, 100),

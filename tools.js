@@ -111,7 +111,92 @@ function registerProjectMemory(cwd) {
 }
 
 // ---------- tools ----------
-function resolveInside(cwd, p) {
+// ---------- Jarvis broad-read fence ----------
+// Jarvis reads the whole machine, so the directory fence that protects Code
+// mode does not apply. What protects the user instead is a HARD deny list:
+// these paths are refused outright rather than prompted for. A 3am "approve?"
+// click is not meaningful consent, and anything read here would persist in
+// chats/, in compaction summaries, and in /export output long after the click.
+const JARVIS_HOME = os.homedir();
+
+// Unambiguous credential/config dotdirs — denied at any depth.
+const JARVIS_DENY_SEGMENTS = new Set(['.ssh', '.aws', '.gnupg', '.gpg', '.kube', '.azure', '.docker']);
+
+// Home-relative subtrees (keychains, message stores, browser profiles: cookies
+// and saved logins live here).
+const JARVIS_DENY_HOME_PREFIXES = [
+  'Library/Keychains',
+  'Library/Messages',
+  'Library/Application Support/Google/Chrome',
+  'Library/Application Support/Chromium',
+  'Library/Application Support/BraveSoftware',
+  'Library/Application Support/Firefox',
+  'Library/Safari',
+  'Library/Containers/com.apple.Safari',
+  'AppData/Local/Google/Chrome',
+  'AppData/Roaming/Mozilla',
+  'AppData/Local/Microsoft/Edge',
+  '.config/gcloud',
+  '.mozilla',
+  '.config/google-chrome',
+];
+
+// Secret-bearing filenames — denied wherever they appear.
+const JARVIS_DENY_NAMES = /^(?:\.env(?:\..+)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|credentials(?:\.json)?|secrets?\.(?:json|ya?ml)|id_rsa.*|id_ecdsa.*|id_ed25519.*|.*\.(?:pem|key|p12|pfx|jks|keystore|ppk)|.*_history|\.?bash_history|\.?zsh_history)$/i;
+
+function isUnderPath(candidate, parent) {
+  const rel = path.relative(parent, candidate);
+  return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
+}
+
+function assertNotDenied(target) {
+  const segments = target.split(path.sep).filter(Boolean);
+  for (const segment of segments) {
+    if (JARVIS_DENY_SEGMENTS.has(segment.toLowerCase())) {
+      throw new Error(`Refused: "${target}" is inside a protected credential directory (${segment}). This is a hard limit — it is not approvable, because anything read here would be written into saved chat history. Use Code mode if you genuinely need it.`);
+    }
+  }
+  if (JARVIS_DENY_NAMES.test(path.basename(target))) {
+    throw new Error(`Refused: "${path.basename(target)}" looks like a secrets file. This is a hard limit — secrets read here would persist in saved chat history.`);
+  }
+  for (const prefix of JARVIS_DENY_HOME_PREFIXES) {
+    if (isUnderPath(target, path.join(JARVIS_HOME, prefix))) {
+      throw new Error(`Refused: "${target}" is inside a protected personal data store (~/${prefix}). This is a hard limit and is not approvable.`);
+    }
+  }
+}
+
+// Resolve a path anywhere on the machine, expanding ~, then apply the deny
+// list to the literal path AND to its realpath — a deny list that only checks
+// the string is defeated by a single symlink.
+function resolveAnywhere(p, cwd) {
+  let raw = String(p ?? '.').trim();
+  if (raw === '~') raw = JARVIS_HOME;
+  else if (raw.startsWith('~' + path.sep) || raw.startsWith('~/')) raw = path.join(JARVIS_HOME, raw.slice(2));
+  const abs = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(cwd || JARVIS_HOME, raw);
+
+  assertNotDenied(abs);
+  // Follow symlinks: check the real location of the deepest part that exists.
+  let existing = abs;
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  try {
+    const real = fs.realpathSync(existing);
+    assertNotDenied(real);
+    if (existing !== abs) assertNotDenied(path.join(real, path.relative(existing, abs)));
+  } catch (err) {
+    if (/^Refused:/.test(err.message)) throw err; // deny-list wins over fs errors
+  }
+  return abs;
+}
+
+function resolveInside(cwd, p, opts) {
+  // Jarvis passes { anywhere: true } for read-only tools; every other caller
+  // keeps the project fence.
+  if (opts && opts.anywhere) return resolveAnywhere(p, cwd);
   const root = fs.realpathSync(cwd);
   const abs = path.resolve(root, p || '.');
   const isInside = (candidate) => {
@@ -747,6 +832,14 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'app_status',
+      description: 'Get a live digest of Brittain Code and the current machine state: app version, installed models, current project and its git state, recent chat counts, benchmark leaders, and memory sizes. Use this first when asked how things are going — it is one call instead of many file reads.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'ask_user',
       description: 'Ask the user one or more questions and wait for their answers. Use when you are blocked on decisions only the user can make (ambiguous requirements, destructive choices, multiple valid approaches). Ask each question as its own array entry — never cram several questions into one string. Give each question 2-4 short concrete options when possible.',
       parameters: {
@@ -1181,7 +1274,10 @@ const RISKY_TOOLS = new Set([
   'web_fetch',
 ]);
 
-async function executeTool(name, args, cwd) {
+async function executeTool(name, args, cwd, opts = {}) {
+  // Jarvis mode reads the whole machine; readOpts flips path resolution for
+  // read-only tools only. Mutating tools always stay fenced to cwd.
+  const readOpts = opts.broadRead ? { anywhere: true } : undefined;
   // futility tracking must see every call so any non-write action resets it
   const futilityNote = trackRewrite(name, name === 'write_file' && args?.path ? resolveInside(cwd, args.path) : '');
   switch (name) {
@@ -1189,7 +1285,7 @@ async function executeTool(name, args, cwd) {
       return gitRun(['log', '--graph', '--oneline', '--all', '--no-color'], cwd).then((res) => (res.ok ? truncate(res.out) : `Error: ${res.err}`));
     }
     case 'read_file': {
-      const p = resolveInside(cwd, args.path);
+      const p = resolveInside(cwd, args.path, readOpts);
       const stat = fs.statSync(p);
       if (stat.size > 2_000_000) return `Error: file too large (${stat.size} bytes)`;
       return truncate(fs.readFileSync(p, 'utf8'));
@@ -1215,7 +1311,7 @@ async function executeTool(name, args, cwd) {
         + futilityNote;
     }
     case 'browse_files': {
-      const root = resolveInside(cwd, args.path);
+      const root = resolveInside(cwd, args.path, readOpts);
       if (!fs.statSync(root).isDirectory()) return `Error: ${args.path || root} is not a directory.`;
       const maxDepth = Math.min(Math.max(Math.round(Number(args.depth) || 1), 1), 8);
       const maxResults = Math.min(Math.max(Math.round(Number(args.max_results) || 200), 1), 500);
@@ -1339,7 +1435,7 @@ async function executeTool(name, args, cwd) {
       return truncate(JSON.stringify(result, null, 2));
     }
     case 'search_files': {
-      const target = resolveInside(cwd, args.path);
+      const target = resolveInside(cwd, args.path, readOpts);
       const maxResults = Math.min(Math.max(Math.round(Number(args.max_results) || 100), 1), 300);
       const contextLines = Math.min(Math.max(Math.round(Number(args.context_lines) || 0), 0), 10);
       const fileGlob = args.file_pattern ? globToRegex(String(args.file_pattern)) : null;
@@ -1486,7 +1582,7 @@ async function executeTool(name, args, cwd) {
       return `Deleted file ${p}`;
     }
     case 'file_metadata': {
-      const p = resolveInside(cwd, args.path);
+      const p = resolveInside(cwd, args.path, readOpts);
       const stat = fs.statSync(p);
       const metadata = {
         path: path.relative(cwd, p) || '.',
@@ -1522,7 +1618,7 @@ async function executeTool(name, args, cwd) {
       return `Moved ${source} to ${dest}`;
     }
     case 'get_file_lines': {
-      const p = resolveInside(cwd, args.path);
+      const p = resolveInside(cwd, args.path, readOpts);
       const lines = fs.readFileSync(p, 'utf8').split('\n');
       const start = Math.max(0, (args.start || 1) - 1);
       const end = args.end ? Math.min(lines.length, args.end) : Math.min(lines.length, start + 10);
@@ -2193,6 +2289,20 @@ const CODER_TOOLS = TOOL_DEFS.filter((d) => CODER_TOOL_NAMES.has(d.function.name
 const CHAT_TOOL_NAMES = new Set(['ask_user', 'web_search', 'web_fetch']);
 const CHAT_TOOLS = TOOL_DEFS.filter((d) => CHAT_TOOL_NAMES.has(d.function.name));
 
+// Jarvis: broad sight, no hands. Deliberately curated rather than "every tool"
+// — the benchmark showed tool-call count tracks inversely with quality, and
+// Jarvis already carries the longest prompt in the app (personality + global
+// memory). Anything outside this list is reachable via run_subagent.
+const JARVIS_TOOL_NAMES = new Set([
+  'read_file', 'browse_files', 'search_files', 'search_local_docs',
+  'get_file_lines', 'file_metadata',
+  'git_status', 'get_git_log', 'get_git_graph', 'read_git_diff',
+  'check_port_usage', 'process_status',
+  'app_status', 'run_subagent', 'ask_user', 'remember',
+  'web_search', 'web_fetch',
+]);
+const JARVIS_TOOLS = TOOL_DEFS.filter((d) => JARVIS_TOOL_NAMES.has(d.function.name));
+
 module.exports = {
   initTools,
   TOOL_DEFS,
@@ -2205,6 +2315,9 @@ module.exports = {
   CODER_TOOL_NAMES,
   CHAT_TOOLS,
   CHAT_TOOL_NAMES,
+  JARVIS_TOOLS,
+  JARVIS_TOOL_NAMES,
+  resolveAnywhere,
   NETWORK_TOOLS,
   SENSITIVE_TOOLS,
   DESTRUCTIVE_TOOLS,
