@@ -148,5 +148,7 @@ test('Brittain voice captures locally, uses whisper-cli, and stays fast by defau
   assert.match(main, /execFileAsync\(status\.binaryPath/);
   assert.match(main, /pathBinary/);
   assert.match(main, /brittainRequestNeedsTools/);
+  assert.match(main, /A short answer to a clarification/);
+  assert.match(main, /A failed tool call is not inspection/);
   assert.match(main, /brittainMode \? false : !!think/);
 });

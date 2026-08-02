@@ -344,10 +344,10 @@ function speakableText(raw) {
   t = t.replace(/(?:\/[\w.-]+){2,}/g, ' that path ');   // long file paths
   t = t.replace(/https?:\/\/\S+/g, ' a link ');
   t = t.replace(/\s+/g, ' ').trim();
-  return t.length > 700 ? t.slice(0, 700) + '… the rest is on screen.' : t;
+  return t.length > 1000 ? t.slice(0, 1000) + '… the rest is on screen.' : t;
 }
 
-const SPEAK_BUDGET = 900;   // spoken chars per reply, so Brittain never monologues
+const SPEAK_BUDGET = 1500;   // spoken chars per reply, so Brittain never monologues
 
 function speechEnabled() {
   if (brittainMuted || appMode !== 'brittain' || !speechAvailable()) return false;
@@ -372,7 +372,7 @@ function enqueueUtterance(text) {
     const u = new SpeechSynthesisUtterance(text);
     const v = pickBrittainVoice();
     if (v) u.voice = v;
-    u.rate = 1.05;
+    u.rate = 1.3;
     window.speechSynthesis.speak(u);   // the engine queues; utterances play back to back
   } catch { /* speech is a nicety, never a failure path */ }
 }

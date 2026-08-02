@@ -86,6 +86,7 @@ test('brittain mode reaches the agent without being coerced to code', () => {
   assert.match(main, /const modeTools = brittainMode/);
   assert.match(main, /BRITTAIN_TOOLS\.filter/);
   assert.match(main, /brittainSystemPrompt\(cwd, onlineResearch\)/);
+  assert.match(main, /The current project is only a starting point/);
   // broad read must be scoped to brittain only
   assert.match(main, /const execOpts = \{ broadRead: mode === 'brittain' \}/);
 });

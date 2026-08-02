@@ -709,15 +709,18 @@ function brittainSystemPrompt(cwd, onlineResearch = false) {
     '',
     'THE ONE INVIOLABLE RULE: personality lives in tone, never in facts.',
     '- Never invent a number, a file\'s contents, a git state, or a benchmark result. Read it or say you have not.',
+    '- A failed tool call is not inspection. Report the failure plainly; never claim you looked through a project, file, or repository unless a successful result in this conversation supports it.',
     '- Being wrong with confidence is the single worst thing you can do. A dry "I have not checked" is always better.',
     '',
     'What you can see:',
     `- You read anywhere on this machine, not just one project. Current project: ${cwd || '(none selected)'}`,
+    '- The current project is only a starting point. To inspect elsewhere, pass an absolute path (or ~/…) to a read-only file tool; do not silently substitute the current project.',
     '- Credential stores, keychains, browser profiles, message databases, and secrets files are hard-blocked. If a read is refused, do not attempt to work around it — say it is blocked and move on.',
     '- You cannot write files, edit code, or run shell commands. You observe and advise; Code mode does the work.',
     '',
     'Useful locations:',
     `- App data: ${userData}`,
+    ...(fs.existsSync(path.join(__dirname, 'package.json')) ? [`- Brittain Code source directory (when running from source): ${__dirname}`] : []),
     `- Saved chats: ${path.join(userData, 'chats')} (index.json lists them all)`,
     `- Per-project agent memory: ${path.join(userData, 'memory', 'projects')}`,
     '- Benchmark results (only when running from source): benchmark/results.json inside the Brittain Code repo',
@@ -748,8 +751,20 @@ function brittainSystemPrompt(cwd, onlineResearch = false) {
 
 // Tool schemas cost latency and encourage a tool call even when a direct reply
 // is better. Brittain gets read-only tools only for explicit inspection work.
-function brittainRequestNeedsTools(text) {
-  return /\b(?:check|inspect|look(?:\s+up|\s+at)?|search|find|read|open|show|list|status|what(?:'s| is)\s+(?:in|on)|git|file|folder|directory|process|port|log|diff|benchmark|memory|research|latest|current)\b/i.test(String(text || ''));
+// A short answer to a clarification ("a text-to-speech engine") remains part
+// of the preceding inspection request, rather than silently dropping tools.
+const BRITTAIN_INSPECTION_RE = /\b(?:check|inspect|look(?:\s+up|\s+at)?|search|find|read|open|show|list|status|what(?:'s| is)\s+(?:in|on)|git|file|folder|directory|process|port|log|diff|benchmark|memory|research|latest|current)\b/i;
+function brittainRequestNeedsTools(messages) {
+  const latestIndex = [...messages].map((message, index) => ({ message, index }))
+    .reverse().find(({ message }) => message.role === 'user')?.index;
+  if (latestIndex === undefined) return false;
+  const latest = String(messages[latestIndex].displayContent || messages[latestIndex].content || '');
+  if (BRITTAIN_INSPECTION_RE.test(latest)) return true;
+  if (latest.length > 240) return false;
+  const recent = messages.slice(Math.max(0, latestIndex - 8), latestIndex);
+  const priorInspection = recent.some((message) => message.role === 'user' && BRITTAIN_INSPECTION_RE.test(String(message.displayContent || message.content || '')));
+  const askedToClarify = recent.some((message) => message.role === 'assistant' && /\b(?:clarif|which|what do you mean|different location|specific (?:tool|project|engine))/i.test(String(message.content || '')));
+  return priorInspection && askedToClarify;
 }
 
 function chatSystemPrompt(onlineResearch = false) {
@@ -1089,7 +1104,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   const modeTools = brittainMode
     ? BRITTAIN_TOOLS.filter((definition) => definition.function.name !== 'remember')
     : chatMode ? CHAT_TOOLS : TOOL_DEFS;
-  const brittainNeedsTools = brittainMode && brittainRequestNeedsTools(conversation.at(-1)?.displayContent || conversation.at(-1)?.content);
+  const brittainNeedsTools = brittainMode && brittainRequestNeedsTools(conversation);
   const activeTools = (chatMode && !onlineResearch)
     ? null
     : brittainMode && !brittainNeedsTools

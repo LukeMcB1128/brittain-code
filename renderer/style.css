@@ -71,9 +71,7 @@ body { display: flex; flex-direction: column; }
 body[data-mode="chat"] .code-only { display: none !important; }
 body[data-mode="brittain"] .code-only { display: none !important; }
 body:not([data-mode="brittain"]) .brittain-only { display: none !important; }
-body[data-mode="brittain"] #think-toggle,
-body[data-mode="brittain"] #think-toggle + span,
-body[data-mode="brittain"] .online-toggle { display: none; }
+body[data-mode="brittain"] .think-toggle { display: none; }
 
 /* ---------- Brittain mode ---------- */
 :root { --brittain: #d8a34a; }

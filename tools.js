@@ -678,7 +678,7 @@ const TOOL_DEFS = [
       description: 'Read a text file. Returns the file contents.',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string', description: 'File path relative to the working directory' } },
+        properties: { path: { type: 'string', description: 'File path relative to the working directory. In Brittain mode, absolute paths and ~/ paths elsewhere on the machine are also allowed, except protected credential and personal-data locations.' } },
         required: ['path'],
       },
     },
@@ -753,7 +753,7 @@ const TOOL_DEFS = [
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Directory path (default: working directory).' },
+          path: { type: 'string', description: 'Directory path (default: working directory). In Brittain mode, use an absolute path or ~/ path to browse elsewhere on the machine.' },
           depth: { type: 'number', description: 'Tree/search depth from 1 to 8 (default: 1).' },
           glob: { type: 'string', description: 'Optional glob for files, such as "*.js" or "src/**/*.ts".' },
           include_files: { type: 'boolean', description: 'Include files in tree mode (default: true).' },
@@ -799,7 +799,7 @@ const TOOL_DEFS = [
         type: 'object',
         properties: {
           pattern: { type: 'string', description: 'Text to search for, or a regular expression when is_regex is true.' },
-          path: { type: 'string', description: 'File or directory path (default: working directory).' },
+          path: { type: 'string', description: 'File or directory path (default: working directory). In Brittain mode, use an absolute path or ~/ path to search elsewhere on the machine.' },
           file_pattern: { type: 'string', description: 'Optional glob filter when path is a directory.' },
           context_lines: { type: 'number', description: 'Lines of context before and after each match from 0 to 10 (default: 0).' },
           max_results: { type: 'number', description: 'Maximum matches from 1 to 300 (default: 100).' },
