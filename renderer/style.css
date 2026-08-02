@@ -71,6 +71,9 @@ body { display: flex; flex-direction: column; }
 body[data-mode="chat"] .code-only { display: none !important; }
 body[data-mode="brittain"] .code-only { display: none !important; }
 body:not([data-mode="brittain"]) .brittain-only { display: none !important; }
+body[data-mode="brittain"] #think-toggle,
+body[data-mode="brittain"] #think-toggle + span,
+body[data-mode="brittain"] .online-toggle { display: none; }
 
 /* ---------- Brittain mode ---------- */
 :root { --brittain: #d8a34a; }
@@ -84,6 +87,80 @@ body[data-mode="brittain"] #topbar { border-bottom-color: var(--brittain); }
   letter-spacing: 1px;
 }
 #brittain-mute.muted { color: var(--text-dim); border-color: var(--border); }
+
+/* Brittain has a voice-first stage. The existing chat becomes a compact activity
+   rail: replies, tool calls, and the transcript remain inspectable without
+   competing with the conversation surface. */
+#brittain-stage { display: none; }
+body[data-mode="brittain"] #main-row { background: radial-gradient(circle at 46% 43%, #2a241a 0, var(--bg) 42%); }
+body[data-mode="brittain"] #sidebar { display: none; }
+body[data-mode="brittain"] #chat {
+  flex: 0 0 min(390px, 33vw);
+  order: 2;
+  border-left: 1px solid color-mix(in srgb, var(--brittain) 45%, var(--border));
+  background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+  padding: 14px;
+}
+body[data-mode="brittain"] #chat::before {
+  content: 'ACTIVITY';
+  font: 10px var(--mono);
+  letter-spacing: 2px;
+  color: var(--brittain);
+  margin-bottom: 4px;
+}
+body[data-mode="brittain"] #chat > * { max-width: none; }
+body[data-mode="brittain"] #brittain-stage {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 28px;
+}
+#voice-transcript {
+  width: min(580px, 92%);
+  min-height: 2.8em;
+  text-align: center;
+  line-height: 1.45;
+  color: var(--text-dim);
+  font-size: 15px;
+}
+#voice-orb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 220px;
+  height: 220px;
+  border: 1px solid color-mix(in srgb, var(--brittain) 65%, transparent);
+  border-radius: 50% !important;
+  background: radial-gradient(circle at 40% 35%, #f7d994 0, #b27428 20%, #42250e 56%, #17120d 72%);
+  box-shadow: 0 0 28px color-mix(in srgb, var(--brittain) 42%, transparent), inset 0 0 36px #120b05;
+  overflow: hidden;
+  touch-action: none;
+}
+#voice-orb::before, #voice-orb::after { content: ''; position: absolute; border-radius: 50%; inset: 12px; border: 1px solid rgba(255, 225, 147, .26); animation: orb-breathe 3.4s ease-in-out infinite; }
+#voice-orb::after { inset: -17px; border-color: rgba(216, 163, 74, .15); animation-delay: -1.7s; }
+#voice-orb:hover, #voice-orb:focus-visible { border-color: #ffe0a0; outline: none; }
+#voice-orb-label { position: relative; z-index: 1; font: 700 13px var(--mono); letter-spacing: 3px; color: #fff1ce; text-shadow: 0 1px 8px #1a0d00; }
+#voice-orb[data-state="listening"] { animation: orb-listen .75s ease-in-out infinite alternate; }
+#voice-orb[data-state="transcribing"], #voice-orb[data-state="thinking"] { filter: hue-rotate(20deg); animation: orb-think 1.25s linear infinite; }
+#voice-orb[data-state="speaking"] { animation: orb-speak .34s ease-in-out infinite alternate; }
+@keyframes orb-breathe { 50% { transform: scale(1.1); opacity: .42; } }
+@keyframes orb-listen { to { box-shadow: 0 0 52px rgba(255, 202, 91, .9), inset 0 0 36px #120b05; transform: scale(1.035); } }
+@keyframes orb-think { to { filter: hue-rotate(75deg); } }
+@keyframes orb-speak { to { box-shadow: 0 0 62px rgba(255, 218, 133, .95), inset 0 0 24px #120b05; transform: scale(1.045); } }
+#brittain-keyboard-fallback { display: flex; align-items: center; gap: 8px; width: min(580px, 92%); }
+#brittain-keyboard-fallback label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+#brittain-keyboard { flex: 1; resize: vertical; min-height: 42px; max-height: 130px; padding: 9px; background: rgba(32, 33, 36, .85); color: var(--text); border: 1px solid var(--border); font: 13px inherit; }
+#brittain-keyboard:focus { outline: none; border-color: var(--brittain); }
+#brittain-keyboard-send { color: var(--brittain); border-color: var(--brittain); }
+body[data-mode="brittain"] footer #input-row, body[data-mode="brittain"] #attachment-preview { display: none; }
+@media (max-width: 800px) {
+  body[data-mode="brittain"] #chat { display: none; }
+  #voice-orb { width: 180px; height: 180px; }
+}
 
 /* unprompted announcements from the ambient watchers */
 .msg.ambient {

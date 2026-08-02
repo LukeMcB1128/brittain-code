@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('api', {
   generateChatTitle: (conversationContent, model) => ipcRenderer.invoke('chat:generateTitle', conversationContent, model),
   toolsList: (mode) => ipcRenderer.invoke('tools:list', mode),
   voiceStatus: () => ipcRenderer.invoke('voice:status'),
+  voiceTranscribe: (audioBase64) => ipcRenderer.invoke('voice:transcribe', audioBase64),
 
   onToken: (cb) => ipcRenderer.on('stream:token', (_e, t) => cb(t)),
   onThinking: (cb) => ipcRenderer.on('stream:thinking', (_e, t) => cb(t)),

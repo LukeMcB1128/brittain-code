@@ -38,6 +38,13 @@ let speechBuf = '';
 let spokenChars = 0;
 let speechCapped = false;
 let cachedVoice = null;
+let voiceStream = null;
+let voiceContext = null;
+let voiceProcessor = null;
+let voiceChunks = [];
+let voiceStartedAt = 0;
+let voiceTimer = null;
+let voiceState = 'idle';
 
 setAppMode(appMode, false, false);
 
@@ -219,7 +226,9 @@ $('onboarding-ollama').addEventListener('click', () => window.api.openOllamaSite
 
 
 function applySessionDefaults() {
-  thinkToggle.checked = appSettings ? !!appSettings[appMode === 'chat' ? 'chatThink' : 'codeThink'] : localStorage.getItem('think') === '1';
+  // Spoken conversation is intentionally immediate; Brittain never starts a
+  // hidden reasoning pass just because the previous Code session enabled it.
+  thinkToggle.checked = appMode === 'brittain' ? false : (appSettings ? !!appSettings[appMode === 'chat' ? 'chatThink' : 'codeThink'] : localStorage.getItem('think') === '1');
   autoApprove.checked = appSettings ? !!appSettings.autoApprove : localStorage.getItem('autoApprove') === '1';
   autoBranchToggle.checked = appSettings ? !!appSettings.autoBranch : localStorage.getItem('autoBranch') === '1';
   reviewToggle.checked = appSettings ? !!appSettings.reviewMode : localStorage.getItem('reviewMode') === '1';
@@ -265,7 +274,12 @@ function setAppMode(mode, persist = true, refreshHistory = true) {
   // Ambient watching runs only while Brittain is the active mode.
   window.api.brittainWatch(appMode === 'brittain' && (appSettings ? appSettings.brittainWatch !== false : true), cwd);
   if (appMode === 'brittain') warmUpSpeech();
-  else stopSpeaking();
+  else {
+    stopSpeaking();
+    stopVoiceRecording();
+  }
+  setVoiceState(appMode === 'brittain' ? 'idle' : 'idle');
+  if (appMode === 'brittain') hideStartupMessage();
   if (persist) localStorage.setItem('appMode', appMode);
   syncMissionCard();
   refreshGit();
@@ -911,13 +925,124 @@ input.addEventListener('keydown', (e) => {
 sendBtn.addEventListener('click', send);
 stopBtn.addEventListener('click', () => window.api.stop());
 
+// ---------- local voice input (Brittain only) ----------
+function setVoiceState(state, detail = '') {
+  voiceState = state;
+  const orb = $('voice-orb');
+  const label = $('voice-orb-label');
+  const transcript = $('voice-transcript');
+  if (!orb || !label || !transcript) return;
+  orb.dataset.state = state;
+  orb.setAttribute('aria-pressed', state === 'listening' ? 'true' : 'false');
+  label.textContent = state.toUpperCase();
+  const labels = {
+    idle: 'Press and hold the orb to speak.',
+    listening: 'Listening…',
+    transcribing: 'Transcribing locally…',
+    thinking: 'Brittain is considering it…',
+    speaking: 'Brittain is speaking…',
+  };
+  transcript.textContent = detail || labels[state] || '';
+}
+
+function stopVoiceRecording() {
+  clearInterval(voiceTimer);
+  voiceTimer = null;
+  if (voiceProcessor) { voiceProcessor.disconnect(); voiceProcessor = null; }
+  if (voiceContext) { voiceContext.close().catch(() => {}); voiceContext = null; }
+  if (voiceStream) { voiceStream.getTracks().forEach((track) => track.stop()); voiceStream = null; }
+}
+
+function pcmToWav(chunks, sourceRate) {
+  const source = chunks.flatMap((chunk) => Array.from(chunk));
+  const targetRate = 16_000;
+  const samples = sourceRate === targetRate ? source : Array.from(
+    { length: Math.floor(source.length * targetRate / sourceRate) },
+    (_, i) => source[Math.min(source.length - 1, Math.floor(i * sourceRate / targetRate))]
+  );
+  const wav = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(wav);
+  const write = (offset, value) => { for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i)); };
+  write(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); write(8, 'WAVE'); write(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, targetRate, true); view.setUint32(28, targetRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  write(36, 'data'); view.setUint32(40, samples.length * 2, true);
+  samples.forEach((sample, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 0x7fff, true));
+  const bytes = new Uint8Array(wav);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+async function startVoiceRecording() {
+  if (appMode !== 'brittain' || busy || voiceStream) return;
+  const status = await window.api.voiceStatus();
+  if (!status.ok || !status.runtimeInstalled || !status.modelInstalled) {
+    setVoiceState('idle', status.runtimeInstalled ? 'The English whisper.cpp model is not installed. Run /voice for setup.' : 'whisper.cpp is not installed. Run /voice for setup.');
+    return;
+  }
+  try {
+    voiceStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    voiceContext = new AudioContext();
+    const source = voiceContext.createMediaStreamSource(voiceStream);
+    voiceProcessor = voiceContext.createScriptProcessor(4096, 1, 1);
+    voiceChunks = [];
+    voiceProcessor.onaudioprocess = (event) => voiceChunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+    source.connect(voiceProcessor);
+    voiceProcessor.connect(voiceContext.destination);
+    voiceStartedAt = Date.now();
+    setVoiceState('listening');
+    voiceTimer = setInterval(() => setVoiceState('listening', `Listening… ${((Date.now() - voiceStartedAt) / 1000).toFixed(1)}s`), 100);
+  } catch (error) {
+    stopVoiceRecording();
+    setVoiceState('idle', `Microphone access was not granted: ${error.message || error}`);
+  }
+}
+
+async function finishVoiceRecording() {
+  if (!voiceStream || voiceState !== 'listening') return;
+  const chunks = voiceChunks;
+  const sampleRate = voiceContext?.sampleRate || 48_000;
+  stopVoiceRecording();
+  if (!chunks.length) return setVoiceState('idle', 'No audio was captured. Please try again.');
+  setVoiceState('transcribing');
+  const result = await window.api.voiceTranscribe(pcmToWav(chunks, sampleRate));
+  if (!result.ok) return setVoiceState('idle', result.error || 'Transcription failed.');
+  setVoiceState('thinking', `You: ${result.text}`);
+  input.value = result.text;
+  await send(); // Voice is hands-free; the transcript is still visibly retained above the orb.
+}
+
+$('voice-orb').addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  $('voice-orb').setPointerCapture?.(event.pointerId);
+  startVoiceRecording();
+});
+$('voice-orb').addEventListener('pointerup', finishVoiceRecording);
+$('voice-orb').addEventListener('pointercancel', finishVoiceRecording);
+$('voice-orb').addEventListener('keydown', (event) => {
+  if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) { event.preventDefault(); startVoiceRecording(); }
+});
+$('voice-orb').addEventListener('keyup', (event) => {
+  if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); finishVoiceRecording(); }
+});
+$('brittain-keyboard-send').addEventListener('click', () => {
+  const fallback = $('brittain-keyboard');
+  input.value = fallback.value;
+  fallback.value = '';
+  send();
+});
+$('brittain-keyboard').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('brittain-keyboard-send').click(); }
+});
+
 async function send() {
   const text = input.value.trim();
   const missionControl = /^\/mission\s+(?:status|stop)\s*$/i.test(text);
   if ((!text && !attachmentCount()) || (busy && !missionControl)) return;
   if (text.startsWith('/')) {
     input.value = '';
-    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
+    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp') || text.includes('/brittain')) {
       hideStartupMessage();
     }
     return handleSlash(text);
@@ -985,6 +1110,7 @@ function startRun() {
   sendBtn.classList.add('hidden');
   stopBtn.classList.remove('hidden');
   setState('working');
+  if (appMode === 'brittain') setVoiceState('thinking');
   const start = Date.now();
   elapsedTimer = setInterval(() => {
     $('elapsed').textContent = ((Date.now() - start) / 1000).toFixed(1) + 's';
@@ -1000,6 +1126,7 @@ function endRun() {
   finalizeThinking();
   finalizeAssistant();
   setState('idle');
+  if (appMode === 'brittain') setVoiceState('idle');
   clearInterval(elapsedTimer);
   refreshGit(); // the run may have changed files
 }
@@ -1221,7 +1348,7 @@ window.api.onToken((t) => {
   finalizeThinking();
   if (!currentAssistant) { currentAssistant = addMessage('assistant', ''); currentAssistantRaw = ''; }
   currentAssistantRaw += t;
-  if (appMode === 'brittain') feedSpeech(t);
+  if (appMode === 'brittain') { setVoiceState('speaking'); feedSpeech(t); }
   scheduleMarkdownRender(); // live markdown, rather than raw text until the run ends
 });
 
@@ -1526,6 +1653,9 @@ const chatStartupMessages = [
 
 // Show a random startup message
 function showStartupMessage() {
+  // Brittain has its own voice-first idle surface; the generic onboarding copy
+  // would otherwise sit on top of the orb whenever a session is empty.
+  if (appMode === 'brittain') return hideStartupMessage();
   const contentElement = $('startup-message-content');
   contentElement.innerHTML = '';
 

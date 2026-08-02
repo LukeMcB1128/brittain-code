@@ -83,7 +83,8 @@ test('brittain mode reaches the agent without being coerced to code', () => {
   // silently handed Brittain the full code toolset and prompt.
   assert.match(main, /const runMode = mode === 'chat' \? 'chat' : mode === 'brittain' \? 'brittain' : 'code'/);
   assert.match(main, /const brittainMode = mode === 'brittain'/);
-  assert.match(main, /const modeTools = brittainMode \? BRITTAIN_TOOLS/);
+  assert.match(main, /const modeTools = brittainMode/);
+  assert.match(main, /BRITTAIN_TOOLS\.filter/);
   assert.match(main, /brittainSystemPrompt\(cwd, onlineResearch\)/);
   // broad read must be scoped to brittain only
   assert.match(main, /const execOpts = \{ broadRead: mode === 'brittain' \}/);

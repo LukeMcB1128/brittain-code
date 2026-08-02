@@ -5,12 +5,16 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 const { McpManager } = require('./mcp');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, BRITTAIN_TOOLS, BRITTAIN_TOOL_NAMES, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
 const { readActiveMission, writeActiveMission, interruptRunningMission } = require('./missions');
+
+const execFileAsync = promisify(execFile);
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 // The context window we actually request from Ollama. Without an explicit
@@ -719,10 +723,11 @@ function brittainSystemPrompt(cwd, onlineResearch = false) {
     '- Benchmark results (only when running from source): benchmark/results.json inside the Brittain Code repo',
     '',
     'Working style:',
+    '- For ordinary conversation, answer immediately in one or two short sentences. Offer deeper investigation only when it is useful.',
+    '- Do not narrate private reasoning. If a request needs inspection, say the answer or your first useful conclusion before doing the deeper work.',
     '- Call app_status first when asked how things are going — one call beats eight reads.',
     '- Delegate wide searches to run_subagent; it is cheaper than reading many files yourself.',
     '- Keep spoken answers short. Long output is fine on screen, but lead with the answer in one or two sentences.',
-    '- Save durable facts about the user, their habits and preferences, with the remember tool.',
   ];
   if (onlineResearch) {
     lines.push(
@@ -739,6 +744,12 @@ function brittainSystemPrompt(cwd, onlineResearch = false) {
     lines.push('', 'What you remember about the user:', capped);
   }
   return lines.join('\n');
+}
+
+// Tool schemas cost latency and encourage a tool call even when a direct reply
+// is better. Brittain gets read-only tools only for explicit inspection work.
+function brittainRequestNeedsTools(text) {
+  return /\b(?:check|inspect|look(?:\s+up|\s+at)?|search|find|read|open|show|list|status|what(?:'s| is)\s+(?:in|on)|git|file|folder|directory|process|port|log|diff|benchmark|memory|research|latest|current)\b/i.test(String(text || ''));
 }
 
 function chatSystemPrompt(onlineResearch = false) {
@@ -1075,19 +1086,25 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
     : chatMode ? chatSystemPrompt(onlineResearch)
     : systemPrompt(cwd, model, onlineResearch);
   const messages = () => [{ role: 'system', content: prompt }, ...modelReadyMessages(conversation)];
-  const modeTools = brittainMode ? BRITTAIN_TOOLS : chatMode ? CHAT_TOOLS : TOOL_DEFS;
+  const modeTools = brittainMode
+    ? BRITTAIN_TOOLS.filter((definition) => definition.function.name !== 'remember')
+    : chatMode ? CHAT_TOOLS : TOOL_DEFS;
+  const brittainNeedsTools = brittainMode && brittainRequestNeedsTools(conversation.at(-1)?.displayContent || conversation.at(-1)?.content);
   const activeTools = (chatMode && !onlineResearch)
     ? null
-    : (onlineResearch ? modeTools : modeTools.filter((definition) => !NETWORK_TOOLS.has(definition.function.name)));
-  // external MCP tools go for all
-  const mcpDefs = mcp.toolDefs();
+    : brittainMode && !brittainNeedsTools
+      ? null
+      : (onlineResearch ? modeTools : modeTools.filter((definition) => !NETWORK_TOOLS.has(definition.function.name)));
+  // Brittain's conditional tool mode remains read-only; connected MCP servers
+  // do not carry enough metadata to safely make that promise.
+  const mcpDefs = brittainMode ? [] : mcp.toolDefs();
   const agentTools = activeTools ? activeTools.concat(mcpDefs) : activeTools;
   const activeToolNames = new Set((agentTools || []).map((definition) => definition.function.name));
   // report the window we actually run with, not the model's theoretical max
   const contextLength = await effectiveContext(model);
   // For models that support thinking, always send an explicit true/false —
   // omitting the param makes Ollama think by default, ignoring the toggle.
-  const useThink = (await supportsThinking(model)) ? !!think : undefined;
+  const useThink = (await supportsThinking(model)) ? (brittainMode ? false : !!think) : undefined;
   let lastContent = '';
   let emptyNudges = 0;
   const runLog = { mutations: new Set(), commands: [], verified: false };
@@ -1582,7 +1599,13 @@ function voiceInputStatus() {
   const voicePath = path.join(settingsUserDataDir || app.getPath('userData'), 'voice');
   const whisperPath = path.join(voicePath, WHISPER_CPP_DIR);
   const binaryName = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli';
-  const binaryPath = path.join(whisperPath, 'build', 'bin', binaryName);
+  const bundledBinary = path.join(whisperPath, 'build', 'bin', binaryName);
+  // A Homebrew (or other PATH) install is the normal macOS route. Prefer a
+  // private build if present, then accept the system executable.
+  const pathBinary = (process.env.PATH || '').split(path.delimiter)
+    .map((dir) => path.join(dir, binaryName))
+    .find((candidate) => fs.existsSync(candidate));
+  const binaryPath = fs.existsSync(bundledBinary) ? bundledBinary : pathBinary || bundledBinary;
   const modelPath = path.join(whisperPath, 'models', WHISPER_CPP_MODEL_ID);
   return {
     ok: true,
@@ -1596,6 +1619,37 @@ function voiceInputStatus() {
 }
 
 ipcMain.handle('voice:status', () => voiceInputStatus());
+
+ipcMain.handle('voice:transcribe', async (_e, audioBase64) => {
+  const status = voiceInputStatus();
+  if (!status.runtimeInstalled) return { ok: false, error: 'whisper.cpp is not installed. Run /voice for setup instructions.' };
+  if (!status.modelInstalled) return { ok: false, error: 'The whisper.cpp English model is missing. Run /voice for download instructions.' };
+  if (typeof audioBase64 !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(audioBase64) || audioBase64.length > 16 * 1024 * 1024) {
+    return { ok: false, error: 'Invalid or oversized microphone recording.' };
+  }
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-voice-'));
+  const audioPath = path.join(tempDir, 'input.wav');
+  try {
+    fs.writeFileSync(audioPath, Buffer.from(audioBase64, 'base64'), { mode: 0o600 });
+    const { stdout } = await execFileAsync(status.binaryPath, ['-m', status.modelPath, '-f', audioPath, '-nt'], {
+      timeout: 90_000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    });
+    const text = String(stdout || '')
+      .split('\n')
+      .filter((line) => !/^\s*(whisper_|system_info:|main:|processing)/i.test(line))
+      .join(' ')
+      .replace(/\[[^\]]+\]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return text ? { ok: true, text } : { ok: false, error: 'I could not make out any speech.' };
+  } catch (error) {
+    return { ok: false, error: `whisper.cpp transcription failed: ${error.message || error}` };
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
+});
 
 // ---------- subagents ----------
 const SUBAGENT_MAX_STEPS = 12;

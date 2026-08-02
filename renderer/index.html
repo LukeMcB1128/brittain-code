@@ -47,6 +47,17 @@
       <div id="chat-list"></div>
     </aside>
     <main id="chat"></main>
+    <section id="brittain-stage" class="brittain-only" aria-label="Brittain voice conversation">
+      <div id="voice-transcript" role="status" aria-live="polite">Press and hold the orb to speak.</div>
+      <button id="voice-orb" type="button" aria-label="Hold to speak to Brittain" aria-pressed="false">
+        <span class="orb-core"></span><span id="voice-orb-label">IDLE</span>
+      </button>
+      <div id="brittain-keyboard-fallback">
+        <label for="brittain-keyboard">Keyboard fallback</label>
+        <textarea id="brittain-keyboard" rows="2" placeholder="Type to Brittain…"></textarea>
+        <button id="brittain-keyboard-send" type="button">SEND</button>
+      </div>
+    </section>
     <!-- Startup message overlay — lives outside #chat so chat.innerHTML wipes can't destroy it -->
     <div id="startup-message" class="hidden">
       <div id="startup-message-content"></div>

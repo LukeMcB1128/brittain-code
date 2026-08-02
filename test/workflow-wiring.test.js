@@ -73,7 +73,8 @@ test('Code and Chat modes are wired through UI, persistence, and the agent bound
   assert.match(renderer, /\(chatEntry\.mode \|\| 'code'\) === appMode/);
   assert.match(main, /mode: meta\.mode === 'chat' \? 'chat' : meta\.mode === 'brittain' \? 'brittain' : 'code'/);
   assert.match(main, /const runMode = mode === 'chat' \? 'chat' : mode === 'brittain' \? 'brittain' : 'code'/);
-  assert.match(main, /const modeTools = brittainMode \? BRITTAIN_TOOLS : chatMode \? CHAT_TOOLS : TOOL_DEFS/);
+  assert.match(main, /const modeTools = brittainMode/);
+  assert.match(main, /BRITTAIN_TOOLS\.filter/);
   assert.match(main, /if \(!activeToolNames\.has\(name\)\)/);
 });
 
@@ -126,4 +127,26 @@ test('hidden voice setup checks for a local whisper.cpp runtime and model', () =
   assert.match(main, /ipcMain\.handle\('voice:status'/);
   assert.match(main, /whisper-cli/);
   assert.match(main, /ggml-base\.en\.bin/);
+});
+
+test('Brittain voice captures locally, uses whisper-cli, and stays fast by default', () => {
+  const html = source('renderer/index.html');
+  const css = source('renderer/style.css');
+  const renderer = source('renderer/app.js');
+  const preload = source('preload.js');
+  const main = source('main.js');
+
+  assert.match(html, /id="voice-orb"/);
+  assert.match(html, /id="brittain-keyboard"/);
+  assert.match(css, /#brittain-stage/);
+  assert.match(renderer, /navigator\.mediaDevices\.getUserMedia/);
+  assert.match(renderer, /pcmToWav/);
+  assert.match(renderer, /voiceTranscribe/);
+  assert.match(renderer, /if \(appMode === 'brittain'\) return hideStartupMessage\(\)/);
+  assert.match(preload, /voiceTranscribe: \(audioBase64\)/);
+  assert.match(main, /ipcMain\.handle\('voice:transcribe'/);
+  assert.match(main, /execFileAsync\(status\.binaryPath/);
+  assert.match(main, /pathBinary/);
+  assert.match(main, /brittainRequestNeedsTools/);
+  assert.match(main, /brittainMode \? false : !!think/);
 });
