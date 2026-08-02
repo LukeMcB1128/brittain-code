@@ -1571,6 +1571,32 @@ ipcMain.handle('tools:list', async (_e, mode) => {
   };
 });
 
+// Voice input is deliberately optional: whisper.cpp and its model stay entirely
+// on this machine, and are only checked when the hidden /voice command is used.
+// This avoids bundling a large speech model for people who never use it.
+const WHISPER_CPP_DIR = 'whisper.cpp';
+const WHISPER_CPP_MODEL_ID = 'ggml-base.en.bin';
+const WHISPER_CPP_MODEL_DOWNLOAD_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin';
+
+function voiceInputStatus() {
+  const voicePath = path.join(settingsUserDataDir || app.getPath('userData'), 'voice');
+  const whisperPath = path.join(voicePath, WHISPER_CPP_DIR);
+  const binaryName = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli';
+  const binaryPath = path.join(whisperPath, 'build', 'bin', binaryName);
+  const modelPath = path.join(whisperPath, 'models', WHISPER_CPP_MODEL_ID);
+  return {
+    ok: true,
+    runtimeInstalled: fs.existsSync(binaryPath),
+    binaryPath,
+    modelInstalled: fs.existsSync(modelPath),
+    modelPath,
+    modelDownloadUrl: WHISPER_CPP_MODEL_DOWNLOAD_URL,
+    installCommand: `git clone https://github.com/ggml-org/whisper.cpp "${whisperPath}" && cmake -S "${whisperPath}" -B "${path.join(whisperPath, 'build')}" && cmake --build "${path.join(whisperPath, 'build')}" --config Release`,
+  };
+}
+
+ipcMain.handle('voice:status', () => voiceInputStatus());
+
 // ---------- subagents ----------
 const SUBAGENT_MAX_STEPS = 12;
 const SUBAGENT_CTX_CAP = 24_576;    // smaller window: subagents are short-lived scouts

@@ -2121,6 +2121,38 @@ async function handleSlash(raw) {
       return showOverlay('AVAILABLE TOOLS', toolLines.join('\n'));
     }
 
+    // Intentionally omitted from /help while voice input is experimental.
+    // whisper.cpp transcribes locally; this command never sends microphone audio away.
+    case 'voice': {
+      if (appMode !== 'brittain') return addError('/voice is only available in Brittain mode. Use /brittain <model> first.');
+      const status = await window.api.voiceStatus();
+      if (!status.ok) return addError(status.error || 'Could not inspect voice-input setup.');
+      if (!status.runtimeInstalled) {
+        return showOverlay('VOICE INPUT — LOCAL SETUP REQUIRED', [
+          'Brittain voice input uses whisper.cpp for entirely local transcription.',
+          'No microphone audio is sent to an API.',
+          '',
+          'Install the local runtime from the project folder:',
+          '  ' + status.installCommand,
+          '',
+          'Then run /voice again for the speech-model instructions.',
+        ].join('\n'));
+      }
+      if (!status.modelInstalled) {
+        return showOverlay('VOICE INPUT — MODEL REQUIRED', [
+          'whisper.cpp is ready, but the local English model is missing.',
+          'Download this GGML model:',
+          '  ' + status.modelDownloadUrl,
+          '',
+          'Save it here:',
+          '  ' + status.modelPath,
+          '',
+          'This is a one-time download. Transcription remains entirely local.',
+        ].join('\n'));
+      }
+      return addInfo('Voice input is installed locally. The orb/listening interface is the next step.');
+    }
+
     default:
       return addError('Unknown command: /' + cmd + ' — try /help');
   }

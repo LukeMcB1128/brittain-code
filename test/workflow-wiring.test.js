@@ -111,3 +111,19 @@ test('settings are wired through the modal, bridge, persistence, and inference r
   assert.match(main, /keep_alive: runtimeSettings\.keepAlive/);
   assert.equal(packageJson.build.files.includes('settings.js'), true);
 });
+
+test('hidden voice setup checks for a local whisper.cpp runtime and model', () => {
+  const renderer = source('renderer/app.js');
+  const preload = source('preload.js');
+  const main = source('main.js');
+
+  assert.match(renderer, /case 'voice'/);
+  assert.match(renderer, /LOCAL SETUP REQUIRED/);
+  assert.match(renderer, /No microphone audio is sent to an API/);
+  assert.match(preload, /voiceStatus: \(\) => ipcRenderer\.invoke\('voice:status'\)/);
+  assert.match(renderer, /whisper\.cpp/);
+  assert.match(main, /WHISPER_CPP_MODEL_ID/);
+  assert.match(main, /ipcMain\.handle\('voice:status'/);
+  assert.match(main, /whisper-cli/);
+  assert.match(main, /ggml-base\.en\.bin/);
+});
