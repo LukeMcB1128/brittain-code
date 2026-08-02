@@ -4,14 +4,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { JARVIS_TOOLS, JARVIS_TOOL_NAMES, TOOL_DEFS, resolveAnywhere } = require('../tools');
+const { BRITTAIN_TOOLS, BRITTAIN_TOOL_NAMES, TOOL_DEFS, resolveAnywhere } = require('../tools');
 const source = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 const HOME = os.homedir();
 
 const denied = (p) => assert.throws(() => resolveAnywhere(p, HOME), /^Error: Refused:/, `should refuse ${p}`);
 const allowed = (p) => assert.doesNotThrow(() => resolveAnywhere(p, HOME), `should allow ${p}`);
 
-test('jarvis deny-list blocks credential stores and secret files', () => {
+test('brittain deny-list blocks credential stores and secret files', () => {
   denied('~/.ssh/id_ed25519');
   denied('~/.ssh');
   denied('~/.aws/credentials');
@@ -26,18 +26,18 @@ test('jarvis deny-list blocks credential stores and secret files', () => {
   denied('~/proj/secrets.json');
 });
 
-test('jarvis deny-list blocks personal data stores', () => {
+test('brittain deny-list blocks personal data stores', () => {
   denied('~/Library/Keychains/login.keychain-db');
   denied('~/Library/Messages/chat.db');
   denied('~/Library/Application Support/Google/Chrome/Default/Cookies');
   denied('~/Library/Safari/History.db');
 });
 
-test('jarvis deny-list cannot be bypassed by symlink or traversal', () => {
+test('brittain deny-list cannot be bypassed by symlink or traversal', () => {
   denied('~/Downloads/../.ssh/id_rsa');
   denied(path.join(HOME, '.aws', 'credentials'));
 
-  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'jarvis-link-'));
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-link-'));
   try {
     const link = path.join(sandbox, 'harmless');
     fs.symlinkSync(path.join(HOME, '.ssh'), link);
@@ -51,7 +51,7 @@ test('jarvis deny-list cannot be bypassed by symlink or traversal', () => {
   }
 });
 
-test('jarvis still reads ordinary files anywhere on the machine', () => {
+test('brittain still reads ordinary files anywhere on the machine', () => {
   allowed('~/Downloads');
   allowed('~');
   allowed('/tmp');
@@ -61,44 +61,44 @@ test('jarvis still reads ordinary files anywhere on the machine', () => {
   assert.equal(path.isAbsolute(resolveAnywhere('main.js', HOME)), true, 'relative resolves against cwd');
 });
 
-test('jarvis toolset is read-only and curated', () => {
-  const names = JARVIS_TOOLS.map((d) => d.function.name);
+test('brittain toolset is read-only and curated', () => {
+  const names = BRITTAIN_TOOLS.map((d) => d.function.name);
   for (const forbidden of ['write_file', 'edit_file', 'edit_files', 'append_file', 'delete_file',
     'run_command', 'move_file', 'copy_file', 'create_directory', 'start_process', 'revert_to_last_commit']) {
-    assert.equal(names.includes(forbidden), false, `Jarvis must not have ${forbidden}`);
+    assert.equal(names.includes(forbidden), false, `Brittain must not have ${forbidden}`);
   }
   for (const expected of ['read_file', 'app_status', 'run_subagent', 'remember', 'web_search', 'web_fetch']) {
-    assert.equal(names.includes(expected), true, `Jarvis should have ${expected}`);
+    assert.equal(names.includes(expected), true, `Brittain should have ${expected}`);
   }
   // Tool-call count tracks inversely with quality; keep the list deliberately small.
-  assert.ok(names.length <= 22, `Jarvis toolset should stay curated, got ${names.length}`);
-  assert.equal(JARVIS_TOOLS.length, JARVIS_TOOL_NAMES.size);
+  assert.ok(names.length <= 22, `Brittain toolset should stay curated, got ${names.length}`);
+  assert.equal(BRITTAIN_TOOLS.length, BRITTAIN_TOOL_NAMES.size);
   const all = new Set(TOOL_DEFS.map((d) => d.function.name));
-  for (const n of JARVIS_TOOL_NAMES) assert.equal(all.has(n), true, `${n} must exist in TOOL_DEFS`);
+  for (const n of BRITTAIN_TOOL_NAMES) assert.equal(all.has(n), true, `${n} must exist in TOOL_DEFS`);
 });
 
-test('jarvis mode reaches the agent without being coerced to code', () => {
+test('brittain mode reaches the agent without being coerced to code', () => {
   const main = source('main.js');
-  // The bug this guards: runMode fed runAgentTurn, so coercing jarvis->code
-  // silently handed Jarvis the full code toolset and prompt.
-  assert.match(main, /const runMode = mode === 'chat' \? 'chat' : mode === 'jarvis' \? 'jarvis' : 'code'/);
-  assert.match(main, /const jarvisMode = mode === 'jarvis'/);
-  assert.match(main, /const modeTools = jarvisMode \? JARVIS_TOOLS/);
-  assert.match(main, /jarvisSystemPrompt\(cwd, onlineResearch\)/);
-  // broad read must be scoped to jarvis only
-  assert.match(main, /const execOpts = \{ broadRead: mode === 'jarvis' \}/);
+  // The bug this guards: runMode fed runAgentTurn, so coercing brittain->code
+  // silently handed Brittain the full code toolset and prompt.
+  assert.match(main, /const runMode = mode === 'chat' \? 'chat' : mode === 'brittain' \? 'brittain' : 'code'/);
+  assert.match(main, /const brittainMode = mode === 'brittain'/);
+  assert.match(main, /const modeTools = brittainMode \? BRITTAIN_TOOLS/);
+  assert.match(main, /brittainSystemPrompt\(cwd, onlineResearch\)/);
+  // broad read must be scoped to brittain only
+  assert.match(main, /const execOpts = \{ broadRead: mode === 'brittain' \}/);
 });
 
-test('jarvis history and cwd are wired distinctly', () => {
+test('brittain history and cwd are wired distinctly', () => {
   const main = source('main.js');
   const renderer = source('renderer/app.js');
-  assert.match(main, /mode: meta\.mode === 'chat' \? 'chat' : meta\.mode === 'jarvis' \? 'jarvis' : 'code'/);
+  assert.match(main, /mode: meta\.mode === 'chat' \? 'chat' : meta\.mode === 'brittain' \? 'brittain' : 'code'/);
   assert.match(renderer, /\(chatEntry\.mode \|\| 'code'\) === appMode/);
-  // Jarvis needs a cwd for git tools and app_status; only Chat is directory-less.
+  // Brittain needs a cwd for git tools and app_status; only Chat is directory-less.
   assert.match(renderer, /cwd: appMode === 'chat' \? null : cwd/);
 });
 
-test('jarvis speech sanitizer keeps prose and drops code', () => {
+test('brittain speech sanitizer keeps prose and drops code', () => {
   const { speakableText } = loadSpeech();
 
   const spoken = speakableText('Here is the fix:\n```js\nconst x = 1;\n```\nIt works now.');
@@ -107,39 +107,40 @@ test('jarvis speech sanitizer keeps prose and drops code', () => {
   assert.doesNotMatch(spoken, /const x = 1/, 'must not read code aloud');
 
   assert.doesNotMatch(speakableText('See `foo.bar()` there'), /foo\.bar/);
-  assert.doesNotMatch(speakableText('open /Users/luke/proj/src/main.js now'), /Users/);
+  assert.doesNotMatch(speakableText('open /Users/user/proj/src/main.js now'), /Users/);
   assert.doesNotMatch(speakableText('visit https://example.com/x'), /example\.com/);
   assert.equal(speakableText('**Bold** and _italic_'), 'Bold and italic');
   assert.ok(speakableText('word '.repeat(400)).length <= 740, 'long replies are capped');
 });
 
-test('jarvis ambient watchers are rate limited and never model-generated', () => {
+test('brittain ambient watchers are rate limited and never model-generated', () => {
   const main = source('main.js');
-  assert.match(main, /JARVIS_MIN_GAP_MS/);
-  assert.match(main, /JARVIS_MAX_PER_HOUR/);
-  assert.match(main, /function jarvisAnnounce/);
+  assert.match(main, /BRITTAIN_MIN_GAP_MS/);
+  assert.match(main, /BRITTAIN_MAX_PER_HOUR/);
+  assert.match(main, /function brittainAnnounce/);
   // Announcements must be canned strings sent straight to the renderer —
   // never a model call, which would cost tokens continuously and could fabricate.
-  const start = main.indexOf('function jarvisAnnounce');
-  const end = main.indexOf('async function jarvisCheckGit');
+  const start = main.indexOf('function brittainAnnounce');
+  const end = main.indexOf('async function brittainCheckGit');
   const body = main.slice(start, end);
   assert.doesNotMatch(body, /streamChat|ollamaJson/, 'ambient announcements must not call a model');
-  assert.match(main, /ipcMain\.handle\('jarvis:watch'/);
+  assert.match(main, /ipcMain\.handle\('brittain:watch'/);
 });
 
-test('jarvis settings exist with safe defaults', () => {
+test('brittain settings exist with safe defaults', () => {
   const { DEFAULT_SETTINGS, normalizeSettings } = require('../settings');
-  assert.equal(DEFAULT_SETTINGS.jarvisModel, '');
-  assert.equal(DEFAULT_SETTINGS.jarvisSpeak, true);
-  assert.equal(DEFAULT_SETTINGS.jarvisWatch, true);
-  assert.deepEqual(DEFAULT_SETTINGS.jarvisWatchTools, [], 'no background polling until the user names a tool');
+  assert.equal(DEFAULT_SETTINGS.userName, '');
+  assert.equal(DEFAULT_SETTINGS.brittainModel, '');
+  assert.equal(DEFAULT_SETTINGS.brittainSpeak, true);
+  assert.equal(DEFAULT_SETTINGS.brittainWatch, true);
+  assert.deepEqual(DEFAULT_SETTINGS.brittainWatchTools, [], 'no background polling until the user names a tool');
 
-  const n = normalizeSettings({ jarvisWatchTools: ['a', '', 42, 'b', 'c', 'd', 'e', 'f'] });
-  assert.deepEqual(n.jarvisWatchTools, ['a', 'b', 'c', 'd', 'e'], 'capped at 5, strings only');
+  const n = normalizeSettings({ brittainWatchTools: ['a', '', 42, 'b', 'c', 'd', 'e', 'f'] });
+  assert.deepEqual(n.brittainWatchTools, ['a', 'b', 'c', 'd', 'e'], 'capped at 5, strings only');
 });
 
 test('functions reachable from the module-level setAppMode call are hoisted', () => {
-  // The bug this guards: setAppMode() runs at module top level, and Jarvis added
+  // The bug this guards: setAppMode() runs at module top level, and Brittain added
   // a stopSpeaking() call to it. stopSpeaking -> speechAvailable, which was a
   // `const` arrow declared ~300 lines lower, so boot died with a temporal-dead-zone
   // ReferenceError and the whole UI stayed blank. Every other test still passed.
@@ -186,13 +187,13 @@ test('functions reachable from the module-level setAppMode call are hoisted', ()
 
 // Load the renderer's speech section into a stubbed environment so the streaming
 // behaviour itself is tested, not just the presence of the source text.
-function loadSpeech({ appMode = 'jarvis', jarvisMuted = false, appSettings = null } = {}) {
+function loadSpeech({ appMode = 'brittain', brittainMuted = false, appSettings = null } = {}) {
   const src = source('renderer/app.js');
   const a = src.indexOf('function speakableText');
-  const b = src.indexOf('function initJarvisMuteButton');
+  const b = src.indexOf('function initBrittainMuteButton');
   assert.ok(a > 0 && b > a, 'speech section should be locatable');
   // eslint-disable-next-line no-new-func
-  return new Function('appMode', 'jarvisMuted', 'appSettings', `
+  return new Function('appMode', 'brittainMuted', 'appSettings', `
     let speechBuf = ''; let spokenChars = 0; let speechCapped = false; let cachedVoice = null;
     const spoken = [];
     const window = { speechSynthesis: {
@@ -201,16 +202,16 @@ function loadSpeech({ appMode = 'jarvis', jarvisMuted = false, appSettings = nul
     } };
     function SpeechSynthesisUtterance(t) { this.text = t; this.volume = 1; }
     function speechAvailable() { return true; }
-    function pickJarvisVoice() { return null; }
+    function pickBrittainVoice() { return null; }
     ${src.slice(a, b)}
     return { feedSpeech, flushSpeech, stopSpeaking, speak, warmUpSpeech, spoken, speakableText,
              state: () => ({ buf: speechBuf, chars: spokenChars }) };
-  `)(appMode, jarvisMuted, appSettings);
+  `)(appMode, brittainMuted, appSettings);
 }
 
-test('jarvis speaks each sentence as it streams, not after the whole reply', () => {
+test('brittain speaks each sentence as it streams, not after the whole reply', () => {
   const s = loadSpeech();
-  // The bug this guards: speak() ran only from finalizeAssistant(), so Jarvis
+  // The bug this guards: speak() ran only from finalizeAssistant(), so Brittain
   // stayed silent for the entire generation before saying a word.
   for (const tok of ['Good ', 'morning', '. ', 'The build ', 'is green', '. ']) s.feedSpeech(tok);
   assert.deepEqual(s.spoken, ['Good morning.', 'The build is green.'],
@@ -223,7 +224,7 @@ test('jarvis speaks each sentence as it streams, not after the whole reply', () 
   assert.deepEqual(s.state(), { buf: '', chars: 0 }, 'state resets for the next reply');
 });
 
-test('jarvis never reads out a code fence that is still open', () => {
+test('brittain never reads out a code fence that is still open', () => {
   const s = loadSpeech();
   s.feedSpeech('Here it is. ');
   s.feedSpeech('```js\nconst secret = 1;\n');
@@ -233,19 +234,19 @@ test('jarvis never reads out a code fence that is still open', () => {
   assert.doesNotMatch(s.spoken.join(' '), /const secret/, 'code must never be spoken');
 });
 
-test('jarvis speech respects mute, mode and the per-reply budget', () => {
-  assert.equal(loadSpeech({ jarvisMuted: true }).spoken.length, 0);
-  const muted = loadSpeech({ jarvisMuted: true });
+test('brittain speech respects mute, mode and the per-reply budget', () => {
+  assert.equal(loadSpeech({ brittainMuted: true }).spoken.length, 0);
+  const muted = loadSpeech({ brittainMuted: true });
   muted.feedSpeech('Hello. ');
   assert.deepEqual(muted.spoken, [], 'muted speaks nothing');
 
   const code = loadSpeech({ appMode: 'code' });
   code.feedSpeech('Hello. ');
-  assert.deepEqual(code.spoken, [], 'speech is Jarvis-only');
+  assert.deepEqual(code.spoken, [], 'speech is Brittain-only');
 
-  const off = loadSpeech({ appSettings: { jarvisSpeak: false } });
+  const off = loadSpeech({ appSettings: { brittainSpeak: false } });
   off.feedSpeech('Hello. ');
-  assert.deepEqual(off.spoken, [], 'jarvisSpeak=false silences');
+  assert.deepEqual(off.spoken, [], 'brittainSpeak=false silences');
 
   const long = loadSpeech();
   for (let i = 0; i < 60; i++) long.feedSpeech('This is a fairly long sentence used to fill the budget. ');
@@ -262,7 +263,7 @@ test('stopSpeaking clears pending stream state', () => {
   assert.deepEqual(s.spoken, [], 'nothing left over to blurt out after a stop');
 });
 
-test('jarvis voice pick tolerates the platform name for Daniel', () => {
+test('brittain voice pick tolerates the platform name for Daniel', () => {
   const renderer = source('renderer/app.js');
   // macOS reports "Daniel (English (United Kingdom))", not "Daniel", so an exact
   // match silently fell through to whatever en-GB voice happened to sort first.

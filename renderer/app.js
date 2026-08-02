@@ -18,7 +18,8 @@ const codeModeBtn = $('mode-code');
 const chatModeBtn = $('mode-chat');
 
 let cwd = null;
-let appMode = localStorage.getItem('appMode') === 'chat' ? 'chat' : 'code';
+const storedAppMode = localStorage.getItem('appMode');
+let appMode = ['chat', 'brittain'].includes(storedAppMode) ? storedAppMode : 'code';
 let busy = false;
 let subModel = localStorage.getItem('subModel') || 'qwen3:8b'; // set via /subagent
 let coderModel = localStorage.getItem('coderModel') || 'qwen3-coder:30b'; // set via /coder
@@ -32,7 +33,7 @@ let missionCard = null;
 let latestMission = null;
 // Streaming-speech state. Declared with the rest of the module state because
 // stopSpeaking() is reachable from the top-level setAppMode() call below,
-// long before the Jarvis speech section is evaluated.
+// long before the Brittain speech section is evaluated.
 let speechBuf = '';
 let spokenChars = 0;
 let speechCapped = false;
@@ -111,13 +112,15 @@ setAppMode(appMode, false, false);
   const missionRes = await window.api.missionGet();
   if (missionRes.ok && missionRes.mission) upsertMissionCard(missionRes.mission);
   
-  initJarvisMuteButton();
+  initBrittainMuteButton();
   // Show startup message on boot
   showStartupMessage();
 })();
 
 function defaultModelForMode(mode) {
-  const configured = mode === 'chat' ? appSettings?.chatModel : appSettings?.codeModel;
+  const configured = mode === 'chat'
+    ? appSettings?.chatModel
+    : mode === 'brittain' ? appSettings?.brittainModel : appSettings?.codeModel;
   return configured || localStorage.getItem(`model:${mode}`) || localStorage.getItem('model') || '';
 }
 
@@ -247,21 +250,21 @@ codeModeBtn.addEventListener('click', () => chooseAppMode('code'));
 chatModeBtn.addEventListener('click', () => chooseAppMode('chat'));
 
 function setAppMode(mode, persist = true, refreshHistory = true) {
-  appMode = mode === 'chat' ? 'chat' : mode === 'jarvis' ? 'jarvis' : 'code';
+  appMode = mode === 'chat' ? 'chat' : mode === 'brittain' ? 'brittain' : 'code';
   document.body.dataset.mode = appMode;
   codeModeBtn.classList.toggle('active', appMode === 'code');
   chatModeBtn.classList.toggle('active', appMode === 'chat');
   codeModeBtn.setAttribute('aria-pressed', appMode === 'code' ? 'true' : 'false');
   chatModeBtn.setAttribute('aria-pressed', appMode === 'chat' ? 'true' : 'false');
-  $('sidebar-head').textContent = appMode === 'chat' ? 'CHAT HISTORY' : appMode === 'jarvis' ? 'JARVIS HISTORY' : 'CODE HISTORY';
+  $('sidebar-head').textContent = appMode === 'chat' ? 'CHAT HISTORY' : appMode === 'brittain' ? 'BRITTAIN HISTORY' : 'CODE HISTORY';
   input.placeholder = appMode === 'chat'
     ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
-    : appMode === 'jarvis'
-      ? 'Talk to Jarvis... (Enter to send, Shift+Enter for newline)'
+    : appMode === 'brittain'
+      ? 'Talk to Brittain... (Enter to send, Shift+Enter for newline)'
       : 'Describe a task... (Enter to send, Shift+Enter for newline)';
-  // Ambient watching runs only while Jarvis is the active mode.
-  window.api.jarvisWatch(appMode === 'jarvis' && (appSettings ? appSettings.jarvisWatch !== false : true), cwd);
-  if (appMode === 'jarvis') warmUpSpeech();
+  // Ambient watching runs only while Brittain is the active mode.
+  window.api.brittainWatch(appMode === 'brittain' && (appSettings ? appSettings.brittainWatch !== false : true), cwd);
+  if (appMode === 'brittain') warmUpSpeech();
   else stopSpeaking();
   if (persist) localStorage.setItem('appMode', appMode);
   syncMissionCard();
@@ -286,21 +289,21 @@ $('cwd-btn').addEventListener('click', async () => {
   if (res.ok) setCwd(res.path);
 });
 
-// ---------- Jarvis: speech ----------
+// ---------- Brittain: speech ----------
 // Uses the Web Speech API when the renderer provides it. If it is missing
 // (unverified in this Electron build at time of writing), speech is simply
-// skipped — Jarvis stays fully usable as text.
-let jarvisMuted = localStorage.getItem('jarvisMuted') === '1';
+// skipped — Brittain stays fully usable as text.
+let brittainMuted = localStorage.getItem('brittainMuted') === '1';
 function speechAvailable() {
   return typeof window.speechSynthesis !== 'undefined' && typeof window.SpeechSynthesisUtterance !== 'undefined';
 }
 
-function pickJarvisVoice() {
+function pickBrittainVoice() {
   if (!speechAvailable()) return null;
   if (cachedVoice) return cachedVoice;
   const voices = window.speechSynthesis.getVoices() || [];
   if (!voices.length) return null;   // not loaded yet; voiceschanged re-picks
-  const wanted = appSettings?.jarvisVoice;
+  const wanted = appSettings?.brittainVoice;
   if (wanted) {
     const exact = voices.find((v) => v.name === wanted);
     if (exact) { cachedVoice = exact; return exact; }
@@ -330,15 +333,15 @@ function speakableText(raw) {
   return t.length > 700 ? t.slice(0, 700) + '… the rest is on screen.' : t;
 }
 
-const SPEAK_BUDGET = 900;   // spoken chars per reply, so Jarvis never monologues
+const SPEAK_BUDGET = 900;   // spoken chars per reply, so Brittain never monologues
 
 function speechEnabled() {
-  if (jarvisMuted || appMode !== 'jarvis' || !speechAvailable()) return false;
-  return !(appSettings && appSettings.jarvisSpeak === false);
+  if (brittainMuted || appMode !== 'brittain' || !speechAvailable()) return false;
+  return !(appSettings && appSettings.brittainSpeak === false);
 }
 
 // Chromium starts the platform speech service lazily, so the first utterance of
-// a session stalls for a beat. Entering Jarvis mode pays that cost up front, and
+// a session stalls for a beat. Entering Brittain mode pays that cost up front, and
 // touching getVoices() kicks off the asynchronous voice load at the same time.
 function warmUpSpeech() {
   if (!speechAvailable()) return;
@@ -353,7 +356,7 @@ function warmUpSpeech() {
 function enqueueUtterance(text) {
   try {
     const u = new SpeechSynthesisUtterance(text);
-    const v = pickJarvisVoice();
+    const v = pickBrittainVoice();
     if (v) u.voice = v;
     u.rate = 1.05;
     window.speechSynthesis.speak(u);   // the engine queues; utterances play back to back
@@ -372,7 +375,7 @@ function utter(raw) {
 }
 
 // A local model streams at maybe 20-60 tokens/sec, so waiting for the finished
-// reply left Jarvis silent for ten or twenty seconds and then talking at length.
+// reply left Brittain silent for ten or twenty seconds and then talking at length.
 // Sentences go to the synthesiser as soon as they complete instead, so he starts
 // speaking about as quickly as the first sentence lands.
 function feedSpeech(chunk) {
@@ -411,17 +414,17 @@ function stopSpeaking() {
   if (speechAvailable()) { try { window.speechSynthesis.cancel(); } catch {} }
 }
 
-function initJarvisMuteButton() {
-  const btn = $('jarvis-mute');
+function initBrittainMuteButton() {
+  const btn = $('brittain-mute');
   if (!btn) return;
-  btn.addEventListener('click', () => setJarvisMuted(!jarvisMuted));
-  setJarvisMuted(jarvisMuted);
+  btn.addEventListener('click', () => setBrittainMuted(!brittainMuted));
+  setBrittainMuted(brittainMuted);
 }
 
-function setJarvisMuted(muted) {
-  jarvisMuted = muted;
-  localStorage.setItem('jarvisMuted', muted ? '1' : '0');
-  const btn = $('jarvis-mute');
+function setBrittainMuted(muted) {
+  brittainMuted = muted;
+  localStorage.setItem('brittainMuted', muted ? '1' : '0');
+  const btn = $('brittain-mute');
   if (btn) {
     btn.textContent = muted ? 'MUTED' : 'SPEAKING';
     btn.classList.toggle('muted', muted);
@@ -434,14 +437,14 @@ if (speechAvailable() && window.speechSynthesis.addEventListener) {
   window.speechSynthesis.addEventListener('voiceschanged', () => { cachedVoice = null; });
 }
 
-// ---------- Jarvis: ambient announcements ----------
-window.api.onJarvisAmbient(({ text, kind }) => {
-  if (appMode !== 'jarvis') return;
+// ---------- Brittain: ambient announcements ----------
+window.api.onBrittainAmbient(({ text, kind }) => {
+  if (appMode !== 'brittain') return;
   const div = document.createElement('div');
   div.className = 'msg ambient';
   const label = document.createElement('span');
   label.className = 'label';
-  label.textContent = 'JARVIS · ' + String(kind || 'note').toUpperCase();
+  label.textContent = 'Brittain · ' + String(kind || 'note').toUpperCase();
   const body = document.createElement('span');
   body.className = 'body';
   body.textContent = text;
@@ -673,7 +676,7 @@ async function saveChat() {
       title,
       model: modelSelect.value,
       mode: appMode,
-      cwd: appMode === 'code' ? cwd || '' : '',
+      cwd: appMode === 'chat' ? '' : cwd || '',
       think: thinkToggle.checked,
       autoApprove: autoApprove.checked,
       autoBranch: autoBranchToggle.checked,
@@ -695,7 +698,7 @@ async function loadChat(chatId) {
   if (!res.ok) return addError('Could not load chat: ' + res.error);
   const saved = res.chat;
   onlineResearchToggle.checked = false; // loading history must never restore network access
-  setAppMode(saved.mode === 'chat' ? 'chat' : 'code');
+  setAppMode(saved.mode === 'chat' ? 'chat' : saved.mode === 'brittain' ? 'brittain' : 'code');
 
   // Push the stored conversation into the main process so the model continues from it.
   const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics);
@@ -713,7 +716,7 @@ async function loadChat(chatId) {
 
   // Restore the working directory this chat was using, if it still exists.
   let cwdChanged = false;
-  if (appMode === 'code' && saved.cwd && saved.cwd !== cwd) {
+  if (appMode !== 'chat' && saved.cwd && saved.cwd !== cwd) {
     if (await window.api.dirExists(saved.cwd)) {
       setCwd(saved.cwd);
       cwdChanged = true;
@@ -1028,7 +1031,7 @@ function renderMarkdown(el, text) {
 // Convert the streaming assistant bubble from plain text to rendered markdown.
 function finalizeAssistant() {
   if (!currentAssistant) return;
-  if (appMode === 'jarvis') flushSpeech();
+  if (appMode === 'brittain') flushSpeech();
   renderMarkdown(currentAssistant, currentAssistantRaw);
   currentAssistant = null;
   currentAssistantRaw = '';
@@ -1218,7 +1221,7 @@ window.api.onToken((t) => {
   finalizeThinking();
   if (!currentAssistant) { currentAssistant = addMessage('assistant', ''); currentAssistantRaw = ''; }
   currentAssistantRaw += t;
-  if (appMode === 'jarvis') feedSpeech(t);
+  if (appMode === 'brittain') feedSpeech(t);
   scheduleMarkdownRender(); // live markdown, rather than raw text until the run ends
 });
 
@@ -1623,6 +1626,7 @@ function setTemperatureSelect(id, value) {
 function fillSettingsForm(settings) {
   populateSettingsModelSelects(settings);
   $('setting-endpoint').value = settings.inferenceEndpoint;
+  $('setting-user-name').value = settings.userName || '';
   const standardContexts = ['0', '8192', '16384', '32768', '65536', '131072'];
   const contextValue = String(settings.mainContextCap);
   $('setting-main-context').value = standardContexts.includes(contextValue) ? contextValue : 'custom';
@@ -1654,6 +1658,7 @@ function settingsFromForm() {
   return {
     ...appSettings,
     inferenceEndpoint: $('setting-endpoint').value.trim(),
+    userName: $('setting-user-name').value.trim(),
     mainContextCap: Number(selectedContext === 'custom' ? $('setting-main-context-custom').value : selectedContext),
     autoCompact: $('setting-auto-compact').checked,
     compactThreshold: Number($('setting-compact-threshold').value) / 100,
@@ -1972,35 +1977,35 @@ async function handleSlash(raw) {
       return addInfo('Coder model set to ' + match);
     }
 
-    case 'jarvis': {
+    case 'brittain': {
       if (busy) return;
       const models = [...modelSelect.options].map((o) => o.value);
       if (!arg) {
-        const last = appSettings?.jarvisModel;
-        return addError('Usage: /jarvis <model>' + (last ? `  (last used: ${last})` : '') + '\nInstalled: ' + models.join(', '));
+        const last = appSettings?.brittainModel;
+        return addError('Usage: /brittain <model>' + (last ? `  (last used: ${last})` : '') + '\nInstalled: ' + models.join(', '));
       }
       const match = models.find((v) => v === arg) || models.find((v) => v.includes(arg));
       if (!match) return addError(`No installed model matching "${arg}".`);
       const conversation = await window.api.getConversation();
-      if (conversation.length && !(await confirmDialog('Switch to JARVIS and start a new session?\n\nYour current chat is already saved in History.', { okLabel: 'SWITCH' }))) return;
-      if (appMode !== 'jarvis') localStorage.setItem('preJarvisMode', appMode);
+      if (conversation.length && !(await confirmDialog('Switch to Brittain and start a new session?\n\nYour current chat is already saved in History.', { okLabel: 'SWITCH' }))) return;
+      if (appMode !== 'brittain') localStorage.setItem('preBrittainMode', appMode);
       modelSelect.value = match;
       localStorage.setItem('model', match);
-      localStorage.setItem('model:jarvis', match);
-      if (appSettings) { appSettings.jarvisModel = match; window.api.settingsSave(appSettings); }
-      setAppMode('jarvis');
+      localStorage.setItem('model:brittain', match);
+      if (appSettings) { appSettings.brittainModel = match; window.api.settingsSave(appSettings); }
+      setAppMode('brittain');
       if (conversation.length) await newSession();
       else { showStartupMessage(); }
-      addInfo(`JARVIS online — ${match}.\nBroad read access to this machine (credential stores, keychains, browser profiles and secrets files are hard-blocked). No writes, no shell.\nAmbient watch is ${appSettings?.jarvisWatch === false ? 'off' : 'on'}. /exit to leave.`);
+      addInfo(`Brittain online — ${match}.\nBroad read access to this machine (credential stores, keychains, browser profiles and secrets files are hard-blocked). No writes, no shell.\nAmbient watch is ${appSettings?.brittainWatch === false ? 'off' : 'on'}. /exit to leave.`);
       return;
     }
 
     case 'exit': {
-      if (appMode !== 'jarvis') return addError('Not in Jarvis mode.');
+      if (appMode !== 'brittain') return addError('Not in Brittain mode.');
       stopSpeaking();
-      setAppMode(localStorage.getItem('preJarvisMode') === 'chat' ? 'chat' : 'code');
+      setAppMode(localStorage.getItem('preBrittainMode') === 'chat' ? 'chat' : 'code');
       await newSession();
-      return addInfo('Jarvis offline.');
+      return addInfo('Brittain offline.');
     }
 
     case 'mcp': {

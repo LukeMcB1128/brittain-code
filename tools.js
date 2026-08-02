@@ -111,20 +111,20 @@ function registerProjectMemory(cwd) {
 }
 
 // ---------- tools ----------
-// ---------- Jarvis broad-read fence ----------
-// Jarvis reads the whole machine, so the directory fence that protects Code
+// ---------- Brittain broad-read fence ----------
+// Brittain reads the whole machine, so the directory fence that protects Code
 // mode does not apply. What protects the user instead is a HARD deny list:
 // these paths are refused outright rather than prompted for. A 3am "approve?"
 // click is not meaningful consent, and anything read here would persist in
 // chats/, in compaction summaries, and in /export output long after the click.
-const JARVIS_HOME = os.homedir();
+const BRITTAIN_HOME = os.homedir();
 
 // Unambiguous credential/config dotdirs — denied at any depth.
-const JARVIS_DENY_SEGMENTS = new Set(['.ssh', '.aws', '.gnupg', '.gpg', '.kube', '.azure', '.docker']);
+const BRITTAIN_DENY_SEGMENTS = new Set(['.ssh', '.aws', '.gnupg', '.gpg', '.kube', '.azure', '.docker']);
 
 // Home-relative subtrees (keychains, message stores, browser profiles: cookies
 // and saved logins live here).
-const JARVIS_DENY_HOME_PREFIXES = [
+const BRITTAIN_DENY_HOME_PREFIXES = [
   'Library/Keychains',
   'Library/Messages',
   'Library/Application Support/Google/Chrome',
@@ -142,7 +142,7 @@ const JARVIS_DENY_HOME_PREFIXES = [
 ];
 
 // Secret-bearing filenames — denied wherever they appear.
-const JARVIS_DENY_NAMES = /^(?:\.env(?:\..+)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|credentials(?:\.json)?|secrets?\.(?:json|ya?ml)|id_rsa.*|id_ecdsa.*|id_ed25519.*|.*\.(?:pem|key|p12|pfx|jks|keystore|ppk)|.*_history|\.?bash_history|\.?zsh_history)$/i;
+const BRITTAIN_DENY_NAMES = /^(?:\.env(?:\..+)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|credentials(?:\.json)?|secrets?\.(?:json|ya?ml)|id_rsa.*|id_ecdsa.*|id_ed25519.*|.*\.(?:pem|key|p12|pfx|jks|keystore|ppk)|.*_history|\.?bash_history|\.?zsh_history)$/i;
 
 function isUnderPath(candidate, parent) {
   const rel = path.relative(parent, candidate);
@@ -152,15 +152,15 @@ function isUnderPath(candidate, parent) {
 function assertNotDenied(target) {
   const segments = target.split(path.sep).filter(Boolean);
   for (const segment of segments) {
-    if (JARVIS_DENY_SEGMENTS.has(segment.toLowerCase())) {
+    if (BRITTAIN_DENY_SEGMENTS.has(segment.toLowerCase())) {
       throw new Error(`Refused: "${target}" is inside a protected credential directory (${segment}). This is a hard limit — it is not approvable, because anything read here would be written into saved chat history. Use Code mode if you genuinely need it.`);
     }
   }
-  if (JARVIS_DENY_NAMES.test(path.basename(target))) {
+  if (BRITTAIN_DENY_NAMES.test(path.basename(target))) {
     throw new Error(`Refused: "${path.basename(target)}" looks like a secrets file. This is a hard limit — secrets read here would persist in saved chat history.`);
   }
-  for (const prefix of JARVIS_DENY_HOME_PREFIXES) {
-    if (isUnderPath(target, path.join(JARVIS_HOME, prefix))) {
+  for (const prefix of BRITTAIN_DENY_HOME_PREFIXES) {
+    if (isUnderPath(target, path.join(BRITTAIN_HOME, prefix))) {
       throw new Error(`Refused: "${target}" is inside a protected personal data store (~/${prefix}). This is a hard limit and is not approvable.`);
     }
   }
@@ -171,9 +171,9 @@ function assertNotDenied(target) {
 // the string is defeated by a single symlink.
 function resolveAnywhere(p, cwd) {
   let raw = String(p ?? '.').trim();
-  if (raw === '~') raw = JARVIS_HOME;
-  else if (raw.startsWith('~' + path.sep) || raw.startsWith('~/')) raw = path.join(JARVIS_HOME, raw.slice(2));
-  const abs = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(cwd || JARVIS_HOME, raw);
+  if (raw === '~') raw = BRITTAIN_HOME;
+  else if (raw.startsWith('~' + path.sep) || raw.startsWith('~/')) raw = path.join(BRITTAIN_HOME, raw.slice(2));
+  const abs = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(cwd || BRITTAIN_HOME, raw);
 
   assertNotDenied(abs);
   // Follow symlinks: check the real location of the deepest part that exists.
@@ -194,7 +194,7 @@ function resolveAnywhere(p, cwd) {
 }
 
 function resolveInside(cwd, p, opts) {
-  // Jarvis passes { anywhere: true } for read-only tools; every other caller
+  // Brittain passes { anywhere: true } for read-only tools; every other caller
   // keeps the project fence.
   if (opts && opts.anywhere) return resolveAnywhere(p, cwd);
   const root = fs.realpathSync(cwd);
@@ -1275,7 +1275,7 @@ const RISKY_TOOLS = new Set([
 ]);
 
 async function executeTool(name, args, cwd, opts = {}) {
-  // Jarvis mode reads the whole machine; readOpts flips path resolution for
+  // Brittain mode reads the whole machine; readOpts flips path resolution for
   // read-only tools only. Mutating tools always stay fenced to cwd.
   const readOpts = opts.broadRead ? { anywhere: true } : undefined;
   // futility tracking must see every call so any non-write action resets it
@@ -2289,11 +2289,11 @@ const CODER_TOOLS = TOOL_DEFS.filter((d) => CODER_TOOL_NAMES.has(d.function.name
 const CHAT_TOOL_NAMES = new Set(['ask_user', 'web_search', 'web_fetch']);
 const CHAT_TOOLS = TOOL_DEFS.filter((d) => CHAT_TOOL_NAMES.has(d.function.name));
 
-// Jarvis: broad sight, no hands. Deliberately curated rather than "every tool"
+// Brittain: broad sight, no hands. Deliberately curated rather than "every tool"
 // — the benchmark showed tool-call count tracks inversely with quality, and
-// Jarvis already carries the longest prompt in the app (personality + global
+// Brittain already carries the longest prompt in the app (personality + global
 // memory). Anything outside this list is reachable via run_subagent.
-const JARVIS_TOOL_NAMES = new Set([
+const BRITTAIN_TOOL_NAMES = new Set([
   'read_file', 'browse_files', 'search_files', 'search_local_docs',
   'get_file_lines', 'file_metadata',
   'git_status', 'get_git_log', 'get_git_graph', 'read_git_diff',
@@ -2301,7 +2301,7 @@ const JARVIS_TOOL_NAMES = new Set([
   'app_status', 'run_subagent', 'ask_user', 'remember',
   'web_search', 'web_fetch',
 ]);
-const JARVIS_TOOLS = TOOL_DEFS.filter((d) => JARVIS_TOOL_NAMES.has(d.function.name));
+const BRITTAIN_TOOLS = TOOL_DEFS.filter((d) => BRITTAIN_TOOL_NAMES.has(d.function.name));
 
 module.exports = {
   initTools,
@@ -2315,8 +2315,8 @@ module.exports = {
   CODER_TOOL_NAMES,
   CHAT_TOOLS,
   CHAT_TOOL_NAMES,
-  JARVIS_TOOLS,
-  JARVIS_TOOL_NAMES,
+  BRITTAIN_TOOLS,
+  BRITTAIN_TOOL_NAMES,
   resolveAnywhere,
   NETWORK_TOOLS,
   SENSITIVE_TOOLS,

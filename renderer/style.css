@@ -69,30 +69,30 @@ body { display: flex; flex-direction: column; }
 }
 
 body[data-mode="chat"] .code-only { display: none !important; }
-body[data-mode="jarvis"] .code-only { display: none !important; }
-body:not([data-mode="jarvis"]) .jarvis-only { display: none !important; }
+body[data-mode="brittain"] .code-only { display: none !important; }
+body:not([data-mode="brittain"]) .brittain-only { display: none !important; }
 
-/* ---------- Jarvis mode ---------- */
-:root { --jarvis: #d8a34a; }
+/* ---------- Brittain mode ---------- */
+:root { --brittain: #d8a34a; }
 
-body[data-mode="jarvis"] .brand { color: var(--jarvis); }
-body[data-mode="jarvis"] #topbar { border-bottom-color: var(--jarvis); }
+body[data-mode="brittain"] .brand { color: var(--brittain); }
+body[data-mode="brittain"] #topbar { border-bottom-color: var(--brittain); }
 
-#jarvis-mute {
-  color: var(--jarvis);
-  border-color: var(--jarvis);
+#brittain-mute {
+  color: var(--brittain);
+  border-color: var(--brittain);
   letter-spacing: 1px;
 }
-#jarvis-mute.muted { color: var(--text-dim); border-color: var(--border); }
+#brittain-mute.muted { color: var(--text-dim); border-color: var(--border); }
 
 /* unprompted announcements from the ambient watchers */
 .msg.ambient {
-  border-left: 2px solid var(--jarvis);
-  background: color-mix(in srgb, var(--jarvis) 7%, transparent);
+  border-left: 2px solid var(--brittain);
+  background: color-mix(in srgb, var(--brittain) 7%, transparent);
   padding: 8px 12px;
   font-size: 13px;
 }
-.msg.ambient .label { color: var(--jarvis); }
+.msg.ambient .label { color: var(--brittain); }
 
 .spacer { flex: 1; }
 

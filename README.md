@@ -55,7 +55,7 @@ The status bar shows: current state, context usage (tokens used vs the model's c
 
 ## Settings
 
-**SETTINGS** controls the Ollama-compatible inference endpoint, separate default models and response styles for Code and Chat, main/coder/scout context caps, auto-compaction and its threshold, model keep-alive, starting mode, THINK and Code safety defaults, sidebar visibility, global instructions, main-agent step cap, and the default `/loop` iteration count. Main context **Auto** uses up to 128K tokens and never exceeds the model's native context; a custom cap can be entered when needed. Research always starts disabled regardless of session defaults.
+**SETTINGS** controls the Ollama-compatible inference endpoint, separate default models and response styles for Code and Chat, an optional name for Brittain to use when addressing you, main/coder/scout context caps, auto-compaction and its threshold, model keep-alive, starting mode, THINK and Code safety defaults, sidebar visibility, global instructions, main-agent step cap, and the default `/loop` iteration count. Main context **Auto** uses up to 128K tokens and never exceeds the model's native context; a custom cap can be entered when needed. Research always starts disabled regardless of session defaults.
 
 The inference endpoint accepts an `http://` or `https://` base URL containing only a host and optional port, such as `http://127.0.0.1:9001`. **TEST** checks the endpoint's `/api/tags` response before saving. This supports servers that implement Ollama's `/api/tags`, `/api/show`, and `/api/chat` shapes; other provider protocols will need a provider adapter. A non-loopback endpoint sends prompts, attachment contents, and tool context to that server, so it is no longer local-only.
 
@@ -74,16 +74,16 @@ The inference model remains local while online research is enabled, but the sess
 
 Sensitive file reads (`.env`, private-key formats, credential files), process listings, and environment inspection also bypass AUTO-APPROVE. Environment values are redacted by default; explicitly revealed values and all other tool results become part of persisted chat history.
 
-## Jarvis (hidden)
+## Brittain (hidden)
 
 A persistent companion mode, entered by command rather than by button:
 
 ```
-/jarvis <model>     enter Jarvis with that model (partial match ok)
+/brittain <model>     enter Brittain with that model (partial match ok)
 /exit               leave, returning to your previous mode
 ```
 
-Jarvis is different from Code and Chat rather than a superset of either:
+Brittain is different from Code and Chat rather than a superset of either:
 
 - **Sees the whole machine.** Reads any file, not just the current project —
   useful for "what was I doing in that other repo?"
@@ -92,10 +92,10 @@ Jarvis is different from Code and Chat rather than a superset of either:
   (`.env`, `*.pem`, `*.key`, shell history) are refused outright — not
   prompted for. Anything read would persist in saved chat history, so this is a
   wall rather than a question. Symlinks don't get around it.
-- **No hands.** No writes, no shell. Jarvis observes and advises; Code mode does
+- **No hands.** No writes, no shell. Brittain observes and advises; Code mode does
   the work.
 - **Remembers you, not the project.** Its own global memory at
-  `jarvis/memory.md` in app data, separate from per-project agent memory.
+  `brittain/memory.md` in app data, separate from per-project agent memory.
 - **Its own history**, kept apart from Code and Chat chats.
 - **Speaks.** Replies are read aloud (macOS ships the `Daniel` en-GB voice).
   Code blocks, paths and links are stripped before speaking. Toggle with the
@@ -109,14 +109,14 @@ Jarvis is different from Code and Chat rather than a superset of either:
 
 ### Watching external things (email, calendars, …)
 
-Jarvis has no email integration and stores no credentials. To have it announce
+Brittain has no email integration and stores no credentials. To have it announce
 external events, connect an MCP server and name its tools in settings:
 
 ```json
-"jarvisWatchTools": ["mcp_gmail_unread_count"]
+"brittainWatchTools": ["mcp_gmail_unread_count"]
 ```
 
-Naming a tool there is your standing consent for Jarvis to poll it in the
+Naming a tool there is your standing consent for Brittain to poll it in the
 background (max 5 tools). Nothing is polled by default.
 
 ## Slash commands

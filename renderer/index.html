@@ -36,7 +36,7 @@
       <input type="checkbox" id="review-mode" />
       <span>REVIEW</span>
     </label>
-    <button id="jarvis-mute" class="jarvis-only" title="Toggle Jarvis speech">SPEAKING</button>
+    <button id="brittain-mute" class="brittain-only" title="Toggle Brittain speech">SPEAKING</button>
     <button id="new-btn" title="Clear conversation">NEW SESSION</button>
     <button id="settings-btn" title="Settings">SETTINGS</button>
   </header>
@@ -193,6 +193,12 @@
               <strong>⚠ Trust warning.</strong> MCP servers are third-party code that runs on your machine and can read files, reach the network, or take actions outside this app. By default every MCP call waits for your approval — even when AUTO-APPROVE is on — so you can inspect each one. Turning this on removes that check and lets any connected server act automatically. Only enable it for servers you fully trust and have configured yourself.
             </p>
           </div>
+        </section>
+
+        <section class="settings-section">
+          <h2>IDENTITY</h2>
+          <label>Your name <input id="setting-user-name" type="text" maxlength="80" autocomplete="name" placeholder="Optional" /></label>
+          <p class="setting-help">Optional. Brittain uses this name when addressing you; leave it blank for neutral wording.</p>
         </section>
 
         <section class="settings-section">
