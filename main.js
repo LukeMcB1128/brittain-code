@@ -2238,12 +2238,13 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
 // ---------- durable missions (/mission) ----------
 // Missions intentionally reuse the bounded coder loop. They add a visible,
 // persisted control plane without creating a second, less-tested agent engine.
-ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
+ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch, chatId }) => {
   if (activeMission?.status === 'running') return { ok: false, error: 'A mission is already running. Use /mission status or /mission stop.' };
   if (!model) return { ok: false, error: 'Select a model first.' };
   if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
   if (!goal?.trim()) return { ok: false, error: 'A mission goal is required.' };
   if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  if (!chatId) return { ok: false, error: 'A mission must be started from a chat.' };
 
   const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
   const startedAt = new Date().toISOString();
@@ -2252,6 +2253,7 @@ ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, 
     status: 'running',
     goal: goal.trim(),
     projectPath: cwd,
+    chatId,
     startedAt,
     endedAt: null,
     maxIterations: max,

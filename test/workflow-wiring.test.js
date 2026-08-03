@@ -49,12 +49,15 @@ test('missions wrap the bounded coder loop with persisted status and explicit st
   assert.match(renderer, /chat\.appendChild\(missionCard\)/);
   assert.match(renderer, /function shouldDisplayMission/);
   assert.match(renderer, /appMode === 'code'/);
+  assert.match(renderer, /mission\?\.chatId === currentChatId/);
   assert.match(renderer, /normalizedMissionPath\(cwd\) === normalizedMissionPath\(mission\.projectPath\)/);
+  assert.match(renderer, /chatId: currentChatId/);
   assert.match(renderer, /missionControl =/);
   assert.match(renderer, /busy && !missionControl/);
   assert.match(preload, /missionStart: \(payload\) => ipcRenderer\.invoke\('mission:start'/);
   assert.match(preload, /missionStop: \(\) => ipcRenderer\.invoke\('mission:stop'/);
-  assert.match(main, /ipcMain\.handle\('mission:start'/);
+  assert.match(main, /ipcMain\.handle\('mission:start',[\s\S]*chatId/);
+  assert.match(main, /chatId,\n\s*startedAt/);
   assert.match(main, /runCoderGoalLoop\(\{/);
   assert.match(main, /ipcMain\.handle\('mission:stop'/);
   assert.match(main, /interruptRunningMission/);

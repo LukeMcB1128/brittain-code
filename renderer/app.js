@@ -516,6 +516,9 @@ async function loadChat(chatId) {
   const res = await window.api.historyLoad(chatId);
   if (!res.ok) return addError('Could not load chat: ' + res.error);
   const saved = res.chat;
+  // Set this before any rendering or mode/directory synchronization so a
+  // mission card can never be carried over from the previously open chat.
+  currentChatId = chatId;
   onlineResearchToggle.checked = false; // loading history must never restore network access
   setAppMode(saved.mode === 'chat' ? 'chat' : 'code');
 
@@ -525,7 +528,6 @@ async function loadChat(chatId) {
   updateContextBar(lc.approxTokens, lc.contextLength);
   compactWarned = false; // fresh warning budget for this chat
   hideStartupMessage();
-  currentChatId = chatId;
 
   // Auto-select the model this chat was using; if it's gone from Ollama, keep the current one.
   if (saved.model && [...modelSelect.options].some((o) => o.value === saved.model)) {
@@ -1134,6 +1136,8 @@ function normalizedMissionPath(value) {
 function shouldDisplayMission(mission = latestMission) {
   return appMode === 'code'
     && !!cwd
+    && !!currentChatId
+    && mission?.chatId === currentChatId
     && !!mission?.projectPath
     && normalizedMissionPath(cwd) === normalizedMissionPath(mission.projectPath);
 }
@@ -1729,6 +1733,10 @@ async function handleSlash(raw) {
       if (!goal) return addError('Usage: /mission [iterations] <goal> — e.g. /mission 12 add CSV export and verify it');
       if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the mission will pause for every risky tool call. Turn it on for unattended runs.');
 
+      // A mission belongs to the chat that started it, not every chat in its
+      // project. Allocate an ID now because a new chat is normally saved only
+      // after the mission command has completed.
+      if (!currentChatId) currentChatId = Date.now().toString();
       addMessage('user', `MISSION (max ${iterations}): ${goal}`);
       startRun();
       try {
@@ -1743,6 +1751,7 @@ async function handleSlash(raw) {
           onlineResearch: onlineResearchToggle.checked,
           think: thinkToggle.checked,
           maxIterations: iterations,
+          chatId: currentChatId,
         });
         if (!res.ok) addError(res.error);
         else if (res.report) renderMarkdown(addMessage('assistant', res.report), res.report);
