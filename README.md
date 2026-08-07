@@ -94,7 +94,7 @@ Type these in the message box:
 | `/mission [n] <goal>` | Run a persisted, visible coder mission for up to n iterations; `/mission status` inspects it and `/mission stop` cancels it |
 | `/usage` | Show context remaining and token spend across planner/main agent, scouts, coders, and verifier |
 | `/context` | Show exactly what will be sent next turn — system prompt, per-message tokens, eviction flags |
-| `/recommendations` | Compare installed models by memory fit, capabilities, measured speed, and local Brittainmark results |
+| `/recs` | Compare installed models by memory fit, capabilities, measured speed, and local Brittainmark results |
 | `/best [task] [use]` | Rank installed models by their local benchmark score for a task; `use` switches to the top result |
 | `/mcp [on\|off <server>]` | External MCP tool servers: status, enable, disable |
 | `/memory` | View what the agent has remembered for the selected project |
@@ -107,7 +107,7 @@ Type these in the message box:
 
 `/loop` is the original single-model, conversation-preserving loop. For planned, verifier-guided implementation and repair work, use `/mission`: it records its goal, project, models, phase, latest evidence, and final report under Brittain Code’s application-data directory. It keeps the same tool permissions and approval rules as ordinary Code mode. Only one mission can run at a time; closing the app marks an active mission as interrupted rather than attempting to resume it. Missions do not run after the app exits and have no messaging, scheduling, or external-notification integration.
 
-The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is enabled, with the same per-request approval boundary as ordinary chats. Coding workers and verifiers never receive network tools. Run `/recommendations` after installing a new Ollama model to refresh the model list. The recommendations popup compares installed models at the current context cap. Memory values are marked as measured or estimated, and speed is learned from responses during the current app run.
+The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is enabled, with the same per-request approval boundary as ordinary chats. Coding workers and verifiers never receive network tools. Run `/recs` after installing a new Ollama model to refresh the model list. The recommendations popup compares installed models at the current context cap. Memory values are marked as measured or estimated, and speed is learned from responses during the current app run.
 
 ## MCP servers
 

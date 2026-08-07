@@ -1577,7 +1577,7 @@ const SLASH_HELP = [
   '/usage — show how context and tokens have been spent across all agents',
   '/mcp [on|off <server>] — external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
-  '/recommendations — compare installed models for this computer',
+  '/recs — compare installed models for this computer',
   '/best [task] [use] — rank installed models by local benchmark score for a task; "use" switches to the top result',
   '/memory — view what the agent has remembered',
   '/export — save this chat as a markdown file',
@@ -1592,7 +1592,7 @@ const CHAT_SLASH_HELP = [
   '/usage — show context and token usage',
   '/mcp [on|off <server>] - external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
-  '/recommendations — compare installed models for this computer',
+  '/recs — compare installed models for this computer',
   '/export — save this chat as a markdown file',
   '/tools — list tools available to the app',
 ].join('\n');
@@ -1794,9 +1794,9 @@ async function handleSlash(raw) {
 
     case 'coder': {
       const models = [...modelSelect.options].map((o) => o.value);
-      if (!arg) return addInfo(`Coder model: ${coderModel}\nAvailable: ${models.join(', ')}\nUse /coder <name> to change. Run /recommendations after installing a new Ollama model to refresh the list.`);
+      if (!arg) return addInfo(`Coder model: ${coderModel}\nAvailable: ${models.join(', ')}\nUse /coder <name> to change. Run /recs after installing a new Ollama model to refresh the list.`);
       const match = models.find((v) => v.includes(arg));
-      if (!match) return addError(`No installed model matching "${arg}". If Ollama just finished installing it, run /recommendations to refresh the model list.`);
+      if (!match) return addError(`No installed model matching "${arg}". If Ollama just finished installing it, run /recs to refresh the model list.`);
       coderModel = match;
       localStorage.setItem('coderModel', match);
       return addInfo('Coder model set to ' + match);
@@ -1833,7 +1833,7 @@ async function handleSlash(raw) {
       return showOverlay('CONTEXT — what will actually be sent', lines.join('\n'));
     }
 
-    case 'recommendations': {
+    case 'recs': {
       if (busy) return addError('Wait for the current run to finish before checking model recommendations.');
       setState('checking models…');
       try {
