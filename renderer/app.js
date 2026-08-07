@@ -2078,7 +2078,8 @@ function showRecommendations(result) {
     const speedCell = recommendationElement('div');
     if (model.speed) {
       speedCell.appendChild(recommendationElement('div', 'recommendations-value', `${model.speed.tokensPerSecond.toFixed(1)} t/s`));
-      speedCell.appendChild(recommendationElement('div', 'recommendations-meta', `${model.speed.samples} MEASURED SAMPLE${model.speed.samples === 1 ? '' : 'S'}`));
+      const speedContext = model.speed.contextTokens ? ` @ ${formatModelContext(model.speed.contextTokens)}` : '';
+      speedCell.appendChild(recommendationElement('div', 'recommendations-meta', `${model.speed.samples} MEASURED SAMPLE${model.speed.samples === 1 ? '' : 'S'}${speedContext}`));
     } else {
       speedCell.appendChild(recommendationElement('div', 'recommendations-unknown', 'NOT MEASURED'));
       speedCell.appendChild(recommendationElement('div', 'recommendations-meta', 'RUN MODEL TO LEARN'));
@@ -2111,9 +2112,9 @@ function showRecommendations(result) {
   body.appendChild(wrap);
 
   const noteParts = [
-    'Memory estimates include model weights, an f16 KV cache, and runtime overhead.',
+    `Memory estimates include quantized model weights, a ${String(result.kvCacheType || 'f16').toUpperCase()} KV cache, and runtime overhead.`,
     'Measured values come from Ollama while a model is loaded.',
-    'Speed uses responses from this app run.',
+    'Speed uses measured local responses from saved chats, Brittainmark runs, and this app session.',
   ];
   if (!result.benchmarkAvailable) noteParts.push('No local Brittainmark v3 results matched these models.');
   body.appendChild(recommendationElement('div', 'recommendations-note', noteParts.join(' ')));

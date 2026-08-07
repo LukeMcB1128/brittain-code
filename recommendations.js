@@ -30,34 +30,127 @@ function valueBySuffix(modelInfo, suffix) {
   return key ? finiteNumber(modelInfo[key], 0) : 0;
 }
 
+function rawValueBySuffix(modelInfo, suffix) {
+  const key = Object.keys(modelInfo || {}).find((name) => name.endsWith(suffix));
+  return key ? modelInfo[key] : null;
+}
+
 function nativeContextLength(show) {
   return valueBySuffix(show?.model_info, '.context_length') || null;
+}
+
+function kvCacheBytesPerElement(value) {
+  const type = String(value || 'f16').trim().toLowerCase();
+  if (type === 'q8_0') return 34 / 32;
+  if (type === 'q4_0') return 18 / 32;
+  return 2;
+}
+
+function tensorProjectionWidth(tensor, embedding) {
+  const dimensions = (tensor?.shape || []).map((value) => finiteNumber(value, 0)).filter((value) => value > 0);
+  if (!dimensions.length) return 0;
+  const projected = dimensions.filter((value) => value !== embedding);
+  return projected.length ? Math.min(...projected) : Math.min(...dimensions);
+}
+
+function estimateTensorKvCacheBytes(show, contextTokens, bytesPerElement) {
+  if (!Array.isArray(show?.tensors)) return 0;
+  const info = show.model_info || {};
+  const embedding = valueBySuffix(info, '.embedding_length');
+  const slidingWindow = valueBySuffix(info, '.attention.sliding_window');
+  const slidingPattern = rawValueBySuffix(info, '.attention.sliding_window_pattern');
+  const slidingKeyLength = valueBySuffix(info, '.attention.key_length_swa');
+  const tensorsByName = new Map(show.tensors.map((tensor) => [tensor.name, tensor]));
+  let bytes = 0;
+  let attentionLayers = 0;
+
+  for (const keyTensor of show.tensors) {
+    const match = String(keyTensor?.name || '').match(/^blk\.(\d+)\.attn_k\.weight$/);
+    if (!match) continue;
+    const layer = Number(match[1]);
+    const keyWidth = tensorProjectionWidth(keyTensor, embedding);
+    if (!keyWidth) continue;
+    const valueTensor = tensorsByName.get(`blk.${layer}.attn_v.weight`);
+    const valueWidth = tensorProjectionWidth(valueTensor, embedding) || keyWidth;
+
+    let usesSlidingWindow = Array.isArray(slidingPattern) ? slidingPattern[layer] === true : false;
+    if (!Array.isArray(slidingPattern) && slidingKeyLength) {
+      const norm = tensorsByName.get(`blk.${layer}.attn_k_norm.weight`);
+      usesSlidingWindow = (norm?.shape || []).some((value) => finiteNumber(value, 0) === slidingKeyLength);
+    }
+    const layerContext = usesSlidingWindow && slidingWindow
+      ? Math.min(contextTokens, slidingWindow)
+      : contextTokens;
+    bytes += layerContext * (keyWidth + valueWidth) * bytesPerElement;
+    attentionLayers += 1;
+  }
+
+  return attentionLayers ? Math.ceil(bytes) : 0;
 }
 
 // Ollama uses an f16 KV cache unless the host has a different setting. The
 // exact formula is useful when the model exports its attention dimensions.
 // The fallback is intentionally conservative and remains marked as estimated.
-function estimateKvCacheBytes(show, contextTokens, weightBytes) {
+function estimateKvCacheBytes(show, contextTokens, weightBytes, bytesPerElement = 2) {
   const info = show?.model_info || {};
   const layers = valueBySuffix(info, '.block_count');
-  const kvHeads = valueBySuffix(info, '.attention.head_count_kv') || valueBySuffix(info, '.attention.head_count');
   const heads = valueBySuffix(info, '.attention.head_count');
   const embedding = valueBySuffix(info, '.embedding_length');
   const keyLength = valueBySuffix(info, '.attention.key_length') || (heads && embedding ? embedding / heads : 0);
   const valueLength = valueBySuffix(info, '.attention.value_length') || keyLength;
+  const mlaKeyLength = valueBySuffix(info, '.attention.key_length_mla');
+  const mlaValueLength = valueBySuffix(info, '.attention.value_length_mla');
+  const kvHeadValue = rawValueBySuffix(info, '.attention.head_count_kv');
+  const elementBytes = finiteNumber(bytesPerElement, 2) || 2;
+  let kvHeadsAcrossLayers = 0;
 
-  if (layers && kvHeads && keyLength && valueLength) {
-    return Math.ceil(contextTokens * layers * kvHeads * (keyLength + valueLength) * 2);
+  // Multi-head latent attention caches the compressed latent dimensions. It
+  // does not cache a full key and value vector for every query head.
+  if (layers && mlaKeyLength) {
+    return Math.ceil(contextTokens * layers * (mlaKeyLength + (mlaValueLength || mlaKeyLength)) * elementBytes);
+  }
+
+  // Tensor shapes are the most reliable source for hybrid and mixed-attention
+  // GGUF files. A separate attn_k tensor exists only on layers with a KV
+  // cache, and its projected width is the number of cached key values.
+  const tensorEstimate = estimateTensorKvCacheBytes(show, contextTokens, elementBytes);
+  if (tensorEstimate) return tensorEstimate;
+
+  // GGUF can store KV-head counts per layer. Hybrid models use zero for
+  // recurrent layers and a positive count for full-attention layers. Do not
+  // coerce this array to Number: that discards the layer layout and can make
+  // the estimate many times too large.
+  if (Array.isArray(kvHeadValue)) {
+    const layerValues = layers ? kvHeadValue.slice(0, layers) : kvHeadValue;
+    const slidingWindow = valueBySuffix(info, '.attention.sliding_window');
+    const slidingPattern = rawValueBySuffix(info, '.attention.sliding_window_pattern');
+    if (Array.isArray(slidingPattern) && slidingWindow) {
+      return Math.ceil(layerValues.reduce((sum, value, layer) => {
+        const layerContext = slidingPattern[layer] === true ? Math.min(contextTokens, slidingWindow) : contextTokens;
+        return sum + layerContext * Math.max(0, finiteNumber(value, 0)) * (keyLength + valueLength) * elementBytes;
+      }, 0));
+    }
+    kvHeadsAcrossLayers = layerValues.reduce((sum, value) => sum + Math.max(0, finiteNumber(value, 0)), 0);
+  } else {
+    const kvHeads = finiteNumber(kvHeadValue, 0) || heads;
+    let attentionLayers = layers;
+    const fullAttentionInterval = valueBySuffix(info, '.full_attention_interval');
+    if (fullAttentionInterval > 1) attentionLayers = Math.floor(layers / fullAttentionInterval);
+    kvHeadsAcrossLayers = attentionLayers * kvHeads;
+  }
+
+  if (kvHeadsAcrossLayers && keyLength && valueLength) {
+    return Math.ceil(contextTokens * kvHeadsAcrossLayers * (keyLength + valueLength) * elementBytes);
   }
 
   if (!weightBytes) return 0;
-  return Math.ceil(weightBytes * 0.08 * Math.max(1, contextTokens / 8192));
+  return Math.ceil(weightBytes * 0.08 * Math.max(1, contextTokens / 8192) * (elementBytes / 2));
 }
 
-function estimateModelMemory(tag, show, contextTokens) {
+function estimateModelMemory(tag, show, contextTokens, bytesPerElement = 2) {
   const weightBytes = finiteNumber(tag?.size, 0);
   if (!weightBytes) return null;
-  const kvBytes = estimateKvCacheBytes(show, contextTokens, weightBytes);
+  const kvBytes = estimateKvCacheBytes(show, contextTokens, weightBytes, bytesPerElement);
   const runtimeBytes = Math.max(384 * 1024 ** 2, weightBytes * 0.08);
   return {
     bytes: Math.ceil(weightBytes + kvBytes + runtimeBytes),
@@ -116,10 +209,12 @@ function latestMeasuredSpeed(samples, contextTokens) {
   if (!valid.length) return null;
   const sameContext = valid.filter((sample) => sample.contextTokens === contextTokens);
   const selected = sameContext.length ? sameContext : valid;
+  const selectedContexts = [...new Set(selected.map((sample) => finiteNumber(sample.contextTokens, 0)).filter((value) => value > 0))];
   return {
     tokensPerSecond: Math.round(median(selected.map((sample) => sample.tokensPerSecond)) * 10) / 10,
     samples: selected.length,
     exactContext: sameContext.length > 0,
+    contextTokens: sameContext.length ? contextTokens : selectedContexts.length === 1 ? selectedContexts[0] : null,
     source: 'measured',
   };
 }
@@ -157,7 +252,7 @@ function parameterBillions(tag, show) {
   return match ? finiteNumber(match[1], 0) : 0;
 }
 
-const FIT_ORDER = { loaded: 1, good: 1, caution: 2, unknown: 3, risk: 4 };
+const FIT_ORDER = { loaded: 1, proven: 1, good: 1, caution: 2, unknown: 3, risk: 4 };
 
 function recommendationSort(mode) {
   return (a, b) => {
@@ -178,9 +273,10 @@ function recommendationSort(mode) {
   };
 }
 
-function buildRecommendations({ tags, shows = {}, running = [], hardware, benchmarkEntries = [], speedSamples = {}, presets = {}, requestedContext = 131072, mode = 'code' }) {
+function buildRecommendations({ tags, shows = {}, running = [], hardware, benchmarkEntries = [], speedSamples = {}, presets = {}, requestedContext = 131072, mode = 'code', kvCacheType = 'f16' }) {
   const benchmarkByModel = summarizeBenchmarks(benchmarkEntries);
   const runningByModel = new Map((running || []).map((entry) => [normalizedModelName(entry.name || entry.model), entry]));
+  const cacheElementBytes = kvCacheBytesPerElement(kvCacheType);
 
   const models = (tags || []).map((tag) => {
     const name = tag.name || tag.model;
@@ -189,10 +285,16 @@ function buildRecommendations({ tags, shows = {}, running = [], hardware, benchm
     const loaded = runningByModel.get(normalized) || null;
     const nativeContext = nativeContextLength(show);
     const contextTokens = Math.max(2048, Math.min(finiteNumber(requestedContext, 131072), nativeContext || Infinity));
-    const estimate = estimateModelMemory(tag, show, contextTokens);
+    const estimate = estimateModelMemory(tag, show, contextTokens, cacheElementBytes);
     const actualMemoryBytes = finiteNumber(loaded?.size_vram, 0) || finiteNumber(loaded?.size, 0) || null;
     const memoryBytes = actualMemoryBytes || estimate?.bytes || null;
-    const fit = fitForMemory(memoryBytes, hardware, !!loaded);
+    const matchingSpeedSamples = (speedSamples[name] || speedSamples[normalized] || [])
+      .filter((sample) => !sample?.digest || !tag.digest || sample.digest === tag.digest);
+    const measuredSpeed = latestMeasuredSpeed(matchingSpeedSamples, contextTokens);
+    let fit = fitForMemory(memoryBytes, hardware, !!loaded);
+    if (fit.level === 'risk' && measuredSpeed?.exactContext && hardware?.appliesToEndpoint) {
+      fit = { level: 'proven', label: 'MEASURED FIT' };
+    }
     const preset = findPreset(name, presets);
 
     return {
@@ -215,7 +317,7 @@ function buildRecommendations({ tags, shows = {}, running = [], hardware, benchm
         unified: !!hardware?.unifiedMemory,
       },
       fit,
-      speed: latestMeasuredSpeed(speedSamples[name] || speedSamples[normalized], contextTokens),
+      speed: measuredSpeed,
       brittainmark: benchmarkByModel.get(normalized) || null,
       profile: preset ? { marker: preset.marker || null, priority: finiteNumber(preset.priority, 0) } : null,
       recommended: false,
@@ -234,6 +336,7 @@ module.exports = {
   estimateModelMemory,
   fitForMemory,
   isLocalEndpoint,
+  kvCacheBytesPerElement,
   latestMeasuredSpeed,
   median,
   nativeContextLength,

@@ -847,7 +847,7 @@ button.mini:disabled {
 }
 
 .recommendations-badge.best { border-color: var(--accent); color: var(--accent); }
-.recommendations-fit-good, .recommendations-fit-loaded { color: var(--green); }
+.recommendations-fit-good, .recommendations-fit-loaded, .recommendations-fit-proven { color: var(--green); }
 .recommendations-fit-caution { color: var(--yellow); }
 .recommendations-fit-risk { color: var(--red); }
 .recommendations-fit-unknown { color: var(--text-dim); }
