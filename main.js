@@ -5,12 +5,15 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const si = require('systeminformation');
 const { McpManager } = require('./mcp');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
 const { readActiveMission, writeActiveMission, interruptRunningMission } = require('./missions');
+const { buildRecommendations, isLocalEndpoint } = require('./recommendations');
+const modelPresets = require('./model-presets.json');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 // The context window we actually request from Ollama. Without an explicit
@@ -158,6 +161,18 @@ function freshUsage() {
   };
 }
 let usage = freshUsage();
+const modelSpeedSamples = new Map();
+
+function recordModelSpeed(model, stats, contextTokens) {
+  if (!model || !stats || stats.evalTokens < 8 || !Number.isFinite(stats.tokPerSec) || stats.tokPerSec <= 0) return;
+  const samples = modelSpeedSamples.get(model) || [];
+  samples.push({
+    tokensPerSecond: stats.tokPerSec,
+    contextTokens,
+    recordedAt: new Date().toISOString(),
+  });
+  modelSpeedSamples.set(model, samples.slice(-12));
+}
 
 function recordUsage(bucket, stats) {
   if (!stats) return;
@@ -377,6 +392,58 @@ async function runtimeMetadata(model) {
   return metadata;
 }
 
+let hardwareProfileCache = null;
+let hardwareProfileCachedAt = 0;
+
+function megabytesToBytes(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.round(number * 1024 ** 2) : 0;
+}
+
+async function hardwareProfile() {
+  if (hardwareProfileCache && Date.now() - hardwareProfileCachedAt < 60_000) {
+    return { ...hardwareProfileCache, appliesToEndpoint: isLocalEndpoint(inferenceEndpoint()) };
+  }
+
+  let memory = {};
+  try {
+    memory = typeof process.getSystemMemoryInfo === 'function' ? process.getSystemMemoryInfo() : {};
+  } catch {}
+
+  let graphics = { controllers: [] };
+  try { graphics = await si.graphics(); } catch {}
+  const controllers = (graphics.controllers || []).map((controller) => ({
+    vendor: controller.vendor || null,
+    model: controller.model || controller.name || null,
+    vramBytes: megabytesToBytes(controller.memoryTotal || controller.vram),
+    freeVramBytes: megabytesToBytes(controller.memoryFree),
+    dynamic: !!controller.vramDynamic,
+    cores: controller.cores || null,
+    external: !!controller.external,
+  }));
+  const unifiedMemory = process.platform === 'darwin' && process.arch === 'arm64';
+  const dedicatedControllers = controllers.filter((controller) => !controller.dynamic && controller.vramBytes > 0);
+  const totalMemoryBytes = Number(memory.total) > 0 ? Number(memory.total) * 1024 : os.totalmem();
+  const freeMemoryKiB = Number.isFinite(Number(memory.free)) ? Number(memory.free) : 0;
+  const purgeableMemoryKiB = Number.isFinite(Number(memory.purgeable)) ? Number(memory.purgeable) : 0;
+  const availableMemoryBytes = (freeMemoryKiB + purgeableMemoryKiB) * 1024;
+
+  hardwareProfileCache = {
+    platform: process.platform,
+    arch: process.arch,
+    cpu: os.cpus()?.[0]?.model || null,
+    totalMemoryBytes,
+    availableMemoryBytes,
+    unifiedMemory,
+    controllers,
+    totalVramBytes: dedicatedControllers.reduce((sum, controller) => sum + controller.vramBytes, 0),
+    freeVramBytes: dedicatedControllers.reduce((sum, controller) => sum + controller.freeVramBytes, 0),
+    appliesToEndpoint: isLocalEndpoint(inferenceEndpoint()),
+  };
+  hardwareProfileCachedAt = Date.now();
+  return hardwareProfileCache;
+}
+
 // ---------- approval flow ----------
 const pendingApprovals = new Map();
 
@@ -515,6 +582,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
           generationMs: (chunk.eval_duration || 0) / 1e6,
           totalMs: (chunk.total_duration || 0) / 1e6,
         };
+        recordModelSpeed(model, stats, numCtx);
       }
     }
   }
@@ -2764,6 +2832,43 @@ ipcMain.handle('models:list', async () => {
     return { ok: true, models: (data.models || []).map((m) => m.name) };
   } catch (err) {
     return { ok: false, error: 'Cannot reach the inference endpoint at ' + inferenceEndpoint() + ' — is it running and Ollama-compatible?' };
+  }
+});
+
+ipcMain.handle('models:recommendations', async (_event, { mode = 'code' } = {}) => {
+  try {
+    const [tagsResponse, runningResponse, hardware] = await Promise.all([
+      ollamaJson('/api/tags'),
+      ollamaJson('/api/ps').catch(() => ({ models: [] })),
+      hardwareProfile(),
+    ]);
+    const tags = tagsResponse.models || [];
+    const showEntries = await Promise.all(tags.map(async (tag) => {
+      const name = tag.name || tag.model;
+      try { return [name, await ollamaJson('/api/show', { model: name })]; }
+      catch { return [name, {}]; }
+    }));
+    const requestedContext = runtimeSettings.mainContextCap > 0 ? runtimeSettings.mainContextCap : NUM_CTX_CAP;
+    const models = buildRecommendations({
+      tags,
+      shows: Object.fromEntries(showEntries),
+      running: runningResponse.models || [],
+      hardware,
+      benchmarkEntries: readBenchResults(),
+      speedSamples: Object.fromEntries(modelSpeedSamples),
+      presets: modelPresets,
+      requestedContext,
+      mode: mode === 'chat' ? 'chat' : 'code',
+    });
+    return {
+      ok: true,
+      models,
+      hardware,
+      requestedContext,
+      benchmarkAvailable: models.some((model) => !!model.brittainmark),
+    };
+  } catch (err) {
+    return { ok: false, error: `Could not build model recommendations: ${err.message || err}` };
   }
 });
 

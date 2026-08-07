@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   listModels: () => ipcRenderer.invoke('models:list'),
+  getModelRecommendations: (mode) => ipcRenderer.invoke('models:recommendations', { mode }),
   pickCwd: () => ipcRenderer.invoke('cwd:pick'),
   dirExists: (p) => ipcRenderer.invoke('dir:exists', p),
   send: (payload) => ipcRenderer.invoke('chat:send', payload),

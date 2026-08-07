@@ -114,3 +114,23 @@ test('settings are wired through the modal, bridge, persistence, and inference r
   assert.match(main, /keep_alive: runtimeSettings\.keepAlive/);
   assert.equal(packageJson.build.files.includes('settings.js'), true);
 });
+
+test('model recommendations are wired through the command, bridge, and packaged runtime', () => {
+  const html = source('renderer/index.html');
+  const renderer = source('renderer/app.js');
+  const preload = source('preload.js');
+  const main = source('main.js');
+  const packageJson = JSON.parse(source('package.json'));
+
+  assert.match(html, /id="overlay-body"/);
+  assert.match(renderer, /case 'recommendations'/);
+  assert.match(renderer, /window\.api\.getModelRecommendations\(appMode\)/);
+  assert.match(renderer, /function showRecommendations/);
+  assert.match(preload, /ipcRenderer\.invoke\('models:recommendations'/);
+  assert.match(main, /ipcMain\.handle\('models:recommendations'/);
+  assert.match(main, /process\.getSystemMemoryInfo/);
+  assert.match(main, /si\.graphics\(\)/);
+  assert.equal(packageJson.build.files.includes('recommendations.js'), true);
+  assert.equal(packageJson.build.files.includes('model-presets.json'), true);
+  assert.equal(packageJson.dependencies.systeminformation, '^5.33.1');
+});

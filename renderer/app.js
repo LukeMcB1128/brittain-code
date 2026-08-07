@@ -1577,6 +1577,7 @@ const SLASH_HELP = [
   '/usage — show how context and tokens have been spent across all agents',
   '/mcp [on|off <server>] — external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
+  '/recommendations — compare installed models for this computer',
   '/best [task] [use] — rank installed models by local benchmark score for a task; "use" switches to the top result',
   '/memory — view what the agent has remembered',
   '/export — save this chat as a markdown file',
@@ -1591,6 +1592,7 @@ const CHAT_SLASH_HELP = [
   '/usage — show context and token usage',
   '/mcp [on|off <server>] - external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
+  '/recommendations — compare installed models for this computer',
   '/export — save this chat as a markdown file',
   '/tools — list tools available to the app',
 ].join('\n');
@@ -1792,9 +1794,9 @@ async function handleSlash(raw) {
 
     case 'coder': {
       const models = [...modelSelect.options].map((o) => o.value);
-      if (!arg) return addInfo(`Coder model: ${coderModel}\nAvailable: ${models.join(', ')}\nUse /coder <name> to change. Restart Brittain Code after installing a new Ollama model so it appears here.`);
+      if (!arg) return addInfo(`Coder model: ${coderModel}\nAvailable: ${models.join(', ')}\nUse /coder <name> to change. Run /recommendations after installing a new Ollama model to refresh the list.`);
       const match = models.find((v) => v.includes(arg));
-      if (!match) return addError(`No installed model matching "${arg}". If Ollama just finished installing it, restart Brittain Code to refresh the model list.`);
+      if (!match) return addError(`No installed model matching "${arg}". If Ollama just finished installing it, run /recommendations to refresh the model list.`);
       coderModel = match;
       localStorage.setItem('coderModel', match);
       return addInfo('Coder model set to ' + match);
@@ -1829,6 +1831,22 @@ async function handleSlash(raw) {
       });
       lines.push('', `TOTAL: ~${res.totalTokens.toLocaleString()} / ${res.contextLength.toLocaleString()} tok (${res.percentUsed}% of window)`);
       return showOverlay('CONTEXT — what will actually be sent', lines.join('\n'));
+    }
+
+    case 'recommendations': {
+      if (busy) return addError('Wait for the current run to finish before checking model recommendations.');
+      setState('checking models…');
+      try {
+        await reloadModels(modelSelect.value);
+        const res = await window.api.getModelRecommendations(appMode);
+        if (!res.ok) return addError(res.error);
+        if (!res.models.length) return addInfo('No installed models were found.');
+        return showRecommendations(res);
+      } catch (err) {
+        return addError('Could not load model recommendations: ' + (err.message || err));
+      } finally {
+        setState('idle');
+      }
     }
 
     case 'best': {
@@ -1943,9 +1961,11 @@ $('commit-btn').addEventListener('click', () => {
 // ---------- overlay ----------
 function showOverlay(title, text, opts = {}) {
   $('overlay-title').textContent = title;
+  $('overlay-box').classList.remove('recommendations-overlay');
   const body = $('overlay-body');
+  body.className = '';
+  body.replaceChildren();
   if (opts.diff) {
-    body.innerHTML = '';
     for (const line of text.split('\n')) {
       const div = document.createElement('div');
       div.textContent = line || ' ';
@@ -1958,6 +1978,145 @@ function showOverlay(title, text, opts = {}) {
   } else {
     body.textContent = text;
   }
+  $('overlay').classList.remove('hidden');
+}
+
+function formatModelBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return 'UNKNOWN';
+  return (bytes / (1024 ** 3)).toFixed(bytes >= 10 * 1024 ** 3 ? 1 : 2) + ' GB';
+}
+
+function formatModelContext(tokens) {
+  if (!Number.isFinite(tokens) || tokens <= 0) return '?';
+  if (tokens >= 1024 && tokens % 1024 === 0) return (tokens / 1024) + 'K';
+  return tokens.toLocaleString();
+}
+
+function recommendationElement(tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== undefined) element.textContent = text;
+  return element;
+}
+
+function capabilityElement(value) {
+  if (value === true) return recommendationElement('span', 'recommendations-yes', 'YES');
+  if (value === false) return recommendationElement('span', 'recommendations-no', 'NO');
+  const unknown = recommendationElement('span', 'recommendations-unknown', '?');
+  unknown.title = 'The inference server did not report this capability.';
+  return unknown;
+}
+
+function recommendationHardwareText(hardware) {
+  if (!hardware.appliesToEndpoint) return 'Remote endpoint · server hardware is unknown';
+  const controllerNames = (hardware.controllers || []).map((controller) => controller.model).filter(Boolean);
+  const device = controllerNames.join(' + ') || hardware.cpu || 'Local computer';
+  if (hardware.unifiedMemory) return `${device} · ${formatModelBytes(hardware.totalMemoryBytes)} unified memory`;
+  if (hardware.totalVramBytes) {
+    return `${device} · ${formatModelBytes(hardware.totalVramBytes)} VRAM · ${formatModelBytes(hardware.totalMemoryBytes)} RAM`;
+  }
+  return `${device} · ${formatModelBytes(hardware.totalMemoryBytes)} RAM · no dedicated VRAM found`;
+}
+
+function appendRecommendationCell(row, child, className = '') {
+  const cell = recommendationElement('td', className);
+  if (child) cell.appendChild(child);
+  row.appendChild(cell);
+  return cell;
+}
+
+function showRecommendations(result) {
+  $('overlay-title').textContent = 'MODEL RECOMMENDATIONS';
+  $('overlay-box').classList.add('recommendations-overlay');
+  const body = $('overlay-body');
+  body.className = 'recommendations-view';
+  body.replaceChildren();
+
+  const summary = recommendationElement('div', 'recommendations-summary');
+  const hardware = recommendationElement('span', '', recommendationHardwareText(result.hardware));
+  const context = recommendationElement('span');
+  context.appendChild(recommendationElement('strong', '', 'CONTEXT '));
+  context.appendChild(document.createTextNode(`up to ${formatModelContext(result.requestedContext)}`));
+  summary.appendChild(hardware);
+  summary.appendChild(context);
+  body.appendChild(summary);
+
+  const wrap = recommendationElement('div', 'recommendations-table-wrap');
+  const table = recommendationElement('table', 'recommendations-table');
+  const head = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  for (const label of ['MODEL', 'MEMORY', 'TOOLS', 'VISION', 'SPEED', 'BRITTAINMARK', '']) {
+    headRow.appendChild(recommendationElement('th', '', label));
+  }
+  head.appendChild(headRow);
+  table.appendChild(head);
+
+  const tableBody = document.createElement('tbody');
+  for (const model of result.models) {
+    const row = document.createElement('tr');
+    if (model.recommended) row.classList.add('recommended-row');
+
+    const modelCell = recommendationElement('div', 'recommendations-model');
+    const nameLine = recommendationElement('div', 'recommendations-model-name', model.name);
+    if (model.recommended) nameLine.appendChild(recommendationElement('span', 'recommendations-badge best', 'BEST AVAILABLE'));
+    if (model.profile?.marker) nameLine.appendChild(recommendationElement('span', 'recommendations-badge', model.profile.marker));
+    modelCell.appendChild(nameLine);
+    const modelMeta = [model.parameterSize, model.quantization, model.capabilities.thinking ? 'THINK' : ''].filter(Boolean).join(' · ');
+    if (modelMeta) modelCell.appendChild(recommendationElement('div', 'recommendations-meta', modelMeta));
+    appendRecommendationCell(row, modelCell);
+
+    const memoryCell = recommendationElement('div');
+    memoryCell.appendChild(recommendationElement('div', 'recommendations-value', formatModelBytes(model.memory.bytes)));
+    const source = model.memory.source === 'measured' ? 'MEASURED' : model.memory.source === 'estimated' ? 'EST.' : 'UNKNOWN';
+    memoryCell.appendChild(recommendationElement('div', 'recommendations-meta', `${source} @ ${formatModelContext(model.memory.contextTokens)}`));
+    memoryCell.appendChild(recommendationElement('div', `recommendations-meta recommendations-fit-${model.fit.level}`, model.fit.label));
+    appendRecommendationCell(row, memoryCell);
+
+    appendRecommendationCell(row, capabilityElement(model.capabilities.tools));
+    appendRecommendationCell(row, capabilityElement(model.capabilities.vision));
+
+    const speedCell = recommendationElement('div');
+    if (model.speed) {
+      speedCell.appendChild(recommendationElement('div', 'recommendations-value', `${model.speed.tokensPerSecond.toFixed(1)} t/s`));
+      speedCell.appendChild(recommendationElement('div', 'recommendations-meta', `${model.speed.samples} MEASURED SAMPLE${model.speed.samples === 1 ? '' : 'S'}`));
+    } else {
+      speedCell.appendChild(recommendationElement('div', 'recommendations-unknown', 'NOT MEASURED'));
+      speedCell.appendChild(recommendationElement('div', 'recommendations-meta', 'RUN MODEL TO LEARN'));
+    }
+    appendRecommendationCell(row, speedCell);
+
+    const benchmarkCell = recommendationElement('div');
+    if (model.brittainmark) {
+      benchmarkCell.appendChild(recommendationElement('div', 'recommendations-value', `${model.brittainmark.score}/100`));
+      benchmarkCell.appendChild(recommendationElement('div', 'recommendations-meta', `${model.brittainmark.tasks} TASK${model.brittainmark.tasks === 1 ? '' : 'S'} · ${model.brittainmark.runs} RUN${model.brittainmark.runs === 1 ? '' : 'S'}`));
+    } else {
+      benchmarkCell.appendChild(recommendationElement('div', 'recommendations-unknown', 'NOT TESTED'));
+    }
+    appendRecommendationCell(row, benchmarkCell);
+
+    const useButton = recommendationElement('button', 'recommendations-use', modelSelect.value === model.name ? 'ACTIVE' : 'USE');
+    useButton.type = 'button';
+    useButton.disabled = modelSelect.value === model.name;
+    useButton.addEventListener('click', () => {
+      modelSelect.value = model.name;
+      modelSelect.dispatchEvent(new Event('change'));
+      hideOverlay();
+      addInfo('Model set to ' + model.name);
+    });
+    appendRecommendationCell(row, useButton);
+    tableBody.appendChild(row);
+  }
+  table.appendChild(tableBody);
+  wrap.appendChild(table);
+  body.appendChild(wrap);
+
+  const noteParts = [
+    'Memory estimates include model weights, an f16 KV cache, and runtime overhead.',
+    'Measured values come from Ollama while a model is loaded.',
+    'Speed uses responses from this app run.',
+  ];
+  if (!result.benchmarkAvailable) noteParts.push('No local Brittainmark v3 results matched these models.');
+  body.appendChild(recommendationElement('div', 'recommendations-note', noteParts.join(' ')));
   $('overlay').classList.remove('hidden');
 }
 
