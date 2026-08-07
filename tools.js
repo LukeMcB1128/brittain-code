@@ -1,8 +1,8 @@
 // Brittain Code — agent tools.
-// Everything the agent can do lives here: tool schemas (TOOL_DEFS), which ones
-// need user approval (RISKY_TOOLS), and their implementations (executeTool).
-// Add a new tool by updating TOOL_DEFS and executeTool together, and adding it
-// to RISKY_TOOLS if it modifies files or runs commands.
+// Tool schemas and implementations live here. Role and approval policy lives
+// in src/tools/policy.js. Add a new tool to TOOL_DEFS and executeTool together,
+// then update the policy if the tool changes files, runs commands, or belongs
+// to a restricted role.
 //
 // This module is deliberately electron-free so it can be tested with plain
 // node — main.js injects the userData directory via initTools() at startup.
@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const net = require('net');
 const dns = require('dns').promises;
 const { execFile, exec, spawn } = require('child_process');
+const { createToolPolicy } = require('./src/tools/policy');
 
 const MAX_TOOL_OUTPUT = 40_000;   // chars of tool output fed back to the model
 
@@ -1152,35 +1153,6 @@ const TOOL_DEFS = [
   },
 ];
 
-const NETWORK_TOOLS = new Set(['web_search', 'web_fetch']);
-const SENSITIVE_TOOLS = new Set(['get_environment_variables', 'list_processes']);
-const DESTRUCTIVE_TOOLS = new Set(['revert_to_last_commit']);
-
-const RISKY_TOOLS = new Set([
-  'write_file',
-  'run_command',
-  'run_project_check',
-  'start_process',
-  'stop_process',
-  'local_http_request',
-  'append_file',
-  'create_directory',
-  'delete_file',
-  'copy_file',
-  'move_file',
-  'edit_file',
-  'edit_files',
-  'create_git_branch',
-  'revert_to_last_commit',
-  'get_environment_variables',
-  'list_processes',
-  'initiate_research_session',
-  'record_observation',
-  'finalize_research',
-  'web_search',
-  'web_fetch',
-]);
-
 async function executeTool(name, args, cwd) {
   // futility tracking must see every call so any non-write action resets it
   const futilityNote = trackRewrite(name, name === 'write_file' && args?.path ? resolveInside(cwd, args.path) : '');
@@ -2114,84 +2086,20 @@ function gitRun(args, cwd, env) {
   });
 }
 
-// The restricted toolset available to subagents (run_subagent): read/search/
-// analyze only. No writes, shell, ask_user, or nesting.
-const SUBAGENT_TOOL_NAMES = new Set([
-  'read_file', 'browse_files', 'search_files', 'search_local_docs',
-  'get_file_lines', 'file_metadata',
-  'get_git_log', 'read_git_diff', 'check_port_usage',
-]);
-const SUBAGENT_TOOLS = TOOL_DEFS.filter((d) => SUBAGENT_TOOL_NAMES.has(d.function.name));
-
-// Scoped toolsets for /orchestrate. The planner can inspect and delegate but
-// cannot modify the project. The coder can change and verify code, but cannot
-// use the network, inspect sensitive host state, commit, revert, or spawn more
-// agents. submit_implementation_plan is handled by main.js because it controls
-// the orchestration state machine rather than touching the filesystem.
-const SUBMIT_IMPLEMENTATION_PLAN_TOOL = {
-  type: 'function',
-  function: {
-    name: 'submit_implementation_plan',
-    description: 'Finish planning by submitting an ordered implementation plan. Call this exactly once after inspecting enough of the project. Tasks run sequentially, so later tasks may depend on earlier tasks.',
-    parameters: {
-      type: 'object',
-      properties: {
-        summary: { type: 'string', description: 'Short architectural summary of the approach.' },
-        tasks: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 6,
-          items: {
-            type: 'object',
-            properties: {
-              title: { type: 'string', description: 'Short task title.' },
-              objective: { type: 'string', description: 'Concrete implementation objective for the coding model.' },
-              acceptance_criteria: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Observable conditions required for this task to be complete.',
-              },
-              relevant_files: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Project-relative files the coder should inspect first. This is guidance, not a write allowlist.',
-              },
-              constraints: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Important project or safety constraints for this task.',
-              },
-            },
-            required: ['title', 'objective', 'acceptance_criteria'],
-          },
-        },
-      },
-      required: ['summary', 'tasks'],
-    },
-  },
-};
-
-const ORCHESTRATOR_TOOL_NAMES = new Set([
-  ...SUBAGENT_TOOL_NAMES,
-  'run_subagent', 'web_search', 'web_fetch',
-]);
-const ORCHESTRATOR_TOOLS = [
-  ...TOOL_DEFS.filter((d) => ORCHESTRATOR_TOOL_NAMES.has(d.function.name)),
-  SUBMIT_IMPLEMENTATION_PLAN_TOOL,
-];
-
-const CODER_TOOL_NAMES = new Set([
-  'read_file', 'write_file', 'edit_file', 'edit_files', 'append_file',
-  'create_directory', 'delete_file', 'copy_file', 'move_file',
-  'browse_files', 'search_files', 'search_local_docs', 'get_file_lines', 'file_metadata',
-  'run_command', 'run_project_check', 'git_status', 'read_git_diff',
-]);
-const CODER_TOOLS = TOOL_DEFS.filter((d) => CODER_TOOL_NAMES.has(d.function.name));
-
-// Folder-free Chat mode can ask the user questions and optionally research the
-// public web. It never receives project, shell, Git, process, or memory tools.
-const CHAT_TOOL_NAMES = new Set(['ask_user', 'web_search', 'web_fetch']);
-const CHAT_TOOLS = TOOL_DEFS.filter((d) => CHAT_TOOL_NAMES.has(d.function.name));
+const {
+  NETWORK_TOOLS,
+  SENSITIVE_TOOLS,
+  DESTRUCTIVE_TOOLS,
+  RISKY_TOOLS,
+  SUBAGENT_TOOLS,
+  SUBAGENT_TOOL_NAMES,
+  ORCHESTRATOR_TOOLS,
+  ORCHESTRATOR_TOOL_NAMES,
+  CODER_TOOLS,
+  CODER_TOOL_NAMES,
+  CHAT_TOOLS,
+  CHAT_TOOL_NAMES,
+} = createToolPolicy(TOOL_DEFS);
 
 module.exports = {
   initTools,

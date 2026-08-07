@@ -27,6 +27,7 @@
       "tools.js",
       "mcp.js",
       "preload.js",
+      "src/**",
       "renderer/**"
     ],
     "asarUnpack": [

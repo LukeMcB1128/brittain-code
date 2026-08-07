@@ -68,13 +68,14 @@ test('Code and Chat modes are wired through UI, persistence, and the agent bound
   const html = source('renderer/index.html');
   const renderer = source('renderer/app.js');
   const main = source('main.js');
+  const historyStore = source('src/main/history-store.js');
 
   assert.match(html, /id="mode-code"/);
   assert.match(html, /id="mode-chat"/);
   assert.match(renderer, /mode: appMode/);
   assert.match(renderer, /appMode === 'code' && !cwd/);
   assert.match(renderer, /appMode === 'chat'\s*\? chatEntry\.mode === 'chat'\s*:\s*chatEntry\.mode !== 'chat'/);
-  assert.match(main, /mode: meta\.mode === 'chat' \? 'chat' : 'code'/);
+  assert.match(historyStore, /mode: meta\.mode === 'chat' \? 'chat' : 'code'/);
   assert.match(main, /const runMode = mode === 'chat' \? 'chat' : 'code'/);
   assert.match(main, /const modeTools = chatMode \? CHAT_TOOLS : TOOL_DEFS/);
   assert.match(main, /if \(!activeToolNames\.has\(name\)\)/);
@@ -118,19 +119,28 @@ test('settings are wired through the modal, bridge, persistence, and inference r
 test('model recommendations are wired through the command, bridge, and packaged runtime', () => {
   const html = source('renderer/index.html');
   const renderer = source('renderer/app.js');
+  const recommendationsView = source('renderer/features/recommendations.js');
   const preload = source('preload.js');
   const main = source('main.js');
+  const hardwareProfile = source('src/main/hardware-profile.js');
+  const recommendationsService = source('src/main/recommendations-service.js');
   const packageJson = JSON.parse(source('package.json'));
 
   assert.match(html, /id="overlay-body"/);
-  assert.match(renderer, /case 'recommendations'/);
+  assert.match(html, /features\/recommendations\.js/);
+  assert.match(html, /styles\/recommendations\.css/);
+  assert.match(renderer, /case 'recs'/);
   assert.match(renderer, /window\.api\.getModelRecommendations\(appMode\)/);
   assert.match(renderer, /function showRecommendations/);
+  assert.match(recommendationsView, /global\.RecommendationsView/);
   assert.match(preload, /ipcRenderer\.invoke\('models:recommendations'/);
   assert.match(main, /ipcMain\.handle\('models:recommendations'/);
-  assert.match(main, /process\.getSystemMemoryInfo/);
-  assert.match(main, /si\.graphics\(\)/);
+  assert.match(main, /createRecommendationsService/);
+  assert.match(hardwareProfile, /processRef\.getSystemMemoryInfo/);
+  assert.match(hardwareProfile, /systemInformationRef\.graphics\(\)/);
+  assert.match(recommendationsService, /buildRecommendations/);
   assert.equal(packageJson.build.files.includes('recommendations.js'), true);
   assert.equal(packageJson.build.files.includes('model-presets.json'), true);
+  assert.equal(packageJson.build.files.includes('src/**'), true);
   assert.equal(packageJson.dependencies.systeminformation, '^5.33.1');
 });

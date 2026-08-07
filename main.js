@@ -5,15 +5,18 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const si = require('systeminformation');
 const { McpManager } = require('./mcp');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
 const { readActiveMission, writeActiveMission, interruptRunningMission } = require('./missions');
-const { buildRecommendations, isLocalEndpoint } = require('./recommendations');
-const modelPresets = require('./model-presets.json');
+const { isLocalEndpoint } = require('./recommendations');
+const { createHardwareProfile } = require('./src/main/hardware-profile');
+const { createHistoryStore } = require('./src/main/history-store');
+const { createRecommendationsService } = require('./src/main/recommendations-service');
+const { queryBenchmarks, readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
+const { createCheckpointService } = require('./src/main/checkpoint-service');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 // The context window we actually request from Ollama. Without an explicit
@@ -30,6 +33,11 @@ let settingsUserDataDir = '';
 function inferenceEndpoint() {
   return runtimeSettings.inferenceEndpoint;
 }
+
+const hardwareProfile = createHardwareProfile({
+  getEndpoint: inferenceEndpoint,
+  isLocalEndpoint,
+});
 
 function compactThreshold() {
   return runtimeSettings.compactThreshold;
@@ -390,58 +398,6 @@ async function runtimeMetadata(model) {
   };
   runtimeMetadataCache.set(model, metadata);
   return metadata;
-}
-
-let hardwareProfileCache = null;
-let hardwareProfileCachedAt = 0;
-
-function megabytesToBytes(value) {
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? Math.round(number * 1024 ** 2) : 0;
-}
-
-async function hardwareProfile() {
-  if (hardwareProfileCache && Date.now() - hardwareProfileCachedAt < 60_000) {
-    return { ...hardwareProfileCache, appliesToEndpoint: isLocalEndpoint(inferenceEndpoint()) };
-  }
-
-  let memory = {};
-  try {
-    memory = typeof process.getSystemMemoryInfo === 'function' ? process.getSystemMemoryInfo() : {};
-  } catch {}
-
-  let graphics = { controllers: [] };
-  try { graphics = await si.graphics(); } catch {}
-  const controllers = (graphics.controllers || []).map((controller) => ({
-    vendor: controller.vendor || null,
-    model: controller.model || controller.name || null,
-    vramBytes: megabytesToBytes(controller.memoryTotal || controller.vram),
-    freeVramBytes: megabytesToBytes(controller.memoryFree),
-    dynamic: !!controller.vramDynamic,
-    cores: controller.cores || null,
-    external: !!controller.external,
-  }));
-  const unifiedMemory = process.platform === 'darwin' && process.arch === 'arm64';
-  const dedicatedControllers = controllers.filter((controller) => !controller.dynamic && controller.vramBytes > 0);
-  const totalMemoryBytes = Number(memory.total) > 0 ? Number(memory.total) * 1024 : os.totalmem();
-  const freeMemoryKiB = Number.isFinite(Number(memory.free)) ? Number(memory.free) : 0;
-  const purgeableMemoryKiB = Number.isFinite(Number(memory.purgeable)) ? Number(memory.purgeable) : 0;
-  const availableMemoryBytes = (freeMemoryKiB + purgeableMemoryKiB) * 1024;
-
-  hardwareProfileCache = {
-    platform: process.platform,
-    arch: process.arch,
-    cpu: os.cpus()?.[0]?.model || null,
-    totalMemoryBytes,
-    availableMemoryBytes,
-    unifiedMemory,
-    controllers,
-    totalVramBytes: dedicatedControllers.reduce((sum, controller) => sum + controller.vramBytes, 0),
-    freeVramBytes: dedicatedControllers.reduce((sum, controller) => sum + controller.freeVramBytes, 0),
-    appliesToEndpoint: isLocalEndpoint(inferenceEndpoint()),
-  };
-  hardwareProfileCachedAt = Date.now();
-  return hardwareProfileCache;
 }
 
 // ---------- approval flow ----------
@@ -1102,70 +1058,14 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
 // hidden ref under refs/brittain/checkpoints/ — using a TEMPORARY index so the
 // user's real index, branch, and commit history are never touched. UNDO RUN
 // restores the tree to the snapshot even if the user never committed.
-const CHECKPOINT_KEEP = 20;
-let lastCheckpoint = null; // { ref, cwd, at }
-
-async function createCheckpoint(cwd) {
-  try {
-    if (!(await gitRun(['rev-parse', '--git-dir'], cwd)).ok) return null; // not a repo
-    const tmpIndex = path.join(app.getPath('temp'), 'brittain-ckpt-' + Date.now() + '-' + Math.random().toString(36).slice(2));
-    const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
-    try {
-      const add = await gitRun(['add', '-A', '--', '.'], cwd, env);
-      if (!add.ok) return null;
-      const tree = await gitRun(['write-tree'], cwd, env);
-      if (!tree.ok) return null;
-      const head = await gitRun(['rev-parse', 'HEAD'], cwd);
-      const parentArgs = head.ok ? ['-p', head.out.trim()] : [];
-      const commit = await gitRun(['commit-tree', tree.out.trim(), ...parentArgs, '-m', 'brittain checkpoint ' + new Date().toISOString()], cwd, env);
-      if (!commit.ok) return null;
-      const ref = 'refs/brittain/checkpoints/' + Date.now();
-      if (!(await gitRun(['update-ref', ref, commit.out.trim()], cwd)).ok) return null;
-      lastCheckpoint = { ref, cwd, at: Date.now() };
-      win.webContents.send('checkpoint:state', { available: true, cwd });
-      pruneCheckpoints(cwd); // fire and forget
-      return lastCheckpoint;
-    } finally {
-      try { fs.unlinkSync(tmpIndex); } catch {}
-    }
-  } catch {
-    return null;
-  }
-}
-
-async function pruneCheckpoints(cwd) {
-  const list = await gitRun(['for-each-ref', '--format=%(refname)', 'refs/brittain/checkpoints/'], cwd);
-  if (!list.ok) return;
-  const refs = list.out.split('\n').filter(Boolean).sort(); // timestamped names sort chronologically
-  for (const ref of refs.slice(0, Math.max(0, refs.length - CHECKPOINT_KEEP))) {
-    await gitRun(['update-ref', '-d', ref], cwd);
-  }
-}
-
-ipcMain.handle('checkpoint:undo', async (_e, cwd) => {
-  const target = lastCheckpoint;
-  if (!target || target.cwd !== cwd) return { ok: false, error: 'No checkpoint for this folder in this session.' };
-  try {
-    const stat = await gitRun(['diff', '--shortstat', target.ref, '--', '.'], cwd);
-    // snapshot the CURRENT state first, so UNDO itself is undoable
-    await createCheckpoint(cwd);
-    // restore tracked content (worktree only — the user's index stays theirs)
-    const restore = await gitRun(['restore', '--source=' + target.ref, '--worktree', '--', '.'], cwd);
-    if (!restore.ok) return { ok: false, error: restore.err || 'restore failed' };
-    // delete files that exist now but did not exist at the checkpoint
-    const inRef = await gitRun(['ls-tree', '-r', '--name-only', target.ref], cwd);
-    const nowFiles = await gitRun(['ls-files', '--cached', '--others', '--exclude-standard'], cwd);
-    if (inRef.ok && nowFiles.ok) {
-      const keep = new Set(inRef.out.split('\n').filter(Boolean));
-      for (const f of nowFiles.out.split('\n').filter(Boolean)) {
-        if (!keep.has(f)) { try { fs.unlinkSync(path.join(cwd, f)); } catch {} }
-      }
-    }
-    return { ok: true, restoredFrom: new Date(target.at).toLocaleTimeString(), changes: (stat.out || '').trim() || 'no differences detected' };
-  } catch (err) {
-    return { ok: false, error: String(err.message || err) };
-  }
+const checkpointService = createCheckpointService({
+  gitRun,
+  getTempDirectory: () => app.getPath('temp'),
+  publishState: (state) => win.webContents.send('checkpoint:state', state),
 });
+const createCheckpoint = checkpointService.create;
+
+ipcMain.handle('checkpoint:undo', (_e, cwd) => checkpointService.undo(cwd));
 
 // ---------- auto-branch (Tier 1 safety, toggleable) ----------
 async function maybeAutoBranch(cwd, taskText, enabled) {
@@ -1190,6 +1090,7 @@ async function emitRunReport(cwd, runLog) {
   if (!runLog || (!runLog.mutations.size && !runLog.commands.length)) return; // read-only turns stay quiet
   const lines = ['\u2501 RUN REPORT \u2501'];
   let diffPart = '';
+  const lastCheckpoint = checkpointService.current();
   if (lastCheckpoint && lastCheckpoint.cwd === cwd) {
     // Scope to cwd: when the project folder sits INSIDE a larger repo (e.g.
     // ~/Downloads is itself a repo), an unscoped diff reports every pending
@@ -2595,45 +2496,9 @@ ipcMain.handle('mcp:openConfig', () => {
 // never bundled into a packaged build — benchmarking is a source-tree
 // workflow, not a shipped feature). Missing file is a normal, expected state,
 // not an error: it just means no benchmarks have been run yet.
-function median(nums) {
-  const sorted = [...nums].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
+const readBenchResults = () => readBenchResultsFile(path.join(__dirname, 'benchmark', 'results.json'));
 
-function readBenchResults() {
-  try {
-    const raw = fs.readFileSync(path.join(__dirname, 'benchmark', 'results.json'), 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-ipcMain.handle('bench:query', (_e, taskFilter) => {
-  const entries = readBenchResults();
-  if (!entries.length) return { ok: true, available: false, tasks: [], rows: [] };
-
-  const tasks = [...new Set(entries.map((e) => e.task).filter(Boolean))].sort();
-  const filtered = taskFilter ? entries.filter((e) => e.task === taskFilter) : entries;
-
-  // group by (task, model) — median score is far more robust than any single
-  // run, given how much variance one glitch-token stumble can introduce
-  const groups = new Map();
-  for (const e of filtered) {
-    if (typeof e.total !== 'number' || !e.model) continue;
-    const key = e.task + ' ' + e.model;
-    if (!groups.has(key)) groups.set(key, { task: e.task, model: e.model, mode: e.mode, scores: [] });
-    groups.get(key).scores.push(e.total);
-  }
-
-  const rows = [...groups.values()]
-    .map((g) => ({ task: g.task, model: g.model, mode: g.mode, runs: g.scores.length, median: median(g.scores) }))
-    .sort((a, b) => b.median - a.median || b.runs - a.runs);
-
-  return { ok: true, available: true, tasks, rows };
-});
+ipcMain.handle('bench:query', (_e, taskFilter) => queryBenchmarks(readBenchResults(), taskFilter));
 
 // true when running from source (npm start) rather than the installed build
 ipcMain.handle('app:isDev', () => !app.isPackaged);
@@ -2749,82 +2614,15 @@ ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage) => {
 // ---------- durable chat storage ----------
 // One JSON file per chat in userData/chats/ plus a light index.json holding
 // only sidebar metadata. Saves rewrite one chat's file, never the whole history.
-function chatsDir() {
-  return path.join(app.getPath('userData'), 'chats');
-}
-
-function safeChatId(id) {
-  return String(id).replace(/[^\w.-]/g, '');
-}
-
-function readChatIndex() {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(chatsDir(), 'index.json'), 'utf8'));
-  } catch {
-    return [];
-  }
-}
-
-function writeChatIndex(list) {
-  fs.mkdirSync(chatsDir(), { recursive: true });
-  fs.writeFileSync(path.join(chatsDir(), 'index.json'), JSON.stringify(list, null, 2), 'utf8');
-}
-
-ipcMain.handle('history:list', () => readChatIndex());
-
-ipcMain.handle('history:save', async (_e, meta, convo) => {
-  try {
-    const id = safeChatId(meta.id);
-    if (!id) return { ok: false, error: 'invalid chat id' };
-    const entry = {
-      id,
-      title: meta.title || 'Chat',
-      model: meta.model || '',
-      mode: meta.mode === 'chat' ? 'chat' : 'code',
-      cwd: meta.cwd || '',
-      think: !!meta.think,
-      autoApprove: !!meta.autoApprove,
-      timestamp: meta.timestamp || new Date().toISOString(),
-    };
-    const mainRuntime = await runtimeMetadata(meta.model || '');
-    const roleNames = {
-      main: meta.model || '',
-      coder: meta.coderModel || '',
-      subagent: meta.subModel || '',
-    };
-    const roleEntries = await Promise.all(Object.entries(roleNames).map(async ([role, name]) => [role, (await runtimeMetadata(name)).model]));
-    const detailed = {
-      subModel: meta.subModel || '',
-      coderModel: meta.coderModel || '',
-      onlineResearch: !!meta.onlineResearch,
-      runMetrics: meta.runMetrics || null,
-      runtime: { ...mainRuntime, roles: Object.fromEntries(roleEntries) },
-    };
-    fs.mkdirSync(chatsDir(), { recursive: true });
-    fs.writeFileSync(path.join(chatsDir(), id + '.json'), JSON.stringify({ ...entry, ...detailed, conversation: convo || [] }), 'utf8');
-    const index = readChatIndex().filter((c) => c.id !== id);
-    index.push(entry);
-    writeChatIndex(index);
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+const historyStore = createHistoryStore({
+  userDataDir: () => app.getPath('userData'),
+  runtimeMetadata,
 });
 
-ipcMain.handle('history:load', (_e, id) => {
-  try {
-    const chat = JSON.parse(fs.readFileSync(path.join(chatsDir(), safeChatId(id) + '.json'), 'utf8'));
-    return { ok: true, chat };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('history:delete', (_e, id) => {
-  try { fs.unlinkSync(path.join(chatsDir(), safeChatId(id) + '.json')); } catch {}
-  writeChatIndex(readChatIndex().filter((c) => c.id !== safeChatId(id)));
-  return { ok: true };
-});
+ipcMain.handle('history:list', () => historyStore.list());
+ipcMain.handle('history:save', (_e, meta, convo) => historyStore.save(meta, convo));
+ipcMain.handle('history:load', (_e, id) => historyStore.load(id));
+ipcMain.handle('history:delete', (_e, id) => historyStore.remove(id));
 
 ipcMain.handle('models:list', async () => {
   try {
@@ -2835,119 +2633,20 @@ ipcMain.handle('models:list', async () => {
   }
 });
 
-function compactRecommendationShow(show) {
-  return {
-    details: show?.details || {},
-    capabilities: show?.capabilities || [],
-    model_info: Object.fromEntries(Object.entries(show?.model_info || {}).filter(([key]) => !key.startsWith('tokenizer.'))),
-    tensors: show?.tensors || [],
-  };
-}
-
-function needsVerboseRecommendationShow(show) {
-  const info = show?.model_info || {};
-  const hasSlidingWindow = Object.entries(info).some(([key, value]) => key.endsWith('.attention.sliding_window') && Number(value) > 0);
-  const missingPattern = Object.entries(info).some(([key, value]) => key.endsWith('.attention.sliding_window_pattern') && value === null);
-  const hasSlidingKeyLength = Object.keys(info).some((key) => key.endsWith('.attention.key_length_swa'));
-  return hasSlidingWindow && missingPattern && !hasSlidingKeyLength;
-}
-
-function sameRecommendationHardware(recorded, current) {
-  if (!recorded || !current) return false;
-  if (recorded.platform && recorded.platform !== current.platform) return false;
-  if (recorded.arch && recorded.arch !== current.arch) return false;
-  const recordedMemory = Number(recorded.totalMemoryBytes) || 0;
-  const currentMemory = Number(current.totalMemoryBytes) || 0;
-  return !recordedMemory || !currentMemory || Math.abs(recordedMemory - currentMemory) / currentMemory < 0.1;
-}
-
-function readHistoricalModelSpeedSamples(hardware) {
-  const directories = [{ path: chatsDir(), defaultContext: NUM_CTX_CAP }];
-  const runRoot = path.join(__dirname, 'benchmark', 'runs');
-  try {
-    for (const entry of fs.readdirSync(runRoot, { withFileTypes: true })) {
-      if (entry.isDirectory()) directories.push({ path: path.join(runRoot, entry.name, 'chats'), defaultContext: 32768 });
-    }
-  } catch {}
-
-  const samples = {};
-  for (const directory of directories) {
-    let files = [];
-    try { files = fs.readdirSync(directory.path).filter((name) => name.endsWith('.json')); }
-    catch { continue; }
-    for (const file of files) {
-      try {
-        const chat = JSON.parse(fs.readFileSync(path.join(directory.path, file), 'utf8'));
-        if (!sameRecommendationHardware(chat.runtime?.hardware, hardware)) continue;
-        const usage = chat.runMetrics?.main;
-        const generated = Number(usage?.gen) || 0;
-        const generationMs = Number(usage?.generationMs) || 0;
-        if (generated < 8 || generationMs <= 0) continue;
-        const name = String(chat.model || chat.runtime?.model?.name || '').replace(/^ollama:/i, '').trim().toLowerCase();
-        if (!name) continue;
-        const configuredContext = Number(chat.runtime?.settings?.requestedContextCap) || directory.defaultContext;
-        const nativeContext = Number(chat.runtime?.model?.nativeContext) || configuredContext;
-        if (!samples[name]) samples[name] = [];
-        samples[name].push({
-          tokensPerSecond: generated / (generationMs / 1000),
-          contextTokens: Math.min(configuredContext, nativeContext),
-          recordedAt: chat.timestamp || null,
-          digest: chat.runtime?.model?.digest || null,
-        });
-      } catch {}
-    }
-  }
-  return samples;
-}
-
-ipcMain.handle('models:recommendations', async (_event, { mode = 'code' } = {}) => {
-  try {
-    const [tagsResponse, runningResponse, hardware] = await Promise.all([
-      ollamaJson('/api/tags'),
-      ollamaJson('/api/ps').catch(() => ({ models: [] })),
-      hardwareProfile(),
-    ]);
-    const tags = tagsResponse.models || [];
-    const showEntries = await Promise.all(tags.map(async (tag) => {
-      const name = tag.name || tag.model;
-      try {
-        let show = await ollamaJson('/api/show', { model: name });
-        if (needsVerboseRecommendationShow(show)) show = await ollamaJson('/api/show', { model: name, verbose: true });
-        return [name, compactRecommendationShow(show)];
-      }
-      catch { return [name, {}]; }
-    }));
-    const requestedContext = runtimeSettings.mainContextCap > 0 ? runtimeSettings.mainContextCap : NUM_CTX_CAP;
-    const kvCacheType = isLocalEndpoint(inferenceEndpoint()) ? process.env.OLLAMA_KV_CACHE_TYPE || 'f16' : 'f16';
-    const speedSamples = readHistoricalModelSpeedSamples(hardware);
-    for (const [name, samples] of modelSpeedSamples) {
-      const normalized = String(name).replace(/^ollama:/i, '').trim().toLowerCase();
-      speedSamples[normalized] = [...(speedSamples[normalized] || []), ...samples].slice(-24);
-    }
-    const models = buildRecommendations({
-      tags,
-      shows: Object.fromEntries(showEntries),
-      running: runningResponse.models || [],
-      hardware,
-      benchmarkEntries: readBenchResults(),
-      speedSamples,
-      presets: modelPresets,
-      requestedContext,
-      mode: mode === 'chat' ? 'chat' : 'code',
-      kvCacheType,
-    });
-    return {
-      ok: true,
-      models,
-      hardware,
-      requestedContext,
-      kvCacheType,
-      benchmarkAvailable: models.some((model) => !!model.brittainmark),
-    };
-  } catch (err) {
-    return { ok: false, error: `Could not build model recommendations: ${err.message || err}` };
-  }
+const getModelRecommendations = createRecommendationsService({
+  ollamaJson,
+  hardwareProfile,
+  getRuntimeSettings: () => runtimeSettings,
+  getEndpoint: inferenceEndpoint,
+  isLocalEndpoint,
+  getHistoryDirectory: historyStore.directory,
+  benchmarkDirectory: path.join(__dirname, 'benchmark'),
+  readBenchResults,
+  modelSpeedSamples,
+  defaultContext: NUM_CTX_CAP,
 });
+
+ipcMain.handle('models:recommendations', (_event, options) => getModelRecommendations(options));
 
 // ---------- git integration (gitRun lives in tools.js) ----------
 ipcMain.handle('git:status', async (_e, cwd) => {
