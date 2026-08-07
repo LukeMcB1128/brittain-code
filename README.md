@@ -90,6 +90,7 @@ Type these in the message box:
 | `/coder [name]` | Show or set the writable coding-worker model (default qwen3-coder:30b when installed) |
 | `/subagent [name]` | Show or set the subagent/verifier model (default qwen3:8b) |
 | `/loop [n] <goal>` | Work toward a goal with the selected model for up to n iterations (default 8). Turn AUTO-APPROVE on for unattended runs |
+| `/plan <goal>` | Inspect the project and show an editable implementation plan. Run, edit, or cancel it before any coding starts |
 | `/orchestrate <goal>` | Use the selected model as a read-only planner, delegate sequential tasks to the coder model, and verify each task with the subagent model |
 | `/mission [n] <goal>` | Run a persisted, visible coder mission for up to n iterations; `/mission status` inspects it and `/mission stop` cancels it |
 | `/usage` | Show context remaining and token spend across planner/main agent, scouts, coders, and verifier |
@@ -103,7 +104,7 @@ Type these in the message box:
 
 ## Offline orchestration
 
-`/orchestrate` separates planning from implementation while keeping inference local by default. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. Tasks run sequentially to avoid loading multiple large models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at the configured compaction threshold, with at most two compactions per stage; every coder task still starts with a fresh context. The final chat response stays concise; use DIFF when you want the complete patch and working-tree detail.
+`/orchestrate` separates planning from implementation while keeping inference local by default. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. `/plan` runs only the inspection stage and shows the result in an editable card. **RUN** sends that exact approved plan to the coder without running the planner again; **CANCEL** changes no files. Tasks run sequentially to avoid loading multiple large models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at the configured compaction threshold, with at most two compactions per stage; every coder task still starts with a fresh context. The final chat response stays concise; use DIFF when you want the complete patch and working-tree detail.
 
 `/loop` is the original single-model, conversation-preserving loop. For planned, verifier-guided implementation and repair work, use `/mission`: it records its goal, project, models, phase, latest evidence, and final report under Brittain Code’s application-data directory. It keeps the same tool permissions and approval rules as ordinary Code mode. Only one mission can run at a time; closing the app marks an active mission as interrupted rather than attempting to resume it. Missions do not run after the app exits and have no messaging, scheduling, or external-notification integration.
 

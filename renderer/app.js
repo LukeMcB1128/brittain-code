@@ -30,6 +30,8 @@ let settingsDefaults = null;
 let currentModels = [];
 let missionCard = null;
 let latestMission = null;
+let pendingPlanDraft = null;
+let pendingPlanCard = null;
 
 setAppMode(appMode, false, false);
 
@@ -258,7 +260,14 @@ function setAppMode(mode, persist = true, refreshHistory = true) {
 async function chooseAppMode(mode) {
   if (busy || mode === appMode) return;
   const conversation = await window.api.getConversation();
-  if (conversation.length && !(await confirmDialog(`Switch to ${mode.toUpperCase()} and start a new session?\n\nYour current chat is already saved in History.`, { okLabel: 'SWITCH' }))) return;
+  const consequences = [];
+  if (conversation.length) consequences.push('Your current chat is already saved in History.');
+  if (pendingPlanDraft) consequences.push('The current plan draft will be cancelled.');
+  if (consequences.length && !(await confirmDialog(
+    `Switch to ${mode.toUpperCase()} and start a new session?\n\n${consequences.join('\n')}`,
+    { okLabel: 'SWITCH' },
+  ))) return;
+  if (pendingPlanDraft) clearPendingPlan();
   setAppMode(mode);
   if (conversation.length) await newSession();
   else {
@@ -311,6 +320,10 @@ function confirmDialog(message, { okLabel = 'OK', cancelLabel = 'CANCEL', danger
 }
 
 function setCwd(p) {
+  if (pendingPlanDraft && pendingPlanDraft.cwd !== p) {
+    clearPendingPlan();
+    addInfo('PLAN: draft cancelled because the working directory changed.');
+  }
   cwd = p;
   localStorage.setItem('cwd', p);
   const parts = p.split('/');
@@ -515,6 +528,7 @@ async function loadChat(chatId) {
   if (busy) return;
   const res = await window.api.historyLoad(chatId);
   if (!res.ok) return addError('Could not load chat: ' + res.error);
+  clearPendingPlan();
   const saved = res.chat;
   // Set this before any rendering or mode/directory synchronization so a
   // mission card can never be carried over from the previously open chat.
@@ -567,6 +581,7 @@ async function deleteChat(chatId) {
   // If we deleted the currently loaded chat, clear the conversation everywhere
   if (currentChatId === chatId) {
     await window.api.reset();
+    clearPendingPlan(false);
     currentChatId = null;
     chat.innerHTML = '';
     missionCard = null;
@@ -738,7 +753,7 @@ async function send() {
   if ((!text && !attachmentCount()) || (busy && !missionControl)) return;
   if (text.startsWith('/')) {
     input.value = '';
-    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
+    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/plan') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
       hideStartupMessage();
     }
     return handleSlash(text);
@@ -1189,6 +1204,69 @@ function upsertMissionCard(mission) {
 
 window.api.onMissionUpdate((mission) => upsertMissionCard(mission));
 
+function clearPendingPlan(removeCard = true) {
+  if (removeCard) pendingPlanCard?.remove();
+  pendingPlanCard = null;
+  pendingPlanDraft = null;
+}
+
+async function runApprovedPlan(plan) {
+  const draft = pendingPlanDraft;
+  if (!draft) return { ok: false, error: 'This plan draft is no longer active.' };
+  if (cwd !== draft.cwd) return { ok: false, error: 'The working directory changed. Create a new plan for this folder.' };
+  if (!coderModel) return { ok: false, error: 'No coder model is selected. Use /coder <name> first.' };
+
+  startRun();
+  let result;
+  try {
+    result = await window.api.orchestrate({
+      model: draft.plannerModel,
+      coderModel,
+      subModel,
+      goal: draft.goal,
+      cwd: draft.cwd,
+      autoApprove: autoApprove.checked,
+      onlineResearch: draft.onlineResearch,
+      think: thinkToggle.checked,
+      plan,
+    });
+    if (result.stopped) addInfo('Approved plan stopped. You can edit it or run it again.');
+    else if (result.report) renderMarkdown(addMessage('assistant', result.report), result.report);
+    if (result.ok && !result.stopped) {
+      pendingPlanDraft = null;
+      pendingPlanCard = null;
+      try {
+        await saveChat();
+      } catch (error) {
+        addError('The plan ran, but the chat could not be saved: ' + (error.message || error));
+      }
+    }
+    return result;
+  } catch (error) {
+    result = { ok: false, error: error.message || String(error) };
+    return result;
+  } finally {
+    endRun();
+  }
+}
+
+function showPlanDraft(draft) {
+  clearPendingPlan();
+  pendingPlanDraft = draft;
+  pendingPlanCard = window.PlanDraftView.create({
+    draft,
+    onRun: runApprovedPlan,
+    onCancel: () => {
+      const wasPending = !!pendingPlanDraft;
+      clearPendingPlan(false);
+      if (wasPending) addInfo('PLAN: draft cancelled. No files were changed.');
+    },
+    onError: addError,
+  });
+  chat.appendChild(pendingPlanCard);
+  scrollDown();
+}
+
 function shortArgs(name, args) {
   if (args.questions) {
     const first = String(args.questions[0]?.question || '');
@@ -1370,6 +1448,7 @@ $('history-btn').addEventListener('click', () => {
 async function newSession() {
   if (busy) return;
   await window.api.reset();
+  clearPendingPlan(false);
   compactWarned = false;
   chat.innerHTML = '';
   missionCard = null;
@@ -1569,6 +1648,7 @@ const SLASH_HELP = [
   '/commit <message> — stage all changes and commit',
   '/graph — show a visual tree of the git commit history',
   '/loop [n] <goal> — repeat a single model until verified',
+  '/plan <goal> — inspect the project and approve or edit a plan before coding',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
   '/mission [iterations] <goal> — run a visible, persisted bounded coding mission; use /mission status or /mission stop',
   '/model <name> — switch model (partial match ok)',
@@ -1601,7 +1681,7 @@ async function handleSlash(raw) {
   const [cmd, ...rest] = raw.slice(1).split(' ');
   const arg = rest.join(' ').trim();
   const normalizedCmd = cmd.toLowerCase();
-  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory']);
+  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory']);
   if (appMode === 'chat' && codeOnlyCommands.has(normalizedCmd)) {
     return addError(`/${normalizedCmd} is only available in Code mode.`);
   }
@@ -1677,6 +1757,46 @@ async function handleSlash(raw) {
         endRun();
       }
       return saveChat();
+    }
+
+    case 'plan': {
+      if (busy) return;
+      if (!modelSelect.value) return addError('No planner model selected.');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      if (!arg) return addError('Usage: /plan <goal>');
+
+      const plannerModel = modelSelect.value;
+      const planCwd = cwd;
+      const planSubModel = subModel;
+      const planOnlineResearch = onlineResearchToggle.checked;
+      const planThink = thinkToggle.checked;
+      startRun();
+      let result;
+      try {
+        result = await window.api.plan({
+          model: plannerModel,
+          subModel: planSubModel,
+          goal: arg,
+          cwd: planCwd,
+          onlineResearch: planOnlineResearch,
+          think: planThink,
+        });
+      } catch (error) {
+        result = { ok: false, error: error.message || String(error) };
+      } finally {
+        endRun();
+      }
+      if (!result.ok) return addError('Planning failed: ' + result.error);
+      if (result.stopped) return addInfo('Planning stopped. No files were changed.');
+      if (cwd !== planCwd) return addError('The working directory changed while planning. Run /plan again for the current folder.');
+      showPlanDraft({
+        goal: arg,
+        plan: result.plan,
+        cwd: planCwd,
+        plannerModel,
+        onlineResearch: planOnlineResearch,
+      });
+      return;
     }
 
     case 'orchestrate': {

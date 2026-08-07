@@ -64,6 +64,27 @@ test('missions wrap the bounded coder loop with persisted status and explicit st
   assert.equal(packageJson.build.files.includes('missions.js'), true);
 });
 
+test('plan command stops for editable approval and reuses the approved plan', () => {
+  const html = source('renderer/index.html');
+  const renderer = source('renderer/app.js');
+  const planView = source('renderer/features/plan-draft.js');
+  const preload = source('preload.js');
+  const main = source('main.js');
+
+  assert.match(html, /features\/plan-draft\.js/);
+  assert.match(html, /styles\/plan-draft\.css/);
+  assert.match(renderer, /\/plan <goal>/);
+  assert.match(renderer, /case 'plan'/);
+  assert.match(renderer, /window\.api\.plan\(\{/);
+  assert.match(renderer, /plan,\n\s+\}\);/);
+  assert.match(planView, /'RUN'/);
+  assert.match(planView, /'EDIT'/);
+  assert.match(planView, /'CANCEL'/);
+  assert.match(preload, /plan: \(payload\) => ipcRenderer\.invoke\('chat:plan', payload\)/);
+  assert.match(main, /ipcMain\.handle\('chat:plan'/);
+  assert.match(main, /if \(approvedPlan\)[\s\S]*normalizeImplementationPlan\(approvedPlan, goal\.trim\(\)\)[\s\S]*else \{[\s\S]*runOrchestratorPlan/);
+});
+
 test('Code and Chat modes are wired through UI, persistence, and the agent boundary', () => {
   const html = source('renderer/index.html');
   const renderer = source('renderer/app.js');

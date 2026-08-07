@@ -17,6 +17,7 @@ const { createHistoryStore } = require('./src/main/history-store');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { queryBenchmarks, readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { createCheckpointService } = require('./src/main/checkpoint-service');
+const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 // The context window we actually request from Ollama. Without an explicit
@@ -1336,7 +1337,6 @@ async function runSubagent(task, subModel, cwd) {
 const ORCHESTRATOR_MAX_STEPS = 18;
 const CODER_MAX_STEPS = 30;
 const CODER_CTX_CAP = 32_768;
-const ORCHESTRATOR_MAX_TASKS = 6;
 const ORCHESTRATOR_MAX_REPAIRS = 1;
 const SCOPED_MAX_COMPACTIONS = 2;
 
@@ -1349,39 +1349,6 @@ function scopedProjectContext(cwd) {
     if (instructions) sections.push('Project instructions from BRITTAIN.md:\n' + instructions.slice(0, 12_000));
   } catch {}
   return sections.length ? '\n\n' + sections.join('\n\n') : '';
-}
-
-function cleanStringList(value, cap = 20) {
-  return Array.isArray(value)
-    ? value.map((item) => String(item || '').trim()).filter(Boolean).slice(0, cap)
-    : [];
-}
-
-function normalizeImplementationPlan(value, goal) {
-  const rawTasks = Array.isArray(value?.tasks) ? value.tasks.slice(0, ORCHESTRATOR_MAX_TASKS) : [];
-  const tasks = rawTasks.map((task, index) => ({
-    id: `task-${index + 1}`,
-    title: String(task?.title || `Implementation task ${index + 1}`).trim().slice(0, 120),
-    objective: String(task?.objective || '').trim(),
-    acceptance_criteria: cleanStringList(task?.acceptance_criteria, 12),
-    relevant_files: cleanStringList(task?.relevant_files, 30),
-    constraints: cleanStringList(task?.constraints, 20),
-  })).filter((task) => task.objective);
-
-  if (!tasks.length) {
-    tasks.push({
-      id: 'task-1',
-      title: 'Implement the requested goal',
-      objective: goal,
-      acceptance_criteria: ['The requested goal is implemented and verified with available project checks.'],
-      relevant_files: [],
-      constraints: [],
-    });
-  }
-  return {
-    summary: String(value?.summary || 'Implement and verify the requested goal.').trim().slice(0, 2000),
-    tasks,
-  };
 }
 
 // Planner and coder histories are deliberately isolated from the persisted
@@ -2304,7 +2271,48 @@ ipcMain.handle('mission:stop', () => {
   return { ok: true };
 });
 
-ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch }) => {
+ipcMain.handle('chat:plan', async (_e, { model, subModel, goal, cwd, think, onlineResearch }) => {
+  if (!model) return { ok: false, error: 'Select a planner model first.' };
+  if (!goal?.trim()) return { ok: false, error: 'A planning goal is required.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
+  const verifierModel = subModel || 'qwen3:8b';
+  const baseline = await gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd);
+  const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
+
+  try {
+    win.webContents.send('stream:state', `planning (${model})`);
+    win.webContents.send('stream:info', `Planner ${model} is inspecting the project. No files will be changed.`);
+    const plan = await runOrchestratorPlan(
+      model,
+      goal.trim(),
+      cwd,
+      verifierModel,
+      !!onlineResearch,
+      !!think,
+      baselineStatus,
+    );
+    return { ok: true, plan };
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      runOutcome = 'stopped';
+      return { ok: true, stopped: true };
+    }
+    runOutcome = 'failed';
+    return { ok: false, error: String(err.message || err) };
+  } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
+    try { await publishPersistedConversationContext(model); } catch {}
+    currentAbort = null;
+    win.webContents.send('stream:done');
+  }
+});
+
+ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, plan: approvedPlan }) => {
   if (!model) return { ok: false, error: 'Select an orchestrator model first.' };
   if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
   if (!goal?.trim()) return { ok: false, error: 'An orchestration goal is required.' };
@@ -2321,9 +2329,16 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
   conversation.push({ role: 'user', content: `ORCHESTRATE: ${goal.trim()}` });
 
   try {
-    win.webContents.send('stream:state', `planning (${model})`);
-    win.webContents.send('stream:info', `Orchestrator ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
-    const plan = await runOrchestratorPlan(model, goal.trim(), cwd, verifierModel, !!onlineResearch, !!think, baselineStatus);
+    let plan;
+    if (approvedPlan) {
+      plan = normalizeImplementationPlan(approvedPlan, goal.trim());
+      win.webContents.send('stream:state', `starting approved plan (${coderModel})`);
+      win.webContents.send('stream:info', `Using the approved plan without running the planner again. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
+    } else {
+      win.webContents.send('stream:state', `planning (${model})`);
+      win.webContents.send('stream:info', `Orchestrator ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
+      plan = await runOrchestratorPlan(model, goal.trim(), cwd, verifierModel, !!onlineResearch, !!think, baselineStatus);
+    }
     win.webContents.send('stream:info', `Plan: ${plan.summary}\n${plan.tasks.map((task, i) => `${i + 1}. ${task.title}`).join('\n')}`);
 
     const results = [];
