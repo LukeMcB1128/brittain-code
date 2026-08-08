@@ -21,6 +21,7 @@ const RISKY_TOOLS = new Set([
   'move_file',
   'edit_file',
   'edit_files',
+  'apply_patch',
   'create_git_branch',
   'revert_to_last_commit',
   'get_environment_variables',
@@ -45,7 +46,7 @@ const ORCHESTRATOR_TOOL_NAMES = new Set([
 ]);
 
 const CODER_TOOL_NAMES = new Set([
-  'read_file', 'write_file', 'edit_file', 'edit_files', 'append_file',
+  'read_file', 'write_file', 'edit_file', 'edit_files', 'apply_patch', 'append_file',
   'create_directory', 'delete_file', 'copy_file', 'move_file',
   'browse_files', 'search_files', 'search_local_docs',
   'project_outline', 'find_symbol', 'find_references',

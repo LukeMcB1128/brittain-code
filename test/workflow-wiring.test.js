@@ -121,6 +121,18 @@ test('local browser verification is loopback-only and available to coding worker
   assert.match(policy, /'browser_open', 'browser_snapshot', 'browser_click', 'browser_type'/);
 });
 
+test('atomic patch editing previews before approval and records changed paths', () => {
+  const main = source('main.js');
+  const tools = source('tools.js');
+  const patchService = source('src/tools/apply-patch.js');
+
+  assert.match(tools, /name: 'apply_patch'/);
+  assert.match(main, /name === 'apply_patch' && args\.dry_run !== false/);
+  assert.match(main, /ORCHESTRATION_MUTATING_TOOLS[\s\S]*'apply_patch'/);
+  assert.match(patchService, /Atomic patch failed and was rolled back/);
+  assert.match(patchService, /resolveForWrite\(cwd, section\.path\)/);
+});
+
 test('general attachments are wired from the picker through local extraction and history rendering', () => {
   const html = source('renderer/index.html');
   const renderer = source('renderer/app.js');

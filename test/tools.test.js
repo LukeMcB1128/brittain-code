@@ -363,6 +363,76 @@ test('edit_files applies a validated multi-file batch and rejects partial change
   assert.equal(RISKY_TOOLS.has('edit_files'), true);
 });
 
+test('apply_patch previews and applies a validated multi-file patch atomically', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, 'first.js'), 'const first = 1;\n');
+  fs.writeFileSync(path.join(cwd, 'data.json'), '{"old":true}\n');
+  const patch = [
+    '--- a/first.js',
+    '+++ b/first.js',
+    '@@ -1 +1 @@',
+    '-const first = 1;',
+    '+const first = 2;',
+    '--- a/data.json',
+    '+++ b/data.json',
+    '@@ -1 +1 @@',
+    '-{"old":true}',
+    '+{"old":false}',
+  ].join('\n');
+
+  const preview = JSON.parse(await executeTool('apply_patch', { patch }, cwd));
+  assert.equal(preview.dry_run, true);
+  assert.equal(preview.applied, false);
+  assert.equal(fs.readFileSync(path.join(cwd, 'first.js'), 'utf8'), 'const first = 1;\n');
+
+  const applied = JSON.parse(await executeTool('apply_patch', { patch, dry_run: false }, cwd));
+  assert.equal(applied.applied, true);
+  assert.equal(applied.files.length, 2);
+  assert.equal(fs.readFileSync(path.join(cwd, 'first.js'), 'utf8'), 'const first = 2;\n');
+  assert.equal(fs.readFileSync(path.join(cwd, 'data.json'), 'utf8'), '{"old":false}\n');
+});
+
+test('apply_patch rejects invalid syntax and unsafe paths before any write', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, 'safe.js'), 'const safe = true;\n');
+  const invalid = [
+    '--- a/safe.js', '+++ b/safe.js', '@@ -1 +1 @@',
+    '-const safe = true;', '+const = ;',
+  ].join('\n');
+  const syntaxResult = await executeTool('apply_patch', { patch: invalid, dry_run: false }, cwd);
+  assert.match(syntaxResult, /syntax error/);
+  assert.equal(fs.readFileSync(path.join(cwd, 'safe.js'), 'utf8'), 'const safe = true;\n');
+
+  const escape = ['--- /dev/null', '+++ b/../outside.js', '@@ -0,0 +1 @@', '+bad'].join('\n');
+  const escapeResult = await executeTool('apply_patch', { patch: escape, dry_run: false }, cwd);
+  assert.match(escapeResult, /escapes the working directory/);
+  assert.equal(fs.existsSync(path.join(cwd, '..', 'outside.js')), false);
+});
+
+test('apply_patch creates and deletes files while preserving patch newline markers', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, 'old.txt'), 'remove me\n');
+  const patch = [
+    '--- /dev/null', '+++ b/new.txt', '@@ -0,0 +1 @@', '+created',
+    '--- a/old.txt', '+++ /dev/null', '@@ -1 +0,0 @@', '-remove me',
+  ].join('\n');
+  const result = JSON.parse(await executeTool('apply_patch', { patch, dry_run: false }, cwd));
+  assert.equal(result.applied, true);
+  assert.equal(fs.readFileSync(path.join(cwd, 'new.txt'), 'utf8'), 'created\n');
+  assert.equal(fs.existsSync(path.join(cwd, 'old.txt')), false);
+
+  const noNewline = [
+    '--- a/new.txt', '+++ b/new.txt', '@@ -1 +1 @@', '-created', '+changed',
+    '\\ No newline at end of file',
+  ].join('\n');
+  const changed = JSON.parse(await executeTool('apply_patch', { patch: noNewline, dry_run: false }, cwd));
+  assert.equal(changed.applied, true);
+  assert.equal(fs.readFileSync(path.join(cwd, 'new.txt'), 'utf8'), 'changed');
+});
+
 test('managed processes can be started, polled, and stopped by opaque id', async (t) => {
   const cwd = tempProject();
   t.after(() => {

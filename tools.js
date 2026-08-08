@@ -20,6 +20,7 @@ const {
   findSymbol,
   projectOutline,
 } = require('./src/tools/semantic-navigation');
+const { applyUnifiedPatch } = require('./src/tools/apply-patch');
 
 const MAX_TOOL_OUTPUT = 40_000;   // chars of tool output fed back to the model
 
@@ -143,10 +144,13 @@ function truncate(s) {
   return s.slice(0, MAX_TOOL_OUTPUT) + `\n...[truncated, ${s.length} chars total]`;
 }
 
-function syntaxCheck(filePath) {
-  if (!/\.(js|mjs|cjs)$/.test(filePath)) return Promise.resolve({ ok: true });
+function syntaxCheckContent(filePath, code) {
+  if (/\.json$/i.test(filePath)) {
+    try { JSON.parse(code); return Promise.resolve({ ok: true }); }
+    catch (e) { return Promise.resolve({ ok: false, msg: e.message }); }
+  }
+  if (!/\.(js|mjs|cjs)$/i.test(filePath)) return Promise.resolve({ ok: true, unverified: true });
   try {
-    const code = fs.readFileSync(filePath, 'utf8');
     new (require('vm').Script)(code, { filename: filePath });
     return Promise.resolve({ ok: true });
   } catch (e) {
@@ -158,6 +162,10 @@ function syntaxCheck(filePath) {
     }
     return Promise.resolve({ ok: false, msg: e.message });
   }
+}
+
+function syntaxCheck(filePath) {
+  return syntaxCheckContent(filePath, fs.readFileSync(filePath, 'utf8'));
 }
 
 // ---------- degraded-model guards ----------
@@ -728,6 +736,21 @@ const TOOL_DEFS = [
           case_sensitive: { type: 'boolean', description: 'Use case-sensitive matching (default: false).' },
         },
         required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'apply_patch',
+      description: 'Preview or atomically apply a standard unified diff across text files. Validates all project paths and hunks before writing, checks supported JavaScript and JSON syntax, and rolls back the full batch after any write failure. Preview is the default.',
+      parameters: {
+        type: 'object',
+        properties: {
+          patch: { type: 'string', description: 'Unified diff with ---/+++ file headers and @@ hunks. Supports file creation and deletion; does not support binary patches or renames.' },
+          dry_run: { type: 'boolean', description: 'Validate and preview without writing (default: true). Set exactly false to apply.' },
+        },
+        required: ['patch'],
       },
     },
   },
@@ -1518,6 +1541,20 @@ async function executeTool(name, args, cwd) {
         }
       }
       return results.length ? truncate(results.join(contextLines ? '\n\n' : '\n')) : 'No matches found.';
+    }
+    case 'apply_patch': {
+      try {
+        const result = await applyUnifiedPatch({
+          cwd,
+          patch: args.patch,
+          dryRun: args.dry_run,
+          resolveForWrite,
+          checkSyntax: syntaxCheckContent,
+        });
+        return truncate(JSON.stringify(result, null, 2));
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
     }
     case 'project_outline': {
       const target = resolveInside(cwd, args.path);

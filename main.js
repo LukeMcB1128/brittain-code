@@ -741,7 +741,7 @@ function systemPrompt(cwd, model = '', onlineResearch = false) {
     '- Never infer what code does — read it. One read_file beats three paragraphs of reasoning about what a file probably contains.',
     '- Commit to an approach and act. If you notice yourself reconsidering a choice you already made, stop deliberating and make the smallest change that tests it. Plans are cheap; a tool result is evidence.',
     '- Verify your work: read a file back after editing it, or run a command that proves the change works. Do not claim success without evidence from a tool result.',
-    '- Edit existing code with edit_file: copy the exact old text from the file and give the new text. Use write_file only for new files or full rewrites of files you have read completely. Never write placeholders like "... existing code ...".',
+    '- Prefer apply_patch for precise multi-file edits: preview first, then apply the same patch. Use edit_file for one small exact replacement. Use write_file only for new files or full rewrites of files you have read completely. Never write placeholders like "... existing code ...".',
     '- Commands run in zsh with a 60 second timeout; do not start interactive programs or servers that never exit.',
     '- If a tool call errors twice, stop and ask the user for guidance with ask_user. If the user denies a tool call, do not retry it.',
     '- For ambiguous or destructive decisions, ask with ask_user and give 2-4 concrete options. Otherwise state your assumption in one line and proceed.',
@@ -1018,6 +1018,9 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
             ? await safeExecute(name, args, cwd)
             : 'The user denied this sensitive read. Do not retry it unless the user explicitly asks.';
           win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(sensitive read denied by user)', denied: !approved });
+        } else if (name === 'apply_patch' && args.dry_run !== false) {
+          result = await safeExecute(name, args, cwd);
+          win.webContents.send('stream:toolresult', { name, result: preview(result) });
         } else if (RISKY_TOOLS.has(name) && !autoApprove) {
           const approved = await requestApproval({ name, args });
           result = approved
@@ -1546,6 +1549,7 @@ async function executeWithApproval(name, args, cwd, autoApprove, onlineResearch)
     const approved = await requestApproval({ name, args, sensitive: true });
     return approved ? safeExecute(name, args, cwd) : 'The user denied this sensitive read.';
   }
+  if (name === 'apply_patch' && args.dry_run !== false) return safeExecute(name, args, cwd);
   if (RISKY_TOOLS.has(name) && !autoApprove) {
     const approved = await requestApproval({ name, args });
     return approved ? safeExecute(name, args, cwd) : 'The user denied this tool call.';
@@ -1687,7 +1691,7 @@ function coderSystemPrompt(cwd) {
     'Inspect the relevant files yourself, implement the task with tool calls, and verify the result.',
     'You are always offline. Do not attempt network access or delegate to other agents.',
     'Preserve pre-existing user changes. Do not commit, revert, or rewrite unrelated code.',
-    'Use edit_file/edit_files for existing files and write_file only for new files or files you have fully read.',
+    'Prefer apply_patch for precise multi-file edits: preview it first, then apply the same patch. Use edit_file/edit_files for small exact replacements and write_file only for new files or files you have fully read.',
     'Use run_project_check without a check name first to discover verification for package, CMake, Cargo, Go, Python, or Make projects, then run the most relevant discovered check. Never claim a check passed unless its tool result proves it.',
     'Work in one bounded pass. After you have made a useful change or run the relevant check, stop broad exploration and return your concise report. If a PREVIOUS ATTEMPT packet is provided, treat it as the handoff from the prior coder: do not re-list or re-read already inspected files unless the verifier feedback or current task requires it.',
     'When finished, return a concise report listing changed files, checks run, and any unresolved issue.',
@@ -1826,7 +1830,7 @@ async function collectOrchestrationGitEvidence(cwd) {
 }
 
 const ORCHESTRATION_MUTATING_TOOLS = new Set([
-  'write_file', 'edit_file', 'edit_files', 'append_file', 'create_directory',
+  'write_file', 'edit_file', 'edit_files', 'apply_patch', 'append_file', 'create_directory',
   'delete_file', 'copy_file', 'move_file',
 ]);
 
@@ -1837,6 +1841,12 @@ function evidencePaths(entry) {
   if (entry.args?.destination) paths.push(String(entry.args.destination));
   if (Array.isArray(entry.args?.edits)) {
     for (const edit of entry.args.edits) if (edit?.path) paths.push(String(edit.path));
+  }
+  if (entry.name === 'apply_patch' && entry.result) {
+    try {
+      const parsed = JSON.parse(entry.result);
+      for (const file of parsed.files || []) if (file?.path) paths.push(String(file.path));
+    } catch {}
   }
   return paths;
 }
