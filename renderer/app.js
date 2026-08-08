@@ -466,6 +466,7 @@ async function saveChat() {
   const conversation = await window.api.getConversation();
   if (!conversation.length) return;
   const runMetrics = await window.api.usageGet();
+  const contextRes = await window.api.contextState();
 
   // Only generate a new title if this is a new chat (no existing title or title is generic)
   let title = 'Chat';
@@ -516,6 +517,7 @@ async function saveChat() {
       subModel,
       coderModel,
       runMetrics,
+      contextState: contextRes.ok ? contextRes.state : { projectPath: '', pinnedFiles: [] },
       timestamp: new Date().toISOString(),
     },
     conversation
@@ -537,7 +539,7 @@ async function loadChat(chatId) {
   setAppMode(saved.mode === 'chat' ? 'chat' : 'code');
 
   // Push the stored conversation into the main process so the model continues from it.
-  const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics);
+  const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics, saved.contextState);
   renderConversation(saved.conversation);
   updateContextBar(lc.approxTokens, lc.contextLength);
   compactWarned = false; // fresh warning budget for this chat
@@ -597,14 +599,14 @@ async function deleteChat(chatId) {
 function renderConversation(conversation) {
   chat.innerHTML = '';
   missionCard = null;
-  for (const msg of conversation) {
+  conversation.forEach((msg, index) => {
     if (msg.role === 'user') {
       const imgs = (msg.images || []).map((b, i) => `data:${msg.imageTypes?.[i] || 'image/png'};base64,${b}`);
       const shownText = msg.displayContent || (msg.attachments?.length ? '(attached files)' : msg.content) || (imgs.length ? '(image)' : '');
-      addMessage('user', shownText, imgs, msg.attachments || []);
+      addMessage('user', shownText, imgs, msg.attachments || [], { message: msg, index });
     } else if (msg.role === 'assistant') {
       if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
-      if (msg.content) renderMarkdown(addMessage('assistant', ''), msg.content);
+      if (msg.content) renderMarkdown(addMessage('assistant', '', null, [], { message: msg, index }), msg.content);
     } else if (msg.role === 'tool') {
       const text = String(msg.content);
       if (msg.tool_name === 'run_subagent') {
@@ -621,12 +623,13 @@ function renderConversation(conversation) {
         pre.textContent = m ? text.slice(m[0].length) : text;
         card.appendChild(head);
         card.appendChild(pre);
+        decorateContextControls(card, msg, index);
         chat.appendChild(card);
       } else {
-        addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text));
+        addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text), null, [], { message: msg, index });
       }
     }
-  }
+  });
   if (latestMission) upsertMissionCard(latestMission);
 }
 
@@ -887,7 +890,7 @@ function scheduleMarkdownRender() {
   });
 }
 
-function addMessage(role, text, images, attachments = []) {
+function addMessage(role, text, images, attachments = [], context = null) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   const label = document.createElement('span');
@@ -898,6 +901,7 @@ function addMessage(role, text, images, attachments = []) {
   body.textContent = text;
   div.appendChild(label);
   div.appendChild(body);
+  if (context) decorateContextControls(div, context.message, context.index);
   if (images && images.length) {
     const strip = document.createElement('div');
     strip.className = 'msg-images';
@@ -926,6 +930,40 @@ function addMessage(role, text, images, attachments = []) {
   chat.appendChild(div);
   scrollDown();
   return body;
+}
+
+function decorateContextControls(element, message, index) {
+  if (!message || !Number.isInteger(index)) return;
+  const canPin = message.role === 'user' || message.role === 'assistant';
+  const canExclude = message.role === 'tool';
+  if (!canPin && !canExclude) return;
+  element.classList.toggle('context-pinned', !!message.pinned);
+  element.classList.toggle('context-excluded', !!message.excludedFromInference);
+  const actions = document.createElement('span');
+  actions.className = 'context-actions';
+  const addControl = (label, title, action, currentValue) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label(currentValue());
+    button.title = title;
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (busy) return addError('Wait for the current run to finish before changing context controls.');
+      const nextValue = !currentValue();
+      const result = await window.api.contextControl({ action, index, value: nextValue });
+      if (!result.ok) return addError(result.error);
+      if (action === 'pin-message') message.pinned = nextValue;
+      else message.excludedFromInference = nextValue;
+      element.classList.toggle('context-pinned', !!message.pinned);
+      element.classList.toggle('context-excluded', !!message.excludedFromInference);
+      button.textContent = label(nextValue);
+      await saveChat();
+    });
+    actions.appendChild(button);
+  };
+  if (canPin) addControl((value) => value ? 'UNPIN' : 'PIN', 'Keep this message in model context and through compaction.', 'pin-message', () => !!message.pinned);
+  if (canExclude) addControl((value) => value ? 'INCLUDE' : 'EXCLUDE', 'Keep this tool result in visible history but remove its content from inference.', 'exclude-tool', () => !!message.excludedFromInference);
+  element.appendChild(actions);
 }
 
 function addError(text) {
@@ -1663,6 +1701,10 @@ const SLASH_HELP = [
   '/usage — show how context and tokens have been spent across all agents',
   '/mcp [on|off <server>] — external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
+  '/pin [list|message <n>|file <path>] — keep important messages or project files in context',
+  '/unpin <message <n>|file <path>> — remove a context pin',
+  '/exclude <n> — omit a noisy tool result from inference without deleting it',
+  '/include <n> — restore an excluded tool result to inference',
   '/recs — compare installed models for this computer',
   '/auto <request> — select the best compatible installed model and run the request',
   '/memory — view what the agent has remembered',
@@ -1678,6 +1720,10 @@ const CHAT_SLASH_HELP = [
   '/usage — show context and token usage',
   '/mcp [on|off <server>] - external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
+  '/pin [list|message <n>] — keep important messages in context',
+  '/unpin message <n> — remove a message pin',
+  '/exclude <n> — omit a noisy tool result from inference without deleting it',
+  '/include <n> — restore an excluded tool result to inference',
   '/recs — compare installed models for this computer',
   '/auto <request> — select the best compatible installed model and run the request',
   '/export — save this chat as a markdown file',
@@ -2025,8 +2071,64 @@ async function handleSlash(raw) {
         const flagStr = r.flags.length ? `  ⚠ ${r.flags.join(', ')}` : '';
         lines.push(`${String(i + 1).padStart(3)}. ${label.padEnd(18)} ~${String(r.tokens).padStart(6)} tok  "${r.preview}"${flagStr}`);
       });
+      if (res.pinnedFiles.length) lines.push('', 'PINNED FILES:', ...res.pinnedFiles.map((file) => `  ${file}`));
       lines.push('', `TOTAL: ~${res.totalTokens.toLocaleString()} / ${res.contextLength.toLocaleString()} tok (${res.percentUsed}% of window)`);
       return showOverlay('CONTEXT — what will actually be sent', lines.join('\n'));
+    }
+
+    case 'pin':
+    case 'unpin': {
+      if (busy) return addError('Wait for the current run to finish before changing context controls.');
+      const pinning = normalizedCmd === 'pin';
+      if (!arg || arg.toLowerCase() === 'list') {
+        const [conversation, stateRes] = await Promise.all([window.api.getConversation(), window.api.contextState()]);
+        const pinnedMessages = conversation
+          .map((message, index) => message.pinned ? `${index + 1} (${message.role})` : '')
+          .filter(Boolean);
+        const excludedTools = conversation
+          .map((message, index) => message.excludedFromInference ? `${index + 1} (${message.tool_name || 'tool'})` : '')
+          .filter(Boolean);
+        return addInfo([
+          `Pinned messages: ${pinnedMessages.join(', ') || '(none)'}`,
+          `Pinned files: ${stateRes.state?.pinnedFiles?.join(', ') || '(none)'}`,
+          `Excluded tool results: ${excludedTools.join(', ') || '(none)'}`,
+          'Use /context to inspect message numbers and token sizes.',
+        ].join('\n'));
+      }
+      const messageMatch = arg.match(/^message\s+(\d+)$/i);
+      const fileMatch = arg.match(/^file\s+(.+)$/i);
+      let payload;
+      let label;
+      if (messageMatch) {
+        payload = { action: 'pin-message', index: Number(messageMatch[1]) - 1, value: pinning };
+        label = `Message ${messageMatch[1]} ${pinning ? 'pinned' : 'unpinned'}.`;
+      } else if (fileMatch) {
+        if (appMode !== 'code') return addError('Project files can be pinned only in Code mode.');
+        if (!cwd) return addError('Pick a working directory first.');
+        payload = { action: pinning ? 'pin-file' : 'unpin-file', cwd, path: fileMatch[1].trim() };
+        label = `${fileMatch[1].trim()} ${pinning ? 'pinned' : 'unpinned'}.`;
+      } else {
+        return addError(`Usage: /${normalizedCmd} message <number>${appMode === 'code' ? ` or /${normalizedCmd} file <path>` : ''}`);
+      }
+      const result = await window.api.contextControl(payload);
+      if (!result.ok) return addError(result.error);
+      renderConversation(result.conversation);
+      addInfo(label);
+      await saveChat();
+      return;
+    }
+
+    case 'exclude':
+    case 'include': {
+      if (busy) return addError('Wait for the current run to finish before changing context controls.');
+      if (!/^\d+$/.test(arg)) return addError(`Usage: /${normalizedCmd} <tool-result message number>`);
+      const value = normalizedCmd === 'exclude';
+      const result = await window.api.contextControl({ action: 'exclude-tool', index: Number(arg) - 1, value });
+      if (!result.ok) return addError(result.error);
+      renderConversation(result.conversation);
+      addInfo(`Tool result ${arg} ${value ? 'excluded from' : 'restored to'} inference. Visible history was not changed.`);
+      await saveChat();
+      return;
     }
 
     case 'recs': {

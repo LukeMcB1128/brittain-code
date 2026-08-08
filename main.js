@@ -23,6 +23,15 @@ const { normalizeCodeReview, SUBMIT_CODE_REVIEW_TOOL } = require('./src/main/cod
 const { captureMissionRecovery, validateMissionRecovery } = require('./src/main/mission-recovery');
 const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
 const { LOCAL_BROWSER_TOOL_NAMES, createLocalBrowserService } = require('./src/main/local-browser-service');
+const {
+  normalizeContextState,
+  pinFile: pinContextFile,
+  pinnedFilesPrompt,
+  pinnedMessagesPrompt,
+  setMessagePinned,
+  setToolExcluded,
+  unpinFile: unpinContextFile,
+} = require('./src/main/context-controls');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 // The context window we actually request from Ollama. Without an explicit
@@ -85,7 +94,12 @@ function stripOldImages(msgs) {
 }
 
 function modelReadyMessages(msgs) {
-  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, ...message }) => message);
+  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, pinned, excludedFromInference, ...message }) => {
+    if (excludedFromInference && message.role === 'tool') {
+      return { ...message, content: '[Tool result content excluded from inference by the user.]' };
+    }
+    return message;
+  });
 }
 
 // Drop oldest messages until the set fits the budget (used for the summarizer
@@ -130,6 +144,7 @@ function recoverMission() {
 
 // ---------- conversation state (lives in main so tool messages stay in history) ----------
 let conversation = [];            // ollama-format messages, excluding system
+let contextState = normalizeContextState();
 let currentAbort = null;          // AbortController for the in-flight run
 let stopRequested = false;
 
@@ -247,7 +262,7 @@ function publishContextStats(stats, contextLength, scope = 'conversation') {
 
 async function publishPersistedConversationContext(model) {
   const contextLength = await effectiveContext(model);
-  const contextTokens = estimateTokens(stripOldImages(conversation));
+  const contextTokens = estimateTokens(modelReadyMessages(conversation));
   usage.context = { tokens: contextTokens, limit: contextLength };
   win.webContents.send('stream:stats', {
     contextTokens,
@@ -728,6 +743,8 @@ function chatSystemPrompt(onlineResearch = false) {
   if (runtimeSettings.globalChatInstructions) {
     lines.push('', 'User-wide Chat instructions:', runtimeSettings.globalChatInstructions);
   }
+  const pinnedMessages = pinnedMessagesPrompt(conversation);
+  if (pinnedMessages) lines.push('', pinnedMessages);
   return lines.join('\n');
 }
 
@@ -763,6 +780,10 @@ function systemPrompt(cwd, model = '', onlineResearch = false) {
   if (runtimeSettings.globalCodeInstructions) {
     lines.push('', 'User-wide Code instructions:', runtimeSettings.globalCodeInstructions);
   }
+  const pinnedMessages = pinnedMessagesPrompt(conversation);
+  if (pinnedMessages) lines.push('', pinnedMessages);
+  const pinnedFiles = pinnedFilesPrompt(contextState, cwd);
+  if (pinnedFiles) lines.push('', pinnedFiles);
   const memory = readMemory(cwd).trim();
   if (memory) {
     // cap so a huge memory file cannot blow up the prompt (keep the newest lines)
@@ -1129,7 +1150,7 @@ async function emitRunReport(cwd, runLog) {
 async function maybePrecompact(model) {
   if (conversation.length < 2) return;
   const contextLength = await effectiveContext(model);
-  const estimated = estimateTokens(stripOldImages(conversation));
+  const estimated = estimateTokens(modelReadyMessages(conversation));
   if (!shouldAutoCompact(estimated, contextLength)) return;
   win.webContents.send('stream:info', `Context is ~${Math.round((estimated / contextLength) * 100)}% full before sending — auto-compacting first…`);
   win.webContents.send('stream:state', 'auto-compacting…');
@@ -1445,6 +1466,10 @@ function scopedProjectContext(cwd) {
     const instructions = fs.readFileSync(path.join(cwd, 'BRITTAIN.md'), 'utf8').trim();
     if (instructions) sections.push('Project instructions from BRITTAIN.md:\n' + instructions.slice(0, 12_000));
   } catch {}
+  const pinnedFiles = pinnedFilesPrompt(contextState, cwd);
+  if (pinnedFiles) sections.push(pinnedFiles);
+  const pinnedMessages = pinnedMessagesPrompt(conversation);
+  if (pinnedMessages) sections.push(pinnedMessages);
   return sections.length ? '\n\n' + sections.join('\n\n') : '';
 }
 
@@ -2697,6 +2722,7 @@ ipcMain.on('chat:stop', () => {
 
 ipcMain.handle('chat:reset', () => {
   conversation = [];
+  contextState = normalizeContextState();
   usage = freshUsage();
   return { ok: true };
 });
@@ -2765,7 +2791,10 @@ ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch 
         if (!flags.includes('images evicted')) flags.push('images evicted');
       }
       if (msg.role === 'tool' && String(msg.content || '').length > 1500) flags.push('large tool output');
+      if (original?.pinned) flags.push('pinned');
+      if (original?.excludedFromInference) flags.push('tool output excluded');
       return {
+        index: i,
         role: msg.role,
         toolName: msg.tool_name || null,
         tokens: estimateTokens(msg),
@@ -2786,6 +2815,7 @@ ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch 
       contextLength,
       percentUsed: contextLength ? Math.round((totalTokens / contextLength) * 100) : 0,
       messageCount: ready.length,
+      pinnedFiles: [...contextState.pinnedFiles],
     };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
@@ -2840,12 +2870,29 @@ ipcMain.handle('settings:save', (_e, value) => {
 // array lives here — these let it read the current one and swap in a stored one.
 ipcMain.handle('chat:get', () => conversation);
 
-ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage) => {
+ipcMain.handle('context:state', () => ({ ok: true, state: normalizeContextState(contextState) }));
+
+ipcMain.handle('context:control', (_e, payload = {}) => {
+  try {
+    const action = String(payload.action || '');
+    if (action === 'pin-message') setMessagePinned(conversation, Number(payload.index), payload.value !== false);
+    else if (action === 'exclude-tool') setToolExcluded(conversation, Number(payload.index), payload.value !== false);
+    else if (action === 'pin-file') contextState = pinContextFile(contextState, payload.cwd, payload.path).state;
+    else if (action === 'unpin-file') contextState = unpinContextFile(contextState, payload.cwd, payload.path).state;
+    else return { ok: false, error: `Unknown context control action "${action}".` };
+    return { ok: true, conversation, state: normalizeContextState(contextState) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextState) => {
   conversation = Array.isArray(msgs) ? msgs : [];
+  contextState = normalizeContextState(savedContextState);
   usage = restoreUsage(savedUsage);
   // estimate the loaded context so the bar and /usage aren't blank until the
   // next message (Ollama reports the exact count on the next request)
-  const approxTokens = estimateTokens(stripOldImages(conversation));
+  const approxTokens = estimateTokens(modelReadyMessages(conversation));
   const contextLength = model ? await effectiveContext(model) : 0;
   usage.context = { tokens: approxTokens, limit: contextLength };
   usage.metrics.peakContextTokens = Math.max(usage.metrics.peakContextTokens || 0, approxTokens);
@@ -2953,14 +3000,21 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     // drop images and bulky tool outputs from what the summarizer sees, then
     // hard-fit to the window — the summarizer must not context-shift itself
     const windowBudget = Math.floor((await effectiveContext(model)) * 0.8);
-    let msgs = stripOldImages(conversation)
-      .map(({ images, imageTypes, displayContent, attachments, ...m }) => m) // summarizer never needs UI attachment metadata
+    const pinnedConversation = conversation
+      .filter((message) => message?.pinned && (message.role === 'user' || message.role === 'assistant'))
+      .map(({ tool_calls, ...message }) => ({ ...message }));
+    const unpinnedConversation = conversation.filter((message) => !message?.pinned);
+    const pinnedContext = pinnedMessagesPrompt(pinnedConversation);
+    const pinnedReady = pinnedContext ? [{ role: 'user', content: pinnedContext }] : [];
+    let recentReady = modelReadyMessages(unpinnedConversation)
       .map((m) =>
         m.role === 'tool' && String(m.content).length > 1500
           ? { ...m, content: String(m.content).slice(0, 1500) + '…[truncated]' }
           : m
       );
-    msgs = fitToWindow(msgs, windowBudget);
+    const pinnedCost = estimateTokens(pinnedReady);
+    recentReady = fitToWindow(recentReady, Math.max(1200, windowBudget - pinnedCost));
+    const msgs = [...pinnedReady, ...recentReady];
     msgs.push({
       role: 'user',
       content: 'Summarize this entire conversation so work can continue seamlessly in a fresh session: the goal, key decisions, files created or modified and their current state, and unresolved tasks. Output only the summary.',
@@ -2989,6 +3043,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     }
 
     conversation = [
+      ...pinnedConversation,
       {
         role: 'user',
         content: 'This conversation was compacted to save context. Continue from the summary below.'
@@ -3000,7 +3055,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     ];
 
     // Update the central usage object in main process
-    const approxTokens = estimateTokens(stripOldImages(conversation));
+    const approxTokens = estimateTokens(modelReadyMessages(conversation));
     const contextLength = await effectiveContext(model);
     usage.context = { tokens: approxTokens, limit: contextLength };
 

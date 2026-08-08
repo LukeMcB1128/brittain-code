@@ -133,6 +133,24 @@ test('atomic patch editing previews before approval and records changed paths', 
   assert.match(patchService, /resolveForWrite\(cwd, section\.path\)/);
 });
 
+test('context controls persist pins and exclude tool content only from inference', () => {
+  const renderer = source('renderer/app.js');
+  const preload = source('preload.js');
+  const main = source('main.js');
+  const historyStore = source('src/main/history-store.js');
+  const controls = source('src/main/context-controls.js');
+
+  assert.match(renderer, /case 'pin'/);
+  assert.match(renderer, /case 'exclude'/);
+  assert.match(renderer, /decorateContextControls/);
+  assert.match(preload, /contextControl: \(payload\) => ipcRenderer\.invoke\('context:control'/);
+  assert.match(main, /Tool result content excluded from inference by the user/);
+  assert.match(main, /pinnedMessagesPrompt\(conversation\)/);
+  assert.match(main, /pinnedFilesPrompt\(contextState, cwd\)/);
+  assert.match(historyStore, /contextState: meta\.contextState/);
+  assert.match(controls, /Pinned file path escapes the working directory through a symlink/);
+});
+
 test('general attachments are wired from the picker through local extraction and history rendering', () => {
   const html = source('renderer/index.html');
   const renderer = source('renderer/app.js');

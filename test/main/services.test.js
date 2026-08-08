@@ -37,6 +37,7 @@ test('history store saves runtime data and keeps file names inside its directory
     coderModel: 'coder:8b',
     subModel: 'scout:3b',
     mode: 'chat',
+    contextState: { projectPath: '/project', pinnedFiles: ['README.md'] },
   }, [{ role: 'user', content: 'Hello' }]), { ok: true });
 
   assert.equal(store.list()[0].id, 'chatone');
@@ -44,6 +45,7 @@ test('history store saves runtime data and keeps file names inside its directory
   assert.equal(loaded.ok, true);
   assert.equal(loaded.chat.runtime.roles.coder.name, 'coder:8b');
   assert.equal(loaded.chat.conversation[0].content, 'Hello');
+  assert.deepEqual(loaded.chat.contextState, { projectPath: '/project', pinnedFiles: ['README.md'] });
   assert.deepEqual(store.remove('chat:/one'), { ok: true });
   assert.deepEqual(store.list(), []);
 });

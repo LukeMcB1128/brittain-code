@@ -232,6 +232,31 @@ button:active { background: var(--border); }
   line-height: 1.5;
 }
 
+.msg, .tool, .subagent { position: relative; }
+.context-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.msg:hover > .context-actions, .tool:hover > .context-actions, .subagent:hover > .context-actions,
+.context-pinned > .context-actions, .context-excluded > .context-actions { opacity: 1; }
+.context-actions button { padding: 2px 5px; font-size: 9px; letter-spacing: 1px; }
+.context-pinned { box-shadow: inset 0 0 0 1px var(--purple); }
+.context-excluded { opacity: 0.68; border-style: dashed; }
+.context-excluded::after {
+  content: 'EXCLUDED FROM INFERENCE';
+  position: absolute;
+  right: 7px;
+  bottom: 3px;
+  color: var(--text-dim);
+  font: 9px var(--mono);
+  letter-spacing: 1px;
+}
+
 .msg .label {
   font-family: var(--mono);
   font-size: 10px;

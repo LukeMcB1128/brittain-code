@@ -50,6 +50,7 @@ function createHistoryStore({ userDataDir, runtimeMetadata }) {
         coderModel: meta.coderModel || '',
         onlineResearch: !!meta.onlineResearch,
         runMetrics: meta.runMetrics || null,
+        contextState: meta.contextState || { projectPath: '', pinnedFiles: [] },
         runtime: { ...mainRuntime, roles: Object.fromEntries(roleEntries) },
       };
       fs.mkdirSync(directory(), { recursive: true });
