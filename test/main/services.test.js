@@ -121,6 +121,18 @@ test('checkpoint service reports an absent checkpoint without changing files', a
   assert.deepEqual(gitCalls, [['rev-parse', '--git-dir']]);
 });
 
+test('checkpoint service can adopt a validated persisted checkpoint', () => {
+  let published = null;
+  const store = createCheckpointService({
+    gitRun: async () => ({ ok: true, out: '' }),
+    getTempDirectory: () => os.tmpdir(),
+    publishState: (state) => { published = state; },
+  });
+  assert.equal(store.adopt({ ref: 'refs/brittain/checkpoints/saved', cwd: '/project', at: 123 }), true);
+  assert.deepEqual(store.current(), { ref: 'refs/brittain/checkpoints/saved', cwd: '/project', at: 123 });
+  assert.deepEqual(published, { available: true, cwd: '/project' });
+});
+
 test('recommendations service loads Ollama metadata through its injected boundary', async (t) => {
   const directory = tempDirectory(t);
   const calls = [];

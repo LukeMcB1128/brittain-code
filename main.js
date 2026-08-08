@@ -20,6 +20,7 @@ const { selectAutoModel } = require('./src/main/model-router');
 const { createCheckpointService } = require('./src/main/checkpoint-service');
 const { createDiffService } = require('./src/main/diff-service');
 const { normalizeCodeReview, SUBMIT_CODE_REVIEW_TOOL } = require('./src/main/code-review');
+const { captureMissionRecovery, validateMissionRecovery } = require('./src/main/mission-recovery');
 const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
@@ -305,7 +306,7 @@ app.whenReady().then(() => {
 });
 app.on('before-quit', () => {
   if (activeMission?.status === 'running') updateMission({
-    status: 'interrupted', currentPhase: 'interrupted', endedAt: new Date().toISOString(),
+    status: 'interrupted', interruptedPhase: activeMission.currentPhase || 'unknown', currentPhase: 'interrupted', endedAt: new Date().toISOString(),
     lastEvent: 'Brittain Code closed before this mission finished.',
   });
   stopAllManagedProcesses();
@@ -2026,7 +2027,7 @@ function wholeGoalVerificationTask(goal, plan) {
   };
 }
 
-async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, loopLog, onProgress = () => {} }) {
+async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, loopLog, iterationOffset = 0, onProgress = () => {} }) {
   const info = (text) => win.webContents.send('stream:info', text);
   const state = (text) => win.webContents.send('stream:state', text);
   const verifierModel = subModel || 'qwen3:8b';
@@ -2034,7 +2035,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
   const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
 
   conversation.push({ role: 'user', content: `MISSION (max ${max}): ${goal}` });
-  onProgress({ currentPhase: 'planning', lastEvent: 'Inspecting the project and preparing a plan.' });
+  await onProgress({ currentPhase: 'planning', lastEvent: 'Inspecting the project and preparing a plan.' });
   state(`planning coder loop (${model})`);
   info(`Supervisor ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
   const submittedPlan = await runOrchestratorPlan(model, goal, cwd, verifierModel, !!onlineResearch, !!think, baselineStatus, max);
@@ -2056,7 +2057,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
     const isRepair = !!feedback;
     if (isRepair) usage.metrics.repairs += 1;
     info(`━ Coder loop iteration ${iteration}/${max}: ${task.title}${isRepair ? ' (repair)' : ''} ━`);
-    onProgress({ currentPhase: isRepair ? 'repair' : 'implementation', currentIteration: iteration, lastEvent: `${isRepair ? 'Repairing' : 'Implementing'}: ${task.title}` });
+    await onProgress({ currentPhase: isRepair ? 'repair' : 'implementation', currentIteration: iterationOffset + iteration, lastEvent: `${isRepair ? 'Repairing' : 'Implementing'}: ${task.title}` });
     state(`coder loop ${iteration}/${max} (${coderModel})`);
 
     const priorAttempt = results.find((entry) => entry.task.id === task.id)?.coderResult || null;
@@ -2081,7 +2082,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
     if (isRepair) result.repairs += 1;
 
     const gitEvidence = await collectOrchestrationGitEvidence(cwd);
-    onProgress({ currentPhase: 'verification', currentIteration: iteration, lastEvent: `Verifying: ${task.title}` });
+    await onProgress({ currentPhase: 'verification', currentIteration: iterationOffset + iteration, lastEvent: `Verifying: ${task.title}` });
     state(`verifying coder loop ${iteration}/${max} (${verifierModel})`);
     const verdict = await runOrchestrationVerifier(
       verifierModel,
@@ -2122,7 +2123,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
       evidence: results.flatMap((entry) => entry.coderResult.evidence),
     };
     const finalEvidence = await collectOrchestrationGitEvidence(cwd);
-    onProgress({ currentPhase: 'verification', currentIteration: iteration, lastEvent: 'Running final whole-goal verification.' });
+    await onProgress({ currentPhase: 'verification', currentIteration: iterationOffset + iteration, lastEvent: 'Running final whole-goal verification.' });
     state(`final coder-loop verification (${verifierModel})`);
     finalVerdict = await runOrchestrationVerifier(
       verifierModel,
@@ -2261,35 +2262,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
 // ---------- durable missions (/mission) ----------
 // Missions intentionally reuse the bounded coder loop. They add a visible,
 // persisted control plane without creating a second, less-tested agent engine.
-ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch, chatId }) => {
-  if (activeMission?.status === 'running') return { ok: false, error: 'A mission is already running. Use /mission status or /mission stop.' };
-  if (!model) return { ok: false, error: 'Select a model first.' };
-  if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
-  if (!goal?.trim()) return { ok: false, error: 'A mission goal is required.' };
-  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
-  if (!chatId) return { ok: false, error: 'A mission must be started from a chat.' };
-
-  const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
-  const startedAt = new Date().toISOString();
-  activeMission = {
-    id: `mission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    status: 'running',
-    goal: goal.trim(),
-    projectPath: cwd,
-    chatId,
-    startedAt,
-    endedAt: null,
-    maxIterations: max,
-    currentIteration: 0,
-    currentPhase: 'starting',
-    lastEvent: 'Preparing mission.',
-    models: { main: model, coder: coderModel, verifier: subModel || 'qwen3:8b' },
-    onlineResearch: !!onlineResearch,
-    finalReport: null,
-  };
-  writeActiveMission(settingsUserDataDir, activeMission);
-  publishMission();
-
+async function runActiveMission({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, iterationOffset = 0 }) {
   stopRequested = false;
   currentAbort = new AbortController();
   const runStartedAt = Date.now();
@@ -2297,8 +2270,6 @@ ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, 
   const loopLog = { mutations: new Set(), commands: [], verified: false };
 
   try {
-    await maybeAutoBranch(cwd, goal, !!autoBranch);
-    await createCheckpoint(cwd);
     const result = await runCoderGoalLoop({
       model,
       coderModel,
@@ -2310,7 +2281,18 @@ ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, 
       onlineResearch,
       max,
       loopLog,
-      onProgress: (progress) => updateMission(progress),
+      iterationOffset,
+      onProgress: async (progress) => {
+        const recovery = await captureMissionRecovery({
+          cwd,
+          checkpointRef: activeMission.recovery.checkpointRef,
+          gitRun,
+        });
+        updateMission({
+          ...progress,
+          recovery: { ...recovery, checkpointAt: activeMission.recovery.checkpointAt },
+        });
+      },
     });
     await emitRunReport(cwd, loopLog);
     const stopped = stopRequested || result.stopped;
@@ -2344,6 +2326,55 @@ ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, 
     currentAbort = null;
     win.webContents.send('stream:done');
   }
+}
+
+ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch, chatId }) => {
+  if (activeMission?.status === 'running') return { ok: false, error: 'A mission is already running. Use /mission status or /mission stop.' };
+  if (!model) return { ok: false, error: 'Select a model first.' };
+  if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
+  if (!goal?.trim()) return { ok: false, error: 'A mission goal is required.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  if (!chatId) return { ok: false, error: 'A mission must be started from a chat.' };
+
+  const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
+  const startedAt = new Date().toISOString();
+  activeMission = {
+    id: `mission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    status: 'running',
+    goal: goal.trim(),
+    projectPath: cwd,
+    chatId,
+    startedAt,
+    endedAt: null,
+    maxIterations: max,
+    currentIteration: 0,
+    currentPhase: 'starting',
+    lastEvent: 'Preparing mission.',
+    models: { main: model, coder: coderModel, verifier: subModel || 'qwen3:8b' },
+    onlineResearch: !!onlineResearch,
+    finalReport: null,
+    recovery: null,
+  };
+  writeActiveMission(settingsUserDataDir, activeMission);
+  publishMission();
+
+  try {
+    await maybeAutoBranch(cwd, goal, !!autoBranch);
+    const checkpoint = await createCheckpoint(cwd);
+    if (!checkpoint) throw new Error('Could not create the mission recovery checkpoint.');
+    const recovery = await captureMissionRecovery({ cwd, checkpointRef: checkpoint.ref, gitRun });
+    updateMission({
+      projectPath: recovery.projectPath,
+      recovery: { ...recovery, checkpointAt: checkpoint.at },
+      lastEvent: 'Recovery checkpoint saved. Starting mission.',
+    });
+  } catch (error) {
+    const message = String(error.message || error);
+    updateMission({ status: 'failed', currentPhase: 'failed', endedAt: new Date().toISOString(), lastEvent: message, finalReport: message });
+    return { ok: false, error: message };
+  }
+
+  return runActiveMission({ model, coderModel, subModel, goal: goal.trim(), cwd: activeMission.projectPath, autoApprove, think, onlineResearch, max });
 });
 
 ipcMain.handle('mission:get', () => ({ ok: true, mission: activeMission }));
@@ -2356,6 +2387,42 @@ ipcMain.handle('mission:stop', () => {
   for (const [id, resolve] of pendingApprovals) { resolve(false); pendingApprovals.delete(id); }
   for (const [id, resolve] of pendingQuestions) { resolve(null); pendingQuestions.delete(id); }
   return { ok: true };
+});
+
+ipcMain.handle('mission:resume', async (_e, { cwd, chatId, autoApprove, think, onlineResearch }) => {
+  if (!activeMission) return { ok: false, error: 'There is no saved mission.' };
+  if (activeMission.status !== 'interrupted') return { ok: false, error: `Only an interrupted mission can resume. Current status: ${activeMission.status}.` };
+  if (!cwd) return { ok: false, error: 'Pick the saved mission directory first.' };
+  if (!chatId || chatId !== activeMission.chatId) return { ok: false, error: 'Open the chat that started this mission before resuming it.' };
+
+  const validation = await validateMissionRecovery({ mission: activeMission, cwd, gitRun });
+  if (!validation.ok) {
+    return { ok: false, error: 'Mission recovery validation failed:\n- ' + validation.errors.join('\n- ') };
+  }
+  const checkpointAt = Number(activeMission.recovery.checkpointAt) || Date.now();
+  checkpointService.adopt({ ref: activeMission.recovery.checkpointRef, cwd: validation.current.projectPath, at: checkpointAt });
+  const iterationOffset = Math.max(0, (Number(activeMission.currentIteration) || 1) - 1);
+  const remaining = Math.max(1, (Number(activeMission.maxIterations) || 1) - iterationOffset);
+  const models = activeMission.models || {};
+  updateMission({
+    status: 'running',
+    currentPhase: 'resuming',
+    endedAt: null,
+    resumedAt: new Date().toISOString(),
+    lastEvent: `Recovery state validated. Resuming with ${remaining} iteration${remaining === 1 ? '' : 's'} available.`,
+  });
+  return runActiveMission({
+    model: models.main,
+    coderModel: models.coder,
+    subModel: models.verifier,
+    goal: activeMission.goal,
+    cwd: validation.current.projectPath,
+    autoApprove: !!autoApprove,
+    think: !!think,
+    onlineResearch: !!onlineResearch,
+    max: remaining,
+    iterationOffset,
+  });
 });
 
 ipcMain.handle('chat:plan', async (_e, { model, subModel, goal, cwd, think, onlineResearch }) => {

@@ -80,7 +80,14 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
     }
   }
 
-  return { create, current: () => lastCheckpoint, prune, undo };
+  function adopt(checkpoint) {
+    if (!checkpoint?.ref || !checkpoint?.cwd) return false;
+    lastCheckpoint = { ref: checkpoint.ref, cwd: checkpoint.cwd, at: Number(checkpoint.at) || Date.now() };
+    publishState({ available: true, cwd: checkpoint.cwd });
+    return true;
+  }
+
+  return { adopt, create, current: () => lastCheckpoint, prune, undo };
 }
 
 module.exports = { createCheckpointService };

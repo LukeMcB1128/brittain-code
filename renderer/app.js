@@ -749,7 +749,7 @@ stopBtn.addEventListener('click', () => window.api.stop());
 
 async function send() {
   const text = input.value.trim();
-  const missionControl = /^\/mission\s+(?:status|stop)\s*$/i.test(text);
+  const missionControl = /^\/mission\s+(?:status|stop|resume)\s*$/i.test(text);
   if ((!text && !attachmentCount()) || (busy && !missionControl)) return;
   if (text.startsWith('/')) {
     input.value = '';
@@ -1179,7 +1179,7 @@ function upsertMissionCard(mission) {
       '<div class="mission-goal"></div>',
       '<div class="mission-detail"></div>',
       '<div class="mission-event"></div>',
-      '<div class="mission-actions"><button type="button" class="mini mission-refresh">STATUS</button><button type="button" class="mini mission-stop">STOP</button></div>',
+      '<div class="mission-actions"><button type="button" class="mini mission-refresh">STATUS</button><button type="button" class="mini mission-resume">RESUME</button><button type="button" class="mini mission-stop">STOP</button></div>',
     ].join('');
     missionCard.querySelector('.mission-refresh').addEventListener('click', async () => {
       const res = await window.api.missionGet();
@@ -1189,6 +1189,10 @@ function upsertMissionCard(mission) {
       const res = await window.api.missionStop();
       if (!res.ok) addError(res.error);
     });
+    missionCard.querySelector('.mission-resume').addEventListener('click', () => {
+      input.value = '/mission resume';
+      send();
+    });
   }
   const projectName = String(mission.projectPath || '').split(/[\\/]/).filter(Boolean).pop() || '(unknown project)';
   missionCard.dataset.status = mission.status || 'unknown';
@@ -1197,6 +1201,7 @@ function upsertMissionCard(mission) {
   missionCard.querySelector('.mission-detail').textContent = `${projectName} · ${mission.currentIteration || 0}/${mission.maxIterations || 0} · ${mission.currentPhase || 'starting'}`;
   missionCard.querySelector('.mission-event').textContent = mission.lastEvent || '';
   missionCard.querySelector('.mission-stop').classList.toggle('hidden', mission.status !== 'running');
+  missionCard.querySelector('.mission-resume').classList.toggle('hidden', mission.status !== 'interrupted');
   // appendChild moves an existing node, keeping the mission card alongside the
   // most recent work whenever the user refreshes it or the mission advances.
   chat.appendChild(missionCard);
@@ -1651,7 +1656,7 @@ const SLASH_HELP = [
   '/plan <goal> — inspect the project and approve or edit a plan before coding',
   '/review [base] — run a structured read-only review and send selected findings to the coder',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
-  '/mission [iterations] <goal> — run a visible, persisted bounded coding mission; use /mission status or /mission stop',
+  '/mission [iterations] <goal> — run a persisted coding mission; use status, stop, or resume',
   '/model <name> — switch model (partial match ok)',
   '/coder [name] — show or set the writable coding-worker model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
@@ -1892,6 +1897,28 @@ async function handleSlash(raw) {
       if (command === 'stop') {
         const res = await window.api.missionStop();
         return res.ok ? addInfo('Mission stop requested.') : addError(res.error);
+      }
+      if (command === 'resume') {
+        if (busy) return;
+        if (!cwd) return addError('Pick the saved mission directory first.');
+        if (!currentChatId) return addError('Open the chat that started the mission first.');
+        startRun();
+        try {
+          const res = await window.api.missionResume({
+            cwd,
+            chatId: currentChatId,
+            autoApprove: autoApprove.checked,
+            onlineResearch: onlineResearchToggle.checked,
+            think: thinkToggle.checked,
+          });
+          if (!res.ok) addError(res.error);
+          else if (res.report) renderMarkdown(addMessage('assistant', res.report), res.report);
+        } catch (error) {
+          addError('Mission resume failed: ' + (error.message || error));
+        } finally {
+          endRun();
+        }
+        return saveChat();
       }
       if (busy) return;
       if (!modelSelect.value) return addError('No model selected.');

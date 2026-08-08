@@ -22,6 +22,7 @@ test('a running mission is marked interrupted after an app restart', () => {
   const mission = { id: 'mission-1', status: 'running', currentPhase: 'verification' };
   const interrupted = interruptRunningMission(mission, '2026-07-23T12:00:00.000Z');
   assert.equal(interrupted.status, 'interrupted');
+  assert.equal(interrupted.interruptedPhase, 'verification');
   assert.equal(interrupted.currentPhase, 'interrupted');
   assert.equal(interrupted.endedAt, '2026-07-23T12:00:00.000Z');
   assert.equal(mission.status, 'running');

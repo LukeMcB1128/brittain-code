@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('api', {
   missionStart: (payload) => ipcRenderer.invoke('mission:start', payload),
   missionGet: () => ipcRenderer.invoke('mission:get'),
   missionStop: () => ipcRenderer.invoke('mission:stop'),
+  missionResume: (payload) => ipcRenderer.invoke('mission:resume', payload),
   exportChat: () => ipcRenderer.invoke('chat:export'),
   historyList: () => ipcRenderer.invoke('history:list'),
   historySave: (meta, conversation) => ipcRenderer.invoke('history:save', meta, conversation),

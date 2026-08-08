@@ -56,10 +56,13 @@ test('missions wrap the bounded coder loop with persisted status and explicit st
   assert.match(renderer, /busy && !missionControl/);
   assert.match(preload, /missionStart: \(payload\) => ipcRenderer\.invoke\('mission:start'/);
   assert.match(preload, /missionStop: \(\) => ipcRenderer\.invoke\('mission:stop'/);
+  assert.match(preload, /missionResume: \(payload\) => ipcRenderer\.invoke\('mission:resume'/);
   assert.match(main, /ipcMain\.handle\('mission:start',[\s\S]*chatId/);
   assert.match(main, /chatId,\n\s*startedAt/);
   assert.match(main, /runCoderGoalLoop\(\{/);
   assert.match(main, /ipcMain\.handle\('mission:stop'/);
+  assert.match(main, /ipcMain\.handle\('mission:resume'/);
+  assert.match(main, /validateMissionRecovery/);
   assert.match(main, /interruptRunningMission/);
   assert.equal(packageJson.build.files.includes('missions.js'), true);
 });
