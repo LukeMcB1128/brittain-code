@@ -18,6 +18,7 @@ const { createRecommendationsService } = require('./src/main/recommendations-ser
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
 const { createCheckpointService } = require('./src/main/checkpoint-service');
+const { createDiffService } = require('./src/main/diff-service');
 const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
@@ -2689,16 +2690,8 @@ ipcMain.handle('git:status', async (_e, cwd) => {
   };
 });
 
-ipcMain.handle('git:diff', async (_e, cwd) => {
-  const staged = await gitRun(['diff', '--cached', '--', '.'], cwd);
-  const unstaged = await gitRun(['diff', '--', '.'], cwd);
-  const untracked = await gitRun(['ls-files', '--others', '--exclude-standard'], cwd);
-  const parts = [];
-  if (staged.out.trim()) parts.push('═══ STAGED ═══\n' + staged.out);
-  if (unstaged.out.trim()) parts.push(unstaged.out);
-  if (untracked.out.trim()) parts.push('═══ UNTRACKED FILES ═══\n' + untracked.out);
-  return { ok: true, diff: parts.join('\n') || '(working tree clean)' };
-});
+const diffService = createDiffService({ gitRun });
+ipcMain.handle('git:diff', (_e, cwd) => diffService.get(cwd));
 
 ipcMain.handle('git:graph', async (_e, cwd) => {
   const res = await gitRun(['log', '--graph', '--oneline', '--all', '--no-color'], cwd);

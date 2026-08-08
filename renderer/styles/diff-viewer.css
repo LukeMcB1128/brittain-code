@@ -1,0 +1,107 @@
+#overlay-box.diff-v2-overlay {
+  width: min(1280px, 96vw);
+  height: min(820px, 92vh);
+}
+
+#overlay-body.diff-v2 {
+  padding: 0;
+  white-space: normal;
+  word-break: normal;
+}
+
+.diff-layout {
+  display: grid;
+  grid-template-columns: minmax(190px, 260px) 1fr;
+  height: 100%;
+  min-height: 0;
+}
+
+.diff-navigation {
+  overflow: auto;
+  padding: 10px 8px;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.diff-nav-group + .diff-nav-group { margin-top: 16px; }
+
+.diff-nav-title {
+  padding: 0 6px 5px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.diff-nav-file {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  padding: 4px 6px;
+  border: 0;
+  color: var(--text-dim);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-nav-file:hover { color: var(--text); background: var(--bg-panel); }
+.diff-nav-empty { padding: 4px 6px; color: var(--text-dim); font-size: 10px; }
+
+.diff-content {
+  overflow: auto;
+  padding: 12px;
+  scroll-behavior: smooth;
+}
+
+.diff-section + .diff-section { margin-top: 20px; }
+.diff-section-title { margin: 0 0 8px; color: var(--accent); font-size: 12px; letter-spacing: 1px; }
+.diff-empty { padding: 14px; border: 1px dashed var(--border); color: var(--text-dim); }
+
+.diff-file-card {
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  scroll-margin-top: 10px;
+}
+
+.diff-file-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.diff-file-summary:hover { background: var(--bg-panel); }
+.diff-file-status { width: 28px; color: var(--yellow); font-weight: 700; }
+.diff-file-path { flex: 1; overflow-wrap: anywhere; color: var(--text); }
+.diff-file-counts { color: var(--text-dim); white-space: nowrap; }
+.diff-rows { overflow-x: auto; border-top: 1px solid var(--border); }
+
+.diff-row {
+  display: grid;
+  grid-template-columns: 46px 46px minmax(max-content, 1fr);
+  min-height: 20px;
+  line-height: 20px;
+}
+
+.diff-line-number {
+  padding: 0 6px;
+  border-right: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  color: var(--text-dim);
+  text-align: right;
+  user-select: none;
+}
+
+.diff-line-text { padding: 0 8px; white-space: pre; }
+.diff-row-add { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); }
+.diff-row-delete { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
+.diff-row-hunk { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); }
+.diff-row-meta { color: var(--yellow); }
+
+@media (max-width: 760px) {
+  .diff-layout { grid-template-columns: 1fr; }
+  .diff-navigation { max-height: 170px; border-right: 0; border-bottom: 1px solid var(--border); }
+}

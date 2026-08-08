@@ -83,7 +83,7 @@ Type these in the message box:
 | `/help` | List all commands |
 | `/clear` | New session |
 | `/compact` | Summarize the conversation to free up context (great for long agent sessions on small-context models) |
-| `/diff` | Show the git diff of the working directory in an overlay |
+| `/diff` | Review staged, unstaged, and untracked files with per-file navigation and collapsible patches |
 | `/commit <message>` | Stage everything and commit |
 | `/graph` | Show a visual tree of the git commit history |
 | `/model <name>` | Switch model (partial match) |

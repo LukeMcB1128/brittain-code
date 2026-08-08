@@ -2067,7 +2067,8 @@ async function refreshGit() {
 async function showDiff() {
   if (!cwd) return addError('No directory set.');
   const res = await window.api.gitDiff(cwd);
-  showOverlay('GIT DIFF — ' + cwd, res.diff, { diff: true });
+  if (!res.ok) return addError('Could not load diff: ' + res.error);
+  window.DiffViewer.show(res, { $, hideOverlay });
 }
 
 $('diff-btn').addEventListener('click', showDiff);
@@ -2080,6 +2081,7 @@ $('commit-btn').addEventListener('click', () => {
 function showOverlay(title, text, opts = {}) {
   $('overlay-title').textContent = title;
   $('overlay-box').classList.remove('recommendations-overlay');
+  $('overlay-box').classList.remove('diff-v2-overlay');
   const body = $('overlay-body');
   body.className = '';
   body.replaceChildren();

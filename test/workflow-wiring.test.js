@@ -181,3 +181,16 @@ test('AUTO routes a request through recommendations and replaces the old best co
   assert.match(main, /ipcMain\.handle\('models:autoRoute'/);
   assert.doesNotMatch(main, /ipcMain\.handle\('bench:query'/);
 });
+
+test('Diff v2 is structured by state and keeps the existing review entry point', () => {
+  const html = source('renderer/index.html');
+  const renderer = source('renderer/app.js');
+  const main = source('main.js');
+
+  assert.match(html, /features\/diff-viewer\.js/);
+  assert.match(html, /styles\/diff-viewer\.css/);
+  assert.match(renderer, /window\.DiffViewer\.show/);
+  assert.match(renderer, /'review-diff-btn'\)\.addEventListener\('click', showDiff\)/);
+  assert.match(main, /createDiffService/);
+  assert.match(main, /ipcMain\.handle\('git:diff'/);
+});
