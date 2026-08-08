@@ -19,6 +19,7 @@ const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark
 const { selectAutoModel } = require('./src/main/model-router');
 const { createCheckpointService } = require('./src/main/checkpoint-service');
 const { createDiffService } = require('./src/main/diff-service');
+const { normalizeCodeReview, SUBMIT_CODE_REVIEW_TOOL } = require('./src/main/code-review');
 const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
@@ -1335,6 +1336,90 @@ async function runSubagent(task, subModel, cwd) {
   return `Subagent report (${subModel}, ${steps} tool calls):\n${report}`;
 }
 
+// ---------- structured code review ----------
+const REVIEW_MAX_STEPS = 14;
+
+function reviewerSystemPrompt(cwd, base) {
+  return [
+    'You are a strict read-only code reviewer inside Brittain Code.',
+    `Working directory: ${cwd}. Review target base: ${base}.`,
+    'Inspect the supplied diff and use read-only project tools when more context is required.',
+    'Report only actionable defects introduced by the reviewed changes. Do not report style preferences or unsupported guesses.',
+    'Each finding must include severity, numeric confidence, exact project-relative file and line, concrete evidence, and a specific suggested fix.',
+    'Use critical only for data loss, security compromise, or total application failure. Use high for likely serious runtime failures, medium for bounded defects, and low for small but real correctness problems.',
+    'When finished, call submit_code_review exactly once. An empty findings array is correct when no actionable defect is supported by evidence.',
+    scopedProjectContext(cwd),
+  ].filter(Boolean).join('\n');
+}
+
+async function collectReviewEvidence(cwd, requestedBase) {
+  const base = String(requestedBase || 'HEAD').trim() || 'HEAD';
+  if (base.startsWith('-') || /[\0\r\n]/.test(base)) throw new Error('The review base is not a valid Git revision.');
+  const verified = await gitRun(['rev-parse', '--verify', `${base}^{commit}`], cwd);
+  if (!verified.ok) throw new Error(`Git revision "${base}" was not found.`);
+  const [diff, status, untracked] = await Promise.all([
+    gitRun(['diff', '--no-ext-diff', '--unified=20', base, '--', '.'], cwd),
+    gitRun(['status', '--short', '--untracked-files=normal', '--', '.'], cwd),
+    gitRun(['ls-files', '--others', '--exclude-standard', '--', '.'], cwd),
+  ]);
+  if (!diff.ok) throw new Error(diff.err || 'Could not read the review diff.');
+  return {
+    base,
+    diff: diff.out.slice(0, 140_000),
+    status: status.out.slice(0, 20_000),
+    untracked: untracked.out.split('\n').filter(Boolean).slice(0, 200),
+  };
+}
+
+async function runStructuredReview(model, cwd, requestedBase) {
+  const evidence = await collectReviewEvidence(cwd, requestedBase);
+  if (!evidence.diff.trim() && !evidence.untracked.length) {
+    return normalizeCodeReview({ summary: `No changes were found relative to ${evidence.base}.`, findings: [] }, evidence.base);
+  }
+  const numCtx = await effectiveContext(model, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
+  const useThink = (await supportsThinking(model)) ? false : undefined;
+  const tools = [...SUBAGENT_TOOLS, SUBMIT_CODE_REVIEW_TOOL];
+  const msgs = [
+    { role: 'system', content: reviewerSystemPrompt(cwd, evidence.base) },
+    {
+      role: 'user',
+      content: `REVIEW THIS WORKING TREE.\n\nGIT STATUS:\n${evidence.status || '(clean)'}\n\nUNTRACKED FILES:\n${evidence.untracked.join('\n') || '(none)'}\n\nDIFF AGAINST ${evidence.base}:\n${evidence.diff || '(tracked diff is empty; inspect the untracked files)'}\n\nInspect any needed files, then submit the structured review.`,
+    },
+  ];
+  let lastContent = '';
+  for (let step = 0; step < REVIEW_MAX_STEPS; step++) {
+    if (stopRequested) throw new DOMException('Stopped', 'AbortError');
+    let { content, toolCalls, stats } = await streamChat(model, msgs, currentAbort.signal, useThink, true, numCtx, tools);
+    recordUsage('verifier', stats);
+    if (!toolCalls.length) {
+      const recovered = parseRawToolCalls(content);
+      if (recovered) {
+        toolCalls = recovered.calls;
+        content = recovered.cleaned;
+      }
+    }
+    if (content) lastContent = content;
+    const assistant = { role: 'assistant', content };
+    if (toolCalls.length) assistant.tool_calls = toolCalls;
+    msgs.push(assistant);
+    if (!toolCalls.length) {
+      msgs.push({ role: 'user', content: 'Stop narrating. Call submit_code_review now with only evidence-supported findings.' });
+      continue;
+    }
+    for (const call of toolCalls) {
+      const name = call.function?.name;
+      let args = call.function?.arguments || {};
+      if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
+      if (name === 'submit_code_review') return normalizeCodeReview(args, evidence.base);
+      const result = SUBAGENT_TOOL_NAMES.has(name)
+        ? await safeExecute(name, args, cwd)
+        : `Error: tool "${name}" is not available to the reviewer.`;
+      msgs.push({ role: 'tool', tool_name: name, content: String(result) });
+    }
+  }
+  return normalizeCodeReview({ summary: lastContent || 'Reviewer reached its step limit.', findings: [] }, evidence.base);
+}
+
 // ---------- orchestrated coding (/orchestrate) ----------
 const ORCHESTRATOR_MAX_STEPS = 18;
 const CODER_MAX_STEPS = 30;
@@ -2309,6 +2394,64 @@ ipcMain.handle('chat:plan', async (_e, { model, subModel, goal, cwd, think, onli
   } finally {
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
+    currentAbort = null;
+    win.webContents.send('stream:done');
+  }
+});
+
+ipcMain.handle('chat:review', async (_e, { model, cwd, base }) => {
+  if (!model) return { ok: false, error: 'Select a reviewer model first.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
+  try {
+    win.webContents.send('stream:state', `reviewing (${model})`);
+    win.webContents.send('stream:info', `Reviewer ${model} is inspecting changes relative to ${base || 'HEAD'}. No files will be changed.`);
+    const review = await runStructuredReview(model, cwd, base);
+    return { ok: true, review };
+  } catch (error) {
+    if (error.name === 'AbortError') return { ok: true, stopped: true };
+    runOutcome = 'failed';
+    return { ok: false, error: String(error.message || error) };
+  } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
+    currentAbort = null;
+    win.webContents.send('stream:done');
+  }
+});
+
+ipcMain.handle('chat:reviewFix', async (_e, { coderModel, cwd, findings, autoApprove, autoBranch, think }) => {
+  if (!coderModel) return { ok: false, error: 'Select a coder model first.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  const review = normalizeCodeReview({ summary: 'Selected review findings', findings }, 'selected findings');
+  if (!review.findings.length) return { ok: false, error: 'Select at least one valid review finding.' };
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
+  try {
+    await maybeAutoBranch(cwd, 'fix selected review findings', !!autoBranch);
+    await createCheckpoint(cwd);
+    const task = {
+      title: `Fix ${review.findings.length} selected review finding${review.findings.length === 1 ? '' : 's'}`,
+      objective: 'Correct every selected structured review finding. Inspect the current code before editing and preserve unrelated changes.\n\n' + JSON.stringify(review.findings, null, 2),
+      acceptance_criteria: review.findings.map((finding) => `${finding.file}:${finding.line} — ${finding.title} is corrected and verified.`),
+      relevant_files: [...new Set(review.findings.map((finding) => finding.file))],
+      constraints: ['Do not change findings that were not selected.', 'Run the most relevant available verification check.'],
+    };
+    const result = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think);
+    const mutations = new Set(result.evidence.filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name)).flatMap(evidencePaths));
+    const commands = result.evidence.filter((entry) => entry.name === 'run_command' || entry.name === 'run_project_check').map((entry) => entry.args?.command || entry.args?.check || entry.name);
+    await emitRunReport(cwd, { mutations, commands, verified: commands.length > 0 });
+    return { ok: true, report: result.report };
+  } catch (error) {
+    if (error.name === 'AbortError') return { ok: true, stopped: true };
+    runOutcome = 'failed';
+    return { ok: false, error: String(error.message || error) };
+  } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     currentAbort = null;
     win.webContents.send('stream:done');
   }

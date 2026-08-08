@@ -91,6 +91,7 @@ Type these in the message box:
 | `/subagent [name]` | Show or set the subagent/verifier model (default qwen3:8b) |
 | `/loop [n] <goal>` | Work toward a goal with the selected model for up to n iterations (default 8). Turn AUTO-APPROVE on for unattended runs |
 | `/plan <goal>` | Inspect the project and show an editable implementation plan. Run, edit, or cancel it before any coding starts |
+| `/review [base]` | Review changes relative to a Git base with structured findings, then send selected findings to the coder |
 | `/orchestrate <goal>` | Use the selected model as a read-only planner, delegate sequential tasks to the coder model, and verify each task with the subagent model |
 | `/mission [n] <goal>` | Run a persisted, visible coder mission for up to n iterations; `/mission status` inspects it and `/mission stop` cancels it |
 | `/usage` | Show context remaining and token spend across planner/main agent, scouts, coders, and verifier |

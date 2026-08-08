@@ -34,6 +34,8 @@ contextBridge.exposeInMainWorld('api', {
   compact: (payload) => ipcRenderer.invoke('chat:compact', payload),
   loop: (payload = {}) => ipcRenderer.invoke('chat:loop', payload),
   plan: (payload) => ipcRenderer.invoke('chat:plan', payload),
+  review: (payload) => ipcRenderer.invoke('chat:review', payload),
+  reviewFix: (payload) => ipcRenderer.invoke('chat:reviewFix', payload),
   orchestrate: (payload) => ipcRenderer.invoke('chat:orchestrate', payload),
   missionStart: (payload) => ipcRenderer.invoke('mission:start', payload),
   missionGet: () => ipcRenderer.invoke('mission:get'),

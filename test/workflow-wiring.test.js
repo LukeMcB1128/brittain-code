@@ -194,3 +194,19 @@ test('Diff v2 is structured by state and keeps the existing review entry point',
   assert.match(main, /createDiffService/);
   assert.match(main, /ipcMain\.handle\('git:diff'/);
 });
+
+test('structured review can send selected findings to the coder', () => {
+  const html = source('renderer/index.html');
+  const renderer = source('renderer/app.js');
+  const preload = source('preload.js');
+  const main = source('main.js');
+
+  assert.match(html, /features\/review-findings\.js/);
+  assert.match(renderer, /case 'review'/);
+  assert.match(renderer, /window\.api\.reviewFix/);
+  assert.match(preload, /chat:reviewFix/);
+  assert.match(main, /submit_code_review/);
+  assert.match(main, /ipcMain\.handle\('chat:review'/);
+  assert.match(main, /ipcMain\.handle\('chat:reviewFix'/);
+  assert.match(main, /await createCheckpoint\(cwd\)/);
+});

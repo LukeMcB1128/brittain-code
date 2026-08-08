@@ -753,7 +753,7 @@ async function send() {
   if ((!text && !attachmentCount()) || (busy && !missionControl)) return;
   if (text.startsWith('/')) {
     input.value = '';
-    if (text === '/help' || text.includes('/auto') || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/plan') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
+    if (text === '/help' || text.includes('/auto') || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/plan') || text.includes('/review') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
       hideStartupMessage();
     }
     return handleSlash(text);
@@ -1649,6 +1649,7 @@ const SLASH_HELP = [
   '/graph — show a visual tree of the git commit history',
   '/loop [n] <goal> — repeat a single model until verified',
   '/plan <goal> — inspect the project and approve or edit a plan before coding',
+  '/review [base] — run a structured read-only review and send selected findings to the coder',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
   '/mission [iterations] <goal> — run a visible, persisted bounded coding mission; use /mission status or /mission stop',
   '/model <name> — switch model (partial match ok)',
@@ -1682,7 +1683,7 @@ async function handleSlash(raw) {
   const [cmd, ...rest] = raw.slice(1).split(' ');
   const arg = rest.join(' ').trim();
   const normalizedCmd = cmd.toLowerCase();
-  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory']);
+  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'review', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory']);
   if (appMode === 'chat' && codeOnlyCommands.has(normalizedCmd)) {
     return addError(`/${normalizedCmd} is only available in Code mode.`);
   }
@@ -1797,6 +1798,53 @@ async function handleSlash(raw) {
         plannerModel,
         onlineResearch: planOnlineResearch,
       });
+      return;
+    }
+
+    case 'review': {
+      if (busy) return;
+      if (!modelSelect.value) return addError('No reviewer model selected.');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      const reviewCwd = cwd;
+      startRun();
+      let result;
+      try {
+        result = await window.api.review({ model: modelSelect.value, cwd: reviewCwd, base: arg || 'HEAD' });
+      } catch (error) {
+        result = { ok: false, error: error.message || String(error) };
+      } finally {
+        endRun();
+      }
+      if (!result.ok) return addError('Review failed: ' + result.error);
+      if (result.stopped) return addInfo('Review stopped. No files were changed.');
+      if (cwd !== reviewCwd) return addError('The working directory changed while reviewing. Run /review again.');
+      const card = window.ReviewFindings.create(result.review, {
+        onSend: async (selected, reviewCard) => {
+          startRun();
+          let fixResult;
+          try {
+            fixResult = await window.api.reviewFix({
+              coderModel,
+              cwd: reviewCwd,
+              findings: selected.map((finding) => ({ ...finding, suggested_fix: finding.suggestedFix })),
+              autoApprove: autoApprove.checked,
+              autoBranch: autoBranchToggle.checked,
+              think: thinkToggle.checked,
+            });
+          } catch (error) {
+            fixResult = { ok: false, error: error.message || String(error) };
+          } finally {
+            endRun();
+          }
+          if (!fixResult.ok) return addError('Coder failed: ' + fixResult.error);
+          reviewCard.remove();
+          if (fixResult.report) renderMarkdown(addMessage('assistant', fixResult.report), fixResult.report);
+          await refreshGit();
+          return saveChat();
+        },
+      });
+      chat.appendChild(card);
+      chat.scrollTop = chat.scrollHeight;
       return;
     }
 
