@@ -165,3 +165,19 @@ test('model recommendations are wired through the command, bridge, and packaged 
   assert.equal(packageJson.build.files.includes('src/**'), true);
   assert.equal(packageJson.dependencies.systeminformation, '^5.33.1');
 });
+
+test('AUTO routes a request through recommendations and replaces the old best command', () => {
+  const renderer = source('renderer/app.js');
+  const preload = source('preload.js');
+  const main = source('main.js');
+
+  assert.match(renderer, /case 'auto'/);
+  assert.match(renderer, /window\.api\.autoRouteModel/);
+  assert.match(renderer, /input\.value = arg;\n\s+return send\(\)/);
+  assert.doesNotMatch(renderer, /case 'best'/);
+  assert.doesNotMatch(renderer, /\/best/);
+  assert.match(preload, /ipcRenderer\.invoke\('models:autoRoute'/);
+  assert.doesNotMatch(preload, /bench:query/);
+  assert.match(main, /ipcMain\.handle\('models:autoRoute'/);
+  assert.doesNotMatch(main, /ipcMain\.handle\('bench:query'/);
+});

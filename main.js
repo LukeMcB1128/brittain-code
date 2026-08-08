@@ -15,7 +15,8 @@ const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore } = require('./src/main/history-store');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
-const { queryBenchmarks, readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
+const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
+const { selectAutoModel } = require('./src/main/model-router');
 const { createCheckpointService } = require('./src/main/checkpoint-service');
 const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
 
@@ -2506,14 +2507,12 @@ ipcMain.handle('mcp:openConfig', () => {
   }
 });
 
-// ---------- benchmark-informed model router ----------
+// ---------- benchmark data ----------
 // Dev-only: reads the local benchmark harness's own results.json (gitignored,
 // never bundled into a packaged build — benchmarking is a source-tree
 // workflow, not a shipped feature). Missing file is a normal, expected state,
 // not an error: it just means no benchmarks have been run yet.
 const readBenchResults = () => readBenchResultsFile(path.join(__dirname, 'benchmark', 'results.json'));
-
-ipcMain.handle('bench:query', (_e, taskFilter) => queryBenchmarks(readBenchResults(), taskFilter));
 
 // true when running from source (npm start) rather than the installed build
 ipcMain.handle('app:isDev', () => !app.isPackaged);
@@ -2662,6 +2661,15 @@ const getModelRecommendations = createRecommendationsService({
 });
 
 ipcMain.handle('models:recommendations', (_event, options) => getModelRecommendations(options));
+ipcMain.handle('models:autoRoute', async (_event, options = {}) => {
+  const mode = options.mode === 'chat' ? 'chat' : 'code';
+  const recommendations = await getModelRecommendations({ mode });
+  if (!recommendations.ok) return recommendations;
+  return selectAutoModel(recommendations.models, {
+    mode,
+    needsVision: !!options.needsVision,
+  });
+});
 
 // ---------- git integration (gitRun lives in tools.js) ----------
 ipcMain.handle('git:status', async (_e, cwd) => {

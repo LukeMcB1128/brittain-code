@@ -96,7 +96,7 @@ Type these in the message box:
 | `/usage` | Show context remaining and token spend across planner/main agent, scouts, coders, and verifier |
 | `/context` | Show exactly what will be sent next turn — system prompt, per-message tokens, eviction flags |
 | `/recs` | Compare installed models by memory fit, capabilities, measured speed, and local Brittainmark results |
-| `/best [task] [use]` | Rank installed models by their local benchmark score for a task; `use` switches to the top result |
+| `/auto <request>` | Select the best compatible installed model for the current mode and attachments, then run the request |
 | `/mcp [on\|off <server>]` | External MCP tool servers: status, enable, disable |
 | `/memory` | View what the agent has remembered for the selected project |
 | `/export` | Save the chat as a markdown file |
@@ -150,7 +150,7 @@ A batch runner creates fixtures, drives the tool loop, saves chats, and grades e
 node benchmark/run.js --models 'local:*' --tasks all
 ```
 
-Local models run through Ollama; OpenAI and Anthropic adapters exist **for benchmarking only** (the app itself stays Ollama-compatible) and require their own API keys. Grading appends to `results.json` and rebuilds an HTML report with a leaderboard, model-by-task matrix, and telemetry-backed timing. `/best` inside the app ranks your installed models from those results.
+Local models run through Ollama; OpenAI and Anthropic adapters exist **for benchmarking only** (the app itself stays Ollama-compatible) and require their own API keys. Grading appends to `results.json` and rebuilds an HTML report with a leaderboard, model-by-task matrix, and telemetry-backed timing. `/auto` uses compatible local Brittainmark data as one signal when it selects an installed model.
 
 See [`benchmark/README.md`](benchmark/README.md) for tasks, repetition guidance, grading, and report commands.
 

@@ -753,7 +753,7 @@ async function send() {
   if ((!text && !attachmentCount()) || (busy && !missionControl)) return;
   if (text.startsWith('/')) {
     input.value = '';
-    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/plan') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
+    if (text === '/help' || text.includes('/auto') || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/plan') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
       hideStartupMessage();
     }
     return handleSlash(text);
@@ -1658,7 +1658,7 @@ const SLASH_HELP = [
   '/mcp [on|off <server>] — external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
   '/recs — compare installed models for this computer',
-  '/best [task] [use] — rank installed models by local benchmark score for a task; "use" switches to the top result',
+  '/auto <request> — select the best compatible installed model and run the request',
   '/memory — view what the agent has remembered',
   '/export — save this chat as a markdown file',
   '/tools — list all available tools',
@@ -1673,6 +1673,7 @@ const CHAT_SLASH_HELP = [
   '/mcp [on|off <server>] - external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
   '/recs — compare installed models for this computer',
+  '/auto <request> — select the best compatible installed model and run the request',
   '/export — save this chat as a markdown file',
   '/tools — list tools available to the app',
 ].join('\n');
@@ -1969,33 +1970,30 @@ async function handleSlash(raw) {
       }
     }
 
-    case 'best': {
-      const parts = arg.split(/\s+/).filter(Boolean);
-      const useIt = parts[parts.length - 1] === 'use';
-      if (useIt) parts.pop();
-      const task = parts.join(' ') || '';
-      const res = await window.api.benchQuery(task || undefined);
-      if (!res.ok) return addError(res.error);
-      if (!res.available) return addInfo('No local benchmark results found yet (benchmark/results.json is dev-only and gitignored — run the harness in benchmark/ first).');
-      if (!task) {
-        if (!res.rows.length) return addInfo('No scored runs yet.');
-        const byTask = new Map();
-        for (const r of res.rows) if (!byTask.has(r.task)) byTask.set(r.task, r); // rows are pre-sorted best-first
-        const lines = [...byTask.values()].map((r) => `${r.task.padEnd(12)} best: ${r.model} (median ${r.median}, ${r.runs} run${r.runs === 1 ? '' : 's'})`);
-        return showOverlay('BENCHMARK LEADERBOARD', 'Tasks: ' + res.tasks.join(', ') + '\n\n' + lines.join('\n') + '\n\nUse /best <task> for the full ranking, or /best <task> use to switch models.');
+    case 'auto': {
+      if (busy) return;
+      if (!arg) return addError('Usage: /auto <request>');
+      if (appMode === 'code' && !cwd) return addError('Pick a working directory first (DIR button, top left).');
+      setState('selecting model…');
+      let route;
+      try {
+        route = await window.api.autoRouteModel({
+          mode: appMode,
+          needsVision: pendingImages.length > 0,
+        });
+      } catch (err) {
+        route = { ok: false, error: err.message || String(err) };
+      } finally {
+        setState('idle');
       }
-      const rows = res.rows.filter((r) => r.task === task);
-      if (!rows.length) return addError(`No results for task "${task}". Known tasks: ${res.tasks.join(', ') || '(none)'}`);
-      if (useIt) {
-        const top = rows[0];
-        if (!currentModels.includes(top.model)) return addError(`Top model "${top.model}" for "${task}" isn't installed here. Ranking:\n` + rows.map((r) => `${r.model} — median ${r.median}`).join('\n'));
-        modelSelect.value = top.model;
-        localStorage.setItem('model', top.model);
-        localStorage.setItem(`model:${appMode}`, top.model);
-        return addInfo(`Switched to ${top.model} — top scorer for "${task}" (median ${top.median} over ${top.runs} run${top.runs === 1 ? '' : 's'}).`);
-      }
-      const lines = rows.map((r, i) => `${i + 1}. ${r.model.padEnd(24)} median ${String(r.median).padStart(3)}  (${r.runs} run${r.runs === 1 ? '' : 's'}, ${r.mode})`);
-      return showOverlay(`BENCHMARK — ${task}`, lines.join('\n') + '\n\n/best ' + task + ' use — switch to the top model');
+      if (!route.ok) return addError('AUTO could not select a model: ' + route.error);
+      if (!currentModels.includes(route.model)) return addError(`AUTO selected "${route.model}", but it is not in the current installed-model list.`);
+      modelSelect.value = route.model;
+      localStorage.setItem('model', route.model);
+      localStorage.setItem(`model:${appMode}`, route.model);
+      addInfo(`AUTO selected ${route.model} — ${route.reason}.${route.warning ? `\nWarning: ${route.warning}` : ''}`);
+      input.value = arg;
+      return send();
     }
 
     case 'usage': {
