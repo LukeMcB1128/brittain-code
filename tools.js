@@ -15,6 +15,11 @@ const net = require('net');
 const dns = require('dns').promises;
 const { execFile, exec, spawn } = require('child_process');
 const { createToolPolicy } = require('./src/tools/policy');
+const {
+  findReferences,
+  findSymbol,
+  projectOutline,
+} = require('./src/tools/semantic-navigation');
 
 const MAX_TOOL_OUTPUT = 40_000;   // chars of tool output fed back to the model
 
@@ -729,6 +734,59 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'project_outline',
+      description: 'Build a bounded, language-aware outline of symbols in project source files. Returns file paths, symbol kinds, names, lines, and signatures. Skips dependencies and generated output.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Project-relative file or directory to inspect (default: working directory).' },
+          max_files: { type: 'number', description: 'Maximum source files to inspect from 1 to 500 (default: 100).' },
+          max_symbols: { type: 'number', description: 'Maximum symbols to return from 1 to 2000 (default: 500).' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_symbol',
+      description: 'Find language-aware symbol definitions by exact name. Returns the definition kind, project-relative file, line, and signature.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Exact symbol name to find.' },
+          path: { type: 'string', description: 'Project-relative file or directory to search (default: working directory).' },
+          kind: { type: 'string', description: 'Optional exact symbol kind, such as class, function, type, or variable.' },
+          case_sensitive: { type: 'boolean', description: 'Match case exactly (default: true).' },
+          max_files: { type: 'number', description: 'Maximum source files to inspect from 1 to 2000 (default: 500).' },
+          max_results: { type: 'number', description: 'Maximum definitions to return from 1 to 200 (default: 50).' },
+        },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_references',
+      description: 'Find bounded lexical references to an identifier in source files. Marks lines that also contain a detected definition. This is language-aware navigation, not compiler-level type resolution.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Identifier to find, without dots or spaces.' },
+          path: { type: 'string', description: 'Project-relative file or directory to search (default: working directory).' },
+          include_definitions: { type: 'boolean', description: 'Include detected definition lines (default: true).' },
+          case_sensitive: { type: 'boolean', description: 'Match case exactly (default: true).' },
+          max_files: { type: 'number', description: 'Maximum source files to inspect from 1 to 2000 (default: 500).' },
+          max_results: { type: 'number', description: 'Maximum references to return from 1 to 500 (default: 100).' },
+        },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'search_local_docs',
       description: 'Search project documentation and locally installed direct-dependency documentation without internet access. Searches Markdown/text/reStructuredText docs while ordinary source search continues to skip node_modules.',
       parameters: {
@@ -1351,6 +1409,24 @@ async function executeTool(name, args, cwd) {
         }
       }
       return results.length ? truncate(results.join(contextLines ? '\n\n' : '\n')) : 'No matches found.';
+    }
+    case 'project_outline': {
+      const target = resolveInside(cwd, args.path);
+      return truncate(JSON.stringify(projectOutline(fs.realpathSync(cwd), target, args), null, 2));
+    }
+    case 'find_symbol': {
+      if (!String(args.name || '').trim()) return 'Error: name must not be empty.';
+      const target = resolveInside(cwd, args.path);
+      return truncate(JSON.stringify(findSymbol(fs.realpathSync(cwd), target, args), null, 2));
+    }
+    case 'find_references': {
+      if (!String(args.name || '').trim()) return 'Error: name must not be empty.';
+      const target = resolveInside(cwd, args.path);
+      try {
+        return truncate(JSON.stringify(findReferences(fs.realpathSync(cwd), target, args), null, 2));
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
     }
     case 'search_local_docs': {
       const query = String(args.query || '');

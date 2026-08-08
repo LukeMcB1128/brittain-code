@@ -31,6 +31,7 @@ const RISKY_TOOLS = new Set([
 
 const SUBAGENT_TOOL_NAMES = new Set([
   'read_file', 'browse_files', 'search_files', 'search_local_docs',
+  'project_outline', 'find_symbol', 'find_references',
   'get_file_lines', 'file_metadata',
   'get_git_log', 'read_git_diff', 'check_port_usage',
 ]);
@@ -43,7 +44,9 @@ const ORCHESTRATOR_TOOL_NAMES = new Set([
 const CODER_TOOL_NAMES = new Set([
   'read_file', 'write_file', 'edit_file', 'edit_files', 'append_file',
   'create_directory', 'delete_file', 'copy_file', 'move_file',
-  'browse_files', 'search_files', 'search_local_docs', 'get_file_lines', 'file_metadata',
+  'browse_files', 'search_files', 'search_local_docs',
+  'project_outline', 'find_symbol', 'find_references',
+  'get_file_lines', 'file_metadata',
   'run_command', 'run_project_check', 'git_status', 'read_git_diff',
 ]);
 

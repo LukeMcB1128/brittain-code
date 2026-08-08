@@ -106,6 +106,46 @@ test('canonical browse, search, and metadata tools cover the retired read-only h
   assert.equal(metadata.hash.algorithm, 'sha256');
 });
 
+test('semantic navigation outlines definitions and finds bounded references', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(cwd, 'src'));
+  fs.mkdirSync(path.join(cwd, 'node_modules', 'ignored'), { recursive: true });
+  fs.writeFileSync(path.join(cwd, 'src', 'sample.js'), [
+    'class SampleService {',
+    '  run() { return helper(); }',
+    '}',
+    'function helper() { return 1; }',
+    'const makeSample = () => new SampleService();',
+    'module.exports = { SampleService, helper, makeSample };',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(cwd, 'src', 'worker.py'), 'def helper():\n    return 2\n');
+  fs.writeFileSync(path.join(cwd, 'node_modules', 'ignored', 'fake.js'), 'class SampleService {}\n');
+
+  const outline = JSON.parse(await executeTool('project_outline', { path: 'src' }, cwd));
+  assert.equal(outline.file_count, 2);
+  assert.equal(outline.symbol_count, 4);
+  assert.deepEqual(outline.files[0].symbols.map((item) => item.name), ['SampleService', 'helper', 'makeSample']);
+
+  const symbols = JSON.parse(await executeTool('find_symbol', { name: 'helper' }, cwd));
+  assert.equal(symbols.count, 2);
+  assert.deepEqual(symbols.results.map((item) => item.path), ['src/sample.js', 'src/worker.py']);
+
+  const references = JSON.parse(await executeTool('find_references', {
+    name: 'SampleService',
+    include_definitions: false,
+    max_results: 2,
+  }, cwd));
+  assert.equal(references.count, 2);
+  assert.equal(references.results.every((item) => item.is_definition === false), true);
+  assert.equal(references.results.some((item) => item.path.includes('node_modules')), false);
+  assert.equal(references.truncated, true);
+
+  const invalid = await executeTool('find_references', { name: 'SampleService.run' }, cwd);
+  assert.match(invalid, /one identifier/);
+});
+
 test('folder-free Chat mode receives only conversation and research tools', () => {
   const names = new Set(CHAT_TOOLS.map((definition) => definition.function.name));
   assert.deepEqual(names, CHAT_TOOL_NAMES);
