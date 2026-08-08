@@ -38,7 +38,11 @@ test('tool schemas have unique names and matching execution cases', () => {
 
   const source = fs.readFileSync(path.join(__dirname, '..', 'tools.js'), 'utf8');
   const implemented = new Set([...source.matchAll(/case '([^']+)'/g)].map((match) => match[1]));
-  const mainProcessTools = new Set(['ask_user', 'run_subagent']);
+  const mainProcessTools = new Set([
+    'ask_user', 'run_subagent',
+    'browser_open', 'browser_snapshot', 'browser_click', 'browser_type',
+    'browser_console', 'browser_screenshot', 'browser_close',
+  ]);
   for (const name of names) {
     if (!mainProcessTools.has(name)) assert.equal(implemented.has(name), true, `${name} needs an executeTool case`);
   }
@@ -75,6 +79,8 @@ test('orchestration roles receive deliberately scoped toolsets', () => {
   assert.equal(coderNames.has('browse_files'), true);
   assert.equal(coderNames.has('search_files'), true);
   assert.equal(coderNames.has('file_metadata'), true);
+  assert.equal(coderNames.has('browser_snapshot'), true);
+  assert.equal(coderNames.has('browser_click'), true);
   assert.equal(coderNames.has('replace_in_file'), false);
   assert.equal(coderNames.has('run_project_check'), true);
   assert.equal(coderNames.has('web_search'), false);

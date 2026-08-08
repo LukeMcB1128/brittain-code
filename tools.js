@@ -1048,6 +1048,115 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'browser_open',
+      description: 'Open an isolated hidden browser session for a loopback HTTP or HTTPS page. External navigation, windows, and resources are blocked.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Loopback URL on localhost, 127.0.0.0/8, or ::1.' },
+          width: { type: 'number', description: 'Viewport width from 320 to 1920 (default: 1280).' },
+          height: { type: 'number', description: 'Viewport height from 240 to 1080 (default: 800).' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_snapshot',
+      description: 'Read a browser session DOM snapshot with bounded HTML and stable selectors for interactive elements.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          max_chars: { type: 'number', description: 'Maximum HTML characters from 1000 to 80000 (default: 30000).' },
+        },
+        required: ['session_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_click',
+      description: 'Click one element in a loopback browser session by CSS selector.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          selector: { type: 'string', description: 'CSS selector from browser_snapshot or project knowledge.' },
+          wait_ms: { type: 'number', description: 'Optional wait after the click from 0 to 5000 milliseconds.' },
+        },
+        required: ['session_id', 'selector'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_type',
+      description: 'Enter text into an input, textarea, or content-editable element in a loopback browser session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          selector: { type: 'string', description: 'CSS selector for the target element.' },
+          text: { type: 'string', description: 'Text to enter.' },
+          clear: { type: 'boolean', description: 'Replace existing content (default: true).' },
+          press_enter: { type: 'boolean', description: 'Dispatch Enter after typing (default: false).' },
+          wait_ms: { type: 'number', description: 'Optional wait after typing from 0 to 5000 milliseconds.' },
+        },
+        required: ['session_id', 'selector', 'text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_console',
+      description: 'Read recent console messages from a loopback browser session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          max_entries: { type: 'number', description: 'Maximum recent messages from 1 to 200 (default: 100).' },
+          clear: { type: 'boolean', description: 'Clear buffered messages after reading (default: false).' },
+        },
+        required: ['session_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_screenshot',
+      description: 'Capture the visible loopback page and save a PNG in Brittain Code application data.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          filename: { type: 'string', description: 'Optional safe filename. It is stored in application data, not the project.' },
+        },
+        required: ['session_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_close',
+      description: 'Close an isolated loopback browser session and release its resources.',
+      parameters: {
+        type: 'object',
+        properties: { session_id: { type: 'string', description: 'Session id returned by browser_open.' } },
+        required: ['session_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'create_git_branch',
       description: 'Create a new git branch and switch to it.',
       parameters: {

@@ -105,6 +105,22 @@ test('Code and Chat modes are wired through UI, persistence, and the agent bound
   assert.match(main, /if \(!activeToolNames\.has\(name\)\)/);
 });
 
+test('local browser verification is loopback-only and available to coding workers', () => {
+  const main = source('main.js');
+  const tools = source('tools.js');
+  const service = source('src/main/local-browser-service.js');
+  const policy = source('src/tools/policy.js');
+
+  assert.match(main, /createLocalBrowserService/);
+  assert.match(main, /localBrowser\.closeAll\(\)/);
+  assert.match(tools, /name: 'browser_snapshot'/);
+  assert.match(tools, /name: 'browser_screenshot'/);
+  assert.match(service, /Only localhost, 127\.0\.0\.0\/8, and ::1 are allowed/);
+  assert.match(service, /onBeforeRequest/);
+  assert.match(service, /capturePage/);
+  assert.match(policy, /'browser_open', 'browser_snapshot', 'browser_click', 'browser_type'/);
+});
+
 test('general attachments are wired from the picker through local extraction and history rendering', () => {
   const html = source('renderer/index.html');
   const renderer = source('renderer/app.js');

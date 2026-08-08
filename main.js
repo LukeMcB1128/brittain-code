@@ -22,6 +22,7 @@ const { createDiffService } = require('./src/main/diff-service');
 const { normalizeCodeReview, SUBMIT_CODE_REVIEW_TOOL } = require('./src/main/code-review');
 const { captureMissionRecovery, validateMissionRecovery } = require('./src/main/mission-recovery');
 const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
+const { LOCAL_BROWSER_TOOL_NAMES, createLocalBrowserService } = require('./src/main/local-browser-service');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 // The context window we actually request from Ollama. Without an explicit
@@ -290,6 +291,10 @@ if (process.platform !== 'win32') {
 }
 
 const mcp = new McpManager();
+const localBrowser = createLocalBrowserService({
+  BrowserWindow,
+  getDataDir: () => settingsUserDataDir || app.getPath('userData'),
+});
 
 app.whenReady().then(() => {
   settingsUserDataDir = app.getPath('userData');
@@ -310,6 +315,7 @@ app.on('before-quit', () => {
     lastEvent: 'Brittain Code closed before this mission finished.',
   });
   stopAllManagedProcesses();
+  localBrowser.closeAll();
   mcp.stopAll();
 });
 app.on('window-all-closed', () => app.quit());
@@ -2657,6 +2663,7 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
 
 async function safeExecute(name, args, cwd) {
   try {
+    if (LOCAL_BROWSER_TOOL_NAMES.has(name)) return await localBrowser.execute(name, args, cwd);
     return await executeTool(name, args, cwd);
   } catch (err) {
     return `Error: ${err.message}`;

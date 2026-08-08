@@ -11,6 +11,9 @@ const RISKY_TOOLS = new Set([
   'start_process',
   'stop_process',
   'local_http_request',
+  'browser_click',
+  'browser_type',
+  'browser_screenshot',
   'append_file',
   'create_directory',
   'delete_file',
@@ -47,6 +50,8 @@ const CODER_TOOL_NAMES = new Set([
   'browse_files', 'search_files', 'search_local_docs',
   'project_outline', 'find_symbol', 'find_references',
   'get_file_lines', 'file_metadata',
+  'browser_open', 'browser_snapshot', 'browser_click', 'browser_type',
+  'browser_console', 'browser_screenshot', 'browser_close',
   'run_command', 'run_project_check', 'git_status', 'read_git_diff',
 ]);
 
