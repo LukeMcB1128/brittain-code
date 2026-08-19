@@ -4,6 +4,10 @@
   <meta charset="UTF-8" />
   <title>Brittain</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="styles/recommendations.css" />
+  <link rel="stylesheet" href="styles/plan-draft.css" />
+  <link rel="stylesheet" href="styles/diff-viewer.css" />
+  <link rel="stylesheet" href="styles/review-findings.css" />
 </head>
 <body>
   <header id="topbar">
@@ -56,6 +60,7 @@
         <div id="onboarding-title"></div>
         <div id="onboarding-body"></div>
         <div id="onboarding-actions">
+          <button id="onboarding-recommendations">VIEW RECOMMENDATIONS</button>
           <button id="onboarding-retry">CHECK AGAIN</button>
           <button id="onboarding-settings">CHANGE ENDPOINT</button>
           <button id="onboarding-ollama">OPEN OLLAMA.COM</button>
@@ -126,6 +131,7 @@
       <span>speed: <span id="tok-speed">–</span></span>
       <span class="sep">|</span>
       <span id="version-display" class="hidden" title="App version (from package.json)"></span>
+      <button id="update-action" class="mini hidden" title="Restart Brittain Code and install the downloaded update"></button>
       <span id="git-info" class="hidden">
         <span class="sep">|</span>
         <span id="git-branch" title="Current git branch (± = changed files)"></span>
@@ -142,7 +148,7 @@
         <span id="overlay-title"></span>
         <button id="overlay-close">CLOSE</button>
       </div>
-      <pre id="overlay-body"></pre>
+      <div id="overlay-body"></div>
     </div>
   </div>
 
@@ -156,6 +162,17 @@
         <button type="button" id="settings-close">CLOSE</button>
       </div>
       <div class="settings-scroll">
+        <section class="settings-section settings-wide">
+          <h2>APPLICATION UPDATE</h2>
+          <div class="update-settings-row">
+            <span id="settings-update-version"></span>
+            <span id="settings-update-status" class="setting-status">Loading update status…</span>
+            <button type="button" id="settings-check-update">CHECK FOR UPDATES</button>
+            <button type="button" id="settings-install-update" class="approve hidden">RESTART TO UPDATE</button>
+          </div>
+          <p class="setting-help">Official releases check GitHub for newer stable versions. Development and local test builds do not check for updates.</p>
+        </section>
+
         <section class="settings-section settings-wide">
           <h2>INFERENCE ENDPOINT</h2>
           <div class="settings-endpoint-row">
@@ -247,6 +264,10 @@
 
   <script src="vendor/marked.js"></script>
   <script src="vendor/purify.js"></script>
+  <script src="features/recommendations.js"></script>
+  <script src="features/plan-draft.js"></script>
+  <script src="features/diff-viewer.js"></script>
+  <script src="features/review-findings.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

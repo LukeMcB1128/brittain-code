@@ -30,6 +30,9 @@ let settingsDefaults = null;
 let currentModels = [];
 let missionCard = null;
 let latestMission = null;
+let pendingPlanDraft = null;
+let pendingPlanCard = null;
+let updateState = null;
 
 setAppMode(appMode, false, false);
 
@@ -48,10 +51,17 @@ setAppMode(appMode, false, false);
   // Display version number
   try {
     const version = await window.api.getVersion();
-    $('version-display').textContent = version;
+    $('version-display').textContent = `v${version}`;
+    $('settings-update-version').textContent = `CURRENT v${version}`;
     $('version-display').classList.remove('hidden');
   } catch (e) {
     console.error('Failed to load version:', e);
+  }
+
+  try {
+    renderUpdateState(await window.api.updateState());
+  } catch (e) {
+    console.error('Failed to load update state:', e);
   }
 
   // subagent model: validate the saved choice against what's installed
@@ -108,6 +118,46 @@ setAppMode(appMode, false, false);
   showStartupMessage();
 })();
 
+window.api.onUpdateState(renderUpdateState);
+
+function renderUpdateState(state) {
+  if (!state) return;
+  updateState = state;
+  const status = $('settings-update-status');
+  const check = $('settings-check-update');
+  const install = $('settings-install-update');
+  const action = $('update-action');
+  status.textContent = state.message || '';
+  status.classList.toggle('error', state.status === 'error');
+  status.classList.toggle('ok', ['up-to-date', 'downloaded'].includes(state.status));
+  check.disabled = !state.enabled || ['checking', 'downloading', 'installing'].includes(state.status);
+  install.classList.toggle('hidden', state.status !== 'downloaded');
+  action.classList.toggle('hidden', !['downloading', 'downloaded'].includes(state.status));
+  action.disabled = state.status !== 'downloaded';
+  action.textContent = state.status === 'downloaded'
+    ? `UPDATE v${state.version}`
+    : `UPDATE ${state.percent || 0}%`;
+}
+
+async function installReadyUpdate() {
+  if (busy) return addError('Stop the active run before you restart to update.');
+  const version = updateState?.version ? ` ${updateState.version}` : '';
+  if (!(await confirmDialog(`Restart Brittain Code and install version${version}?`, { okLabel: 'RESTART' }))) return;
+  const result = await window.api.installUpdate();
+  if (!result.ok) addError(result.error);
+}
+
+$('settings-check-update').addEventListener('click', async () => {
+  const result = await window.api.checkForUpdates();
+  if (!result.ok && result.error) renderUpdateState(result.state || {
+    ...updateState,
+    status: 'error',
+    message: `Update check failed: ${result.error}`,
+  });
+});
+$('settings-install-update').addEventListener('click', installReadyUpdate);
+$('update-action').addEventListener('click', installReadyUpdate);
+
 function defaultModelForMode(mode) {
   const configured = mode === 'chat' ? appSettings?.chatModel : appSettings?.codeModel;
   return configured || localStorage.getItem(`model:${mode}`) || localStorage.getItem('model') || '';
@@ -141,6 +191,7 @@ function renderOnboarding(state, detail) {
   const title = $('onboarding-title');
   const body = $('onboarding-body');
   const ollamaBtn = $('onboarding-ollama');
+  const recommendationsBtn = $('onboarding-recommendations');
 
   if (state === 'ok') {
     overlay.classList.add('hidden');
@@ -149,6 +200,7 @@ function renderOnboarding(state, detail) {
 
   overlay.classList.remove('hidden');
   ollamaBtn.classList.toggle('hidden', state !== 'unreachable');
+  recommendationsBtn.classList.toggle('hidden', state !== 'empty');
 
   if (state === 'unreachable') {
     title.textContent = 'NO LOCAL MODEL SERVER FOUND';
@@ -167,7 +219,7 @@ function renderOnboarding(state, detail) {
     title.textContent = 'NO MODELS INSTALLED YET';
     body.innerHTML = '';
     const p1 = document.createElement('p');
-    p1.textContent = 'Ollama is running, but no models are pulled. Any tool-calling model works — for example:';
+    p1.textContent = 'Ollama is running, but no models are pulled. View the Mac benchmark recommendations, or pull a model directly:';
     body.appendChild(p1);
     addCopyableCommand(body, 'ollama pull gpt-oss:20b');
     const p2 = document.createElement('p');
@@ -198,6 +250,20 @@ $('onboarding-retry').addEventListener('click', async () => {
   await reloadModels(defaultModelForMode(appMode));
   applySessionDefaults();
   $('onboarding-retry').textContent = 'CHECK AGAIN';
+});
+
+$('onboarding-recommendations').addEventListener('click', async () => {
+  const button = $('onboarding-recommendations');
+  button.textContent = 'LOADING…';
+  try {
+    const result = await window.api.getModelRecommendations(appMode);
+    if (!result.ok) return addError(result.error);
+    showRecommendations(result);
+  } catch (err) {
+    addError('Could not load model recommendations: ' + (err.message || err));
+  } finally {
+    button.textContent = 'VIEW RECOMMENDATIONS';
+  }
 });
 
 $('onboarding-settings').addEventListener('click', () => {
@@ -258,7 +324,14 @@ function setAppMode(mode, persist = true, refreshHistory = true) {
 async function chooseAppMode(mode) {
   if (busy || mode === appMode) return;
   const conversation = await window.api.getConversation();
-  if (conversation.length && !(await confirmDialog(`Switch to ${mode.toUpperCase()} and start a new session?\n\nYour current chat is already saved in History.`, { okLabel: 'SWITCH' }))) return;
+  const consequences = [];
+  if (conversation.length) consequences.push('Your current chat is already saved in History.');
+  if (pendingPlanDraft) consequences.push('The current plan draft will be cancelled.');
+  if (consequences.length && !(await confirmDialog(
+    `Switch to ${mode.toUpperCase()} and start a new session?\n\n${consequences.join('\n')}`,
+    { okLabel: 'SWITCH' },
+  ))) return;
+  if (pendingPlanDraft) clearPendingPlan();
   setAppMode(mode);
   if (conversation.length) await newSession();
   else {
@@ -311,6 +384,10 @@ function confirmDialog(message, { okLabel = 'OK', cancelLabel = 'CANCEL', danger
 }
 
 function setCwd(p) {
+  if (pendingPlanDraft && pendingPlanDraft.cwd !== p) {
+    clearPendingPlan();
+    addInfo('PLAN: draft cancelled because the working directory changed.');
+  }
   cwd = p;
   localStorage.setItem('cwd', p);
   const parts = p.split('/');
@@ -453,6 +530,7 @@ async function saveChat() {
   const conversation = await window.api.getConversation();
   if (!conversation.length) return;
   const runMetrics = await window.api.usageGet();
+  const contextRes = await window.api.contextState();
 
   // Only generate a new title if this is a new chat (no existing title or title is generic)
   let title = 'Chat';
@@ -503,6 +581,7 @@ async function saveChat() {
       subModel,
       coderModel,
       runMetrics,
+      contextState: contextRes.ok ? contextRes.state : { projectPath: '', pinnedFiles: [] },
       timestamp: new Date().toISOString(),
     },
     conversation
@@ -515,17 +594,20 @@ async function loadChat(chatId) {
   if (busy) return;
   const res = await window.api.historyLoad(chatId);
   if (!res.ok) return addError('Could not load chat: ' + res.error);
+  clearPendingPlan();
   const saved = res.chat;
+  // Set this before any rendering or mode/directory synchronization so a
+  // mission card can never be carried over from the previously open chat.
+  currentChatId = chatId;
   onlineResearchToggle.checked = false; // loading history must never restore network access
   setAppMode(saved.mode === 'chat' ? 'chat' : 'code');
 
   // Push the stored conversation into the main process so the model continues from it.
-  const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics);
+  const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics, saved.contextState);
   renderConversation(saved.conversation);
   updateContextBar(lc.approxTokens, lc.contextLength);
   compactWarned = false; // fresh warning budget for this chat
   hideStartupMessage();
-  currentChatId = chatId;
 
   // Auto-select the model this chat was using; if it's gone from Ollama, keep the current one.
   if (saved.model && [...modelSelect.options].some((o) => o.value === saved.model)) {
@@ -565,6 +647,7 @@ async function deleteChat(chatId) {
   // If we deleted the currently loaded chat, clear the conversation everywhere
   if (currentChatId === chatId) {
     await window.api.reset();
+    clearPendingPlan(false);
     currentChatId = null;
     chat.innerHTML = '';
     missionCard = null;
@@ -580,14 +663,14 @@ async function deleteChat(chatId) {
 function renderConversation(conversation) {
   chat.innerHTML = '';
   missionCard = null;
-  for (const msg of conversation) {
+  conversation.forEach((msg, index) => {
     if (msg.role === 'user') {
       const imgs = (msg.images || []).map((b, i) => `data:${msg.imageTypes?.[i] || 'image/png'};base64,${b}`);
       const shownText = msg.displayContent || (msg.attachments?.length ? '(attached files)' : msg.content) || (imgs.length ? '(image)' : '');
-      addMessage('user', shownText, imgs, msg.attachments || []);
+      addMessage('user', shownText, imgs, msg.attachments || [], { message: msg, index });
     } else if (msg.role === 'assistant') {
       if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
-      if (msg.content) renderMarkdown(addMessage('assistant', ''), msg.content);
+      if (msg.content) renderMarkdown(addMessage('assistant', '', null, [], { message: msg, index }), msg.content);
     } else if (msg.role === 'tool') {
       const text = String(msg.content);
       if (msg.tool_name === 'run_subagent') {
@@ -604,12 +687,13 @@ function renderConversation(conversation) {
         pre.textContent = m ? text.slice(m[0].length) : text;
         card.appendChild(head);
         card.appendChild(pre);
+        decorateContextControls(card, msg, index);
         chat.appendChild(card);
       } else {
-        addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text));
+        addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text), null, [], { message: msg, index });
       }
     }
-  }
+  });
   if (latestMission) upsertMissionCard(latestMission);
 }
 
@@ -732,11 +816,11 @@ stopBtn.addEventListener('click', () => window.api.stop());
 
 async function send() {
   const text = input.value.trim();
-  const missionControl = /^\/mission\s+(?:status|stop)\s*$/i.test(text);
+  const missionControl = /^\/mission\s+(?:status|stop|resume)\s*$/i.test(text);
   if ((!text && !attachmentCount()) || (busy && !missionControl)) return;
   if (text.startsWith('/')) {
     input.value = '';
-    if (text === '/help' || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
+    if (text === '/help' || text.includes('/auto') || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/plan') || text.includes('/review') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
       hideStartupMessage();
     }
     return handleSlash(text);
@@ -830,6 +914,11 @@ function setState(s) {
 
 // ---------- message rendering ----------
 let currentAssistant = null; // the <div> receiving streamed tokens
+// Raw markdown source for the streaming bubble. Once we render markdown into
+// the element its textContent is the *rendered* text, so the source has to be
+// kept separately or every re-render would compound on its own output.
+let currentAssistantRaw = '';
+let mdRenderQueued = false;
 
 // Render markdown safely. Falls back to plain text if the libs failed to load.
 function renderMarkdown(el, text) {
@@ -844,11 +933,28 @@ function renderMarkdown(el, text) {
 // Convert the streaming assistant bubble from plain text to rendered markdown.
 function finalizeAssistant() {
   if (!currentAssistant) return;
-  renderMarkdown(currentAssistant, currentAssistant.textContent);
+  renderMarkdown(currentAssistant, currentAssistantRaw);
   currentAssistant = null;
+  currentAssistantRaw = '';
 }
 
-function addMessage(role, text, images, attachments = []) {
+// Re-render the streaming bubble as markdown, at most once per animation frame
+// so a fast token stream cannot thrash innerHTML. An unclosed ``` fence mid
+// stream is fine — marked renders the partial block and it settles as more
+// tokens arrive.
+function scheduleMarkdownRender() {
+  if (mdRenderQueued || !currentAssistant) return;
+  mdRenderQueued = true;
+  requestAnimationFrame(() => {
+    mdRenderQueued = false;
+    if (!currentAssistant) return;
+    const nearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 120;
+    renderMarkdown(currentAssistant, currentAssistantRaw);
+    if (nearBottom) scrollDown();
+  });
+}
+
+function addMessage(role, text, images, attachments = [], context = null) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   const label = document.createElement('span');
@@ -859,6 +965,7 @@ function addMessage(role, text, images, attachments = []) {
   body.textContent = text;
   div.appendChild(label);
   div.appendChild(body);
+  if (context) decorateContextControls(div, context.message, context.index);
   if (images && images.length) {
     const strip = document.createElement('div');
     strip.className = 'msg-images';
@@ -887,6 +994,40 @@ function addMessage(role, text, images, attachments = []) {
   chat.appendChild(div);
   scrollDown();
   return body;
+}
+
+function decorateContextControls(element, message, index) {
+  if (!message || !Number.isInteger(index)) return;
+  const canPin = message.role === 'user' || message.role === 'assistant';
+  const canExclude = message.role === 'tool';
+  if (!canPin && !canExclude) return;
+  element.classList.toggle('context-pinned', !!message.pinned);
+  element.classList.toggle('context-excluded', !!message.excludedFromInference);
+  const actions = document.createElement('span');
+  actions.className = 'context-actions';
+  const addControl = (label, title, action, currentValue) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label(currentValue());
+    button.title = title;
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (busy) return addError('Wait for the current run to finish before changing context controls.');
+      const nextValue = !currentValue();
+      const result = await window.api.contextControl({ action, index, value: nextValue });
+      if (!result.ok) return addError(result.error);
+      if (action === 'pin-message') message.pinned = nextValue;
+      else message.excludedFromInference = nextValue;
+      element.classList.toggle('context-pinned', !!message.pinned);
+      element.classList.toggle('context-excluded', !!message.excludedFromInference);
+      button.textContent = label(nextValue);
+      await saveChat();
+    });
+    actions.appendChild(button);
+  };
+  if (canPin) addControl((value) => value ? 'UNPIN' : 'PIN', 'Keep this message in model context and through compaction.', 'pin-message', () => !!message.pinned);
+  if (canExclude) addControl((value) => value ? 'INCLUDE' : 'EXCLUDE', 'Keep this tool result in visible history but remove its content from inference.', 'exclude-tool', () => !!message.excludedFromInference);
+  element.appendChild(actions);
 }
 
 function addError(text) {
@@ -1002,19 +1143,21 @@ window.api.onSubagent((d) => {
 window.api.onCleanContent((text) => {
   if (!currentAssistant) return;
   if (text) {
-    currentAssistant.textContent = text;
+    currentAssistantRaw = text;
+    scheduleMarkdownRender();
   } else {
     currentAssistant.closest('.msg')?.remove();
     currentAssistant = null;
+    currentAssistantRaw = '';
   }
 });
 
 // ---------- stream events ----------
 window.api.onToken((t) => {
   finalizeThinking();
-  if (!currentAssistant) currentAssistant = addMessage('assistant', '');
-  currentAssistant.textContent += t;
-  scrollDown();
+  if (!currentAssistant) { currentAssistant = addMessage('assistant', ''); currentAssistantRaw = ''; }
+  currentAssistantRaw += t;
+  scheduleMarkdownRender(); // live markdown, rather than raw text until the run ends
 });
 
 window.api.onToolCall(({ name, args }) => {
@@ -1110,6 +1253,8 @@ function normalizedMissionPath(value) {
 function shouldDisplayMission(mission = latestMission) {
   return appMode === 'code'
     && !!cwd
+    && !!currentChatId
+    && mission?.chatId === currentChatId
     && !!mission?.projectPath
     && normalizedMissionPath(cwd) === normalizedMissionPath(mission.projectPath);
 }
@@ -1136,7 +1281,7 @@ function upsertMissionCard(mission) {
       '<div class="mission-goal"></div>',
       '<div class="mission-detail"></div>',
       '<div class="mission-event"></div>',
-      '<div class="mission-actions"><button type="button" class="mini mission-refresh">STATUS</button><button type="button" class="mini mission-stop">STOP</button></div>',
+      '<div class="mission-actions"><button type="button" class="mini mission-refresh">STATUS</button><button type="button" class="mini mission-resume">RESUME</button><button type="button" class="mini mission-stop">STOP</button></div>',
     ].join('');
     missionCard.querySelector('.mission-refresh').addEventListener('click', async () => {
       const res = await window.api.missionGet();
@@ -1146,6 +1291,10 @@ function upsertMissionCard(mission) {
       const res = await window.api.missionStop();
       if (!res.ok) addError(res.error);
     });
+    missionCard.querySelector('.mission-resume').addEventListener('click', () => {
+      input.value = '/mission resume';
+      send();
+    });
   }
   const projectName = String(mission.projectPath || '').split(/[\\/]/).filter(Boolean).pop() || '(unknown project)';
   missionCard.dataset.status = mission.status || 'unknown';
@@ -1154,12 +1303,76 @@ function upsertMissionCard(mission) {
   missionCard.querySelector('.mission-detail').textContent = `${projectName} · ${mission.currentIteration || 0}/${mission.maxIterations || 0} · ${mission.currentPhase || 'starting'}`;
   missionCard.querySelector('.mission-event').textContent = mission.lastEvent || '';
   missionCard.querySelector('.mission-stop').classList.toggle('hidden', mission.status !== 'running');
+  missionCard.querySelector('.mission-resume').classList.toggle('hidden', mission.status !== 'interrupted');
   // appendChild moves an existing node, keeping the mission card alongside the
   // most recent work whenever the user refreshes it or the mission advances.
   chat.appendChild(missionCard);
 }
 
 window.api.onMissionUpdate((mission) => upsertMissionCard(mission));
+
+function clearPendingPlan(removeCard = true) {
+  if (removeCard) pendingPlanCard?.remove();
+  pendingPlanCard = null;
+  pendingPlanDraft = null;
+}
+
+async function runApprovedPlan(plan) {
+  const draft = pendingPlanDraft;
+  if (!draft) return { ok: false, error: 'This plan draft is no longer active.' };
+  if (cwd !== draft.cwd) return { ok: false, error: 'The working directory changed. Create a new plan for this folder.' };
+  if (!coderModel) return { ok: false, error: 'No coder model is selected. Use /coder <name> first.' };
+
+  startRun();
+  let result;
+  try {
+    result = await window.api.orchestrate({
+      model: draft.plannerModel,
+      coderModel,
+      subModel,
+      goal: draft.goal,
+      cwd: draft.cwd,
+      autoApprove: autoApprove.checked,
+      onlineResearch: draft.onlineResearch,
+      think: thinkToggle.checked,
+      plan,
+    });
+    if (result.stopped) addInfo('Approved plan stopped. You can edit it or run it again.');
+    else if (result.report) renderMarkdown(addMessage('assistant', result.report), result.report);
+    if (result.ok && !result.stopped) {
+      pendingPlanDraft = null;
+      pendingPlanCard = null;
+      try {
+        await saveChat();
+      } catch (error) {
+        addError('The plan ran, but the chat could not be saved: ' + (error.message || error));
+      }
+    }
+    return result;
+  } catch (error) {
+    result = { ok: false, error: error.message || String(error) };
+    return result;
+  } finally {
+    endRun();
+  }
+}
+
+function showPlanDraft(draft) {
+  clearPendingPlan();
+  pendingPlanDraft = draft;
+  pendingPlanCard = window.PlanDraftView.create({
+    draft,
+    onRun: runApprovedPlan,
+    onCancel: () => {
+      const wasPending = !!pendingPlanDraft;
+      clearPendingPlan(false);
+      if (wasPending) addInfo('PLAN: draft cancelled. No files were changed.');
+    },
+    onError: addError,
+  });
+  chat.appendChild(pendingPlanCard);
+  scrollDown();
+}
 
 function shortArgs(name, args) {
   if (args.questions) {
@@ -1342,6 +1555,7 @@ $('history-btn').addEventListener('click', () => {
 async function newSession() {
   if (busy) return;
   await window.api.reset();
+  clearPendingPlan(false);
   compactWarned = false;
   chat.innerHTML = '';
   missionCard = null;
@@ -1541,15 +1755,22 @@ const SLASH_HELP = [
   '/commit <message> — stage all changes and commit',
   '/graph — show a visual tree of the git commit history',
   '/loop [n] <goal> — repeat a single model until verified',
+  '/plan <goal> — inspect the project and approve or edit a plan before coding',
+  '/review [base] — run a structured read-only review and send selected findings to the coder',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
-  '/mission [iterations] <goal> — run a visible, persisted bounded coding mission; use /mission status or /mission stop',
+  '/mission [iterations] <goal> — run a persisted coding mission; use status, stop, or resume',
   '/model <name> — switch model (partial match ok)',
   '/coder [name] — show or set the writable coding-worker model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
   '/usage — show how context and tokens have been spent across all agents',
   '/mcp [on|off <server>] — external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
-  '/best [task] [use] — rank installed models by local benchmark score for a task; "use" switches to the top result',
+  '/pin [list|message <n>|file <path>] — keep important messages or project files in context',
+  '/unpin <message <n>|file <path>> — remove a context pin',
+  '/exclude <n> — omit a noisy tool result from inference without deleting it',
+  '/include <n> — restore an excluded tool result to inference',
+  '/recs — compare installed models for this computer',
+  '/auto <request> — select the best compatible installed model and run the request',
   '/memory — view what the agent has remembered',
   '/export — save this chat as a markdown file',
   '/tools — list all available tools',
@@ -1563,6 +1784,12 @@ const CHAT_SLASH_HELP = [
   '/usage — show context and token usage',
   '/mcp [on|off <server>] - external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
+  '/pin [list|message <n>] — keep important messages in context',
+  '/unpin message <n> — remove a message pin',
+  '/exclude <n> — omit a noisy tool result from inference without deleting it',
+  '/include <n> — restore an excluded tool result to inference',
+  '/recs — compare installed models for this computer',
+  '/auto <request> — select the best compatible installed model and run the request',
   '/export — save this chat as a markdown file',
   '/tools — list tools available to the app',
 ].join('\n');
@@ -1571,7 +1798,7 @@ async function handleSlash(raw) {
   const [cmd, ...rest] = raw.slice(1).split(' ');
   const arg = rest.join(' ').trim();
   const normalizedCmd = cmd.toLowerCase();
-  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory']);
+  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'review', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory']);
   if (appMode === 'chat' && codeOnlyCommands.has(normalizedCmd)) {
     return addError(`/${normalizedCmd} is only available in Code mode.`);
   }
@@ -1649,6 +1876,93 @@ async function handleSlash(raw) {
       return saveChat();
     }
 
+    case 'plan': {
+      if (busy) return;
+      if (!modelSelect.value) return addError('No planner model selected.');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      if (!arg) return addError('Usage: /plan <goal>');
+
+      const plannerModel = modelSelect.value;
+      const planCwd = cwd;
+      const planSubModel = subModel;
+      const planOnlineResearch = onlineResearchToggle.checked;
+      const planThink = thinkToggle.checked;
+      startRun();
+      let result;
+      try {
+        result = await window.api.plan({
+          model: plannerModel,
+          subModel: planSubModel,
+          goal: arg,
+          cwd: planCwd,
+          onlineResearch: planOnlineResearch,
+          think: planThink,
+        });
+      } catch (error) {
+        result = { ok: false, error: error.message || String(error) };
+      } finally {
+        endRun();
+      }
+      if (!result.ok) return addError('Planning failed: ' + result.error);
+      if (result.stopped) return addInfo('Planning stopped. No files were changed.');
+      if (cwd !== planCwd) return addError('The working directory changed while planning. Run /plan again for the current folder.');
+      showPlanDraft({
+        goal: arg,
+        plan: result.plan,
+        cwd: planCwd,
+        plannerModel,
+        onlineResearch: planOnlineResearch,
+      });
+      return;
+    }
+
+    case 'review': {
+      if (busy) return;
+      if (!modelSelect.value) return addError('No reviewer model selected.');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      const reviewCwd = cwd;
+      startRun();
+      let result;
+      try {
+        result = await window.api.review({ model: modelSelect.value, cwd: reviewCwd, base: arg || 'HEAD' });
+      } catch (error) {
+        result = { ok: false, error: error.message || String(error) };
+      } finally {
+        endRun();
+      }
+      if (!result.ok) return addError('Review failed: ' + result.error);
+      if (result.stopped) return addInfo('Review stopped. No files were changed.');
+      if (cwd !== reviewCwd) return addError('The working directory changed while reviewing. Run /review again.');
+      const card = window.ReviewFindings.create(result.review, {
+        onSend: async (selected, reviewCard) => {
+          startRun();
+          let fixResult;
+          try {
+            fixResult = await window.api.reviewFix({
+              coderModel,
+              cwd: reviewCwd,
+              findings: selected.map((finding) => ({ ...finding, suggested_fix: finding.suggestedFix })),
+              autoApprove: autoApprove.checked,
+              autoBranch: autoBranchToggle.checked,
+              think: thinkToggle.checked,
+            });
+          } catch (error) {
+            fixResult = { ok: false, error: error.message || String(error) };
+          } finally {
+            endRun();
+          }
+          if (!fixResult.ok) return addError('Coder failed: ' + fixResult.error);
+          reviewCard.remove();
+          if (fixResult.report) renderMarkdown(addMessage('assistant', fixResult.report), fixResult.report);
+          await refreshGit();
+          return saveChat();
+        },
+      });
+      chat.appendChild(card);
+      chat.scrollTop = chat.scrollHeight;
+      return;
+    }
+
     case 'orchestrate': {
       if (busy) return;
       if (!modelSelect.value) return addError('No orchestrator model selected.');
@@ -1694,6 +2008,28 @@ async function handleSlash(raw) {
         const res = await window.api.missionStop();
         return res.ok ? addInfo('Mission stop requested.') : addError(res.error);
       }
+      if (command === 'resume') {
+        if (busy) return;
+        if (!cwd) return addError('Pick the saved mission directory first.');
+        if (!currentChatId) return addError('Open the chat that started the mission first.');
+        startRun();
+        try {
+          const res = await window.api.missionResume({
+            cwd,
+            chatId: currentChatId,
+            autoApprove: autoApprove.checked,
+            onlineResearch: onlineResearchToggle.checked,
+            think: thinkToggle.checked,
+          });
+          if (!res.ok) addError(res.error);
+          else if (res.report) renderMarkdown(addMessage('assistant', res.report), res.report);
+        } catch (error) {
+          addError('Mission resume failed: ' + (error.message || error));
+        } finally {
+          endRun();
+        }
+        return saveChat();
+      }
       if (busy) return;
       if (!modelSelect.value) return addError('No model selected.');
       if (!coderModel) return addError('No coder model selected. Use /coder <name>.');
@@ -1705,6 +2041,10 @@ async function handleSlash(raw) {
       if (!goal) return addError('Usage: /mission [iterations] <goal> — e.g. /mission 12 add CSV export and verify it');
       if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the mission will pause for every risky tool call. Turn it on for unattended runs.');
 
+      // A mission belongs to the chat that started it, not every chat in its
+      // project. Allocate an ID now because a new chat is normally saved only
+      // after the mission command has completed.
+      if (!currentChatId) currentChatId = Date.now().toString();
       addMessage('user', `MISSION (max ${iterations}): ${goal}`);
       startRun();
       try {
@@ -1719,6 +2059,7 @@ async function handleSlash(raw) {
           onlineResearch: onlineResearchToggle.checked,
           think: thinkToggle.checked,
           maxIterations: iterations,
+          chatId: currentChatId,
         });
         if (!res.ok) addError(res.error);
         else if (res.report) renderMarkdown(addMessage('assistant', res.report), res.report);
@@ -1759,9 +2100,9 @@ async function handleSlash(raw) {
 
     case 'coder': {
       const models = [...modelSelect.options].map((o) => o.value);
-      if (!arg) return addInfo(`Coder model: ${coderModel}\nAvailable: ${models.join(', ')}\nUse /coder <name> to change. Restart Brittain Code after installing a new Ollama model so it appears here.`);
+      if (!arg) return addInfo(`Coder model: ${coderModel}\nAvailable: ${models.join(', ')}\nUse /coder <name> to change. Run /recs after installing a new Ollama model to refresh the list.`);
       const match = models.find((v) => v.includes(arg));
-      if (!match) return addError(`No installed model matching "${arg}". If Ollama just finished installing it, restart Brittain Code to refresh the model list.`);
+      if (!match) return addError(`No installed model matching "${arg}". If Ollama just finished installing it, run /recs to refresh the model list.`);
       coderModel = match;
       localStorage.setItem('coderModel', match);
       return addInfo('Coder model set to ' + match);
@@ -1794,37 +2135,106 @@ async function handleSlash(raw) {
         const flagStr = r.flags.length ? `  ⚠ ${r.flags.join(', ')}` : '';
         lines.push(`${String(i + 1).padStart(3)}. ${label.padEnd(18)} ~${String(r.tokens).padStart(6)} tok  "${r.preview}"${flagStr}`);
       });
+      if (res.pinnedFiles.length) lines.push('', 'PINNED FILES:', ...res.pinnedFiles.map((file) => `  ${file}`));
       lines.push('', `TOTAL: ~${res.totalTokens.toLocaleString()} / ${res.contextLength.toLocaleString()} tok (${res.percentUsed}% of window)`);
       return showOverlay('CONTEXT — what will actually be sent', lines.join('\n'));
     }
 
-    case 'best': {
-      const parts = arg.split(/\s+/).filter(Boolean);
-      const useIt = parts[parts.length - 1] === 'use';
-      if (useIt) parts.pop();
-      const task = parts.join(' ') || '';
-      const res = await window.api.benchQuery(task || undefined);
-      if (!res.ok) return addError(res.error);
-      if (!res.available) return addInfo('No local benchmark results found yet (benchmark/results.json is dev-only and gitignored — run the harness in benchmark/ first).');
-      if (!task) {
-        if (!res.rows.length) return addInfo('No scored runs yet.');
-        const byTask = new Map();
-        for (const r of res.rows) if (!byTask.has(r.task)) byTask.set(r.task, r); // rows are pre-sorted best-first
-        const lines = [...byTask.values()].map((r) => `${r.task.padEnd(12)} best: ${r.model} (median ${r.median}, ${r.runs} run${r.runs === 1 ? '' : 's'})`);
-        return showOverlay('BENCHMARK LEADERBOARD', 'Tasks: ' + res.tasks.join(', ') + '\n\n' + lines.join('\n') + '\n\nUse /best <task> for the full ranking, or /best <task> use to switch models.');
+    case 'pin':
+    case 'unpin': {
+      if (busy) return addError('Wait for the current run to finish before changing context controls.');
+      const pinning = normalizedCmd === 'pin';
+      if (!arg || arg.toLowerCase() === 'list') {
+        const [conversation, stateRes] = await Promise.all([window.api.getConversation(), window.api.contextState()]);
+        const pinnedMessages = conversation
+          .map((message, index) => message.pinned ? `${index + 1} (${message.role})` : '')
+          .filter(Boolean);
+        const excludedTools = conversation
+          .map((message, index) => message.excludedFromInference ? `${index + 1} (${message.tool_name || 'tool'})` : '')
+          .filter(Boolean);
+        return addInfo([
+          `Pinned messages: ${pinnedMessages.join(', ') || '(none)'}`,
+          `Pinned files: ${stateRes.state?.pinnedFiles?.join(', ') || '(none)'}`,
+          `Excluded tool results: ${excludedTools.join(', ') || '(none)'}`,
+          'Use /context to inspect message numbers and token sizes.',
+        ].join('\n'));
       }
-      const rows = res.rows.filter((r) => r.task === task);
-      if (!rows.length) return addError(`No results for task "${task}". Known tasks: ${res.tasks.join(', ') || '(none)'}`);
-      if (useIt) {
-        const top = rows[0];
-        if (!currentModels.includes(top.model)) return addError(`Top model "${top.model}" for "${task}" isn't installed here. Ranking:\n` + rows.map((r) => `${r.model} — median ${r.median}`).join('\n'));
-        modelSelect.value = top.model;
-        localStorage.setItem('model', top.model);
-        localStorage.setItem(`model:${appMode}`, top.model);
-        return addInfo(`Switched to ${top.model} — top scorer for "${task}" (median ${top.median} over ${top.runs} run${top.runs === 1 ? '' : 's'}).`);
+      const messageMatch = arg.match(/^message\s+(\d+)$/i);
+      const fileMatch = arg.match(/^file\s+(.+)$/i);
+      let payload;
+      let label;
+      if (messageMatch) {
+        payload = { action: 'pin-message', index: Number(messageMatch[1]) - 1, value: pinning };
+        label = `Message ${messageMatch[1]} ${pinning ? 'pinned' : 'unpinned'}.`;
+      } else if (fileMatch) {
+        if (appMode !== 'code') return addError('Project files can be pinned only in Code mode.');
+        if (!cwd) return addError('Pick a working directory first.');
+        payload = { action: pinning ? 'pin-file' : 'unpin-file', cwd, path: fileMatch[1].trim() };
+        label = `${fileMatch[1].trim()} ${pinning ? 'pinned' : 'unpinned'}.`;
+      } else {
+        return addError(`Usage: /${normalizedCmd} message <number>${appMode === 'code' ? ` or /${normalizedCmd} file <path>` : ''}`);
       }
-      const lines = rows.map((r, i) => `${i + 1}. ${r.model.padEnd(24)} median ${String(r.median).padStart(3)}  (${r.runs} run${r.runs === 1 ? '' : 's'}, ${r.mode})`);
-      return showOverlay(`BENCHMARK — ${task}`, lines.join('\n') + '\n\n/best ' + task + ' use — switch to the top model');
+      const result = await window.api.contextControl(payload);
+      if (!result.ok) return addError(result.error);
+      renderConversation(result.conversation);
+      addInfo(label);
+      await saveChat();
+      return;
+    }
+
+    case 'exclude':
+    case 'include': {
+      if (busy) return addError('Wait for the current run to finish before changing context controls.');
+      if (!/^\d+$/.test(arg)) return addError(`Usage: /${normalizedCmd} <tool-result message number>`);
+      const value = normalizedCmd === 'exclude';
+      const result = await window.api.contextControl({ action: 'exclude-tool', index: Number(arg) - 1, value });
+      if (!result.ok) return addError(result.error);
+      renderConversation(result.conversation);
+      addInfo(`Tool result ${arg} ${value ? 'excluded from' : 'restored to'} inference. Visible history was not changed.`);
+      await saveChat();
+      return;
+    }
+
+    case 'recs': {
+      if (busy) return addError('Wait for the current run to finish before checking model recommendations.');
+      setState('checking models…');
+      try {
+        await reloadModels(modelSelect.value);
+        const res = await window.api.getModelRecommendations(appMode);
+        if (!res.ok) return addError(res.error);
+        if (!res.models.length) return addInfo('No installed models or reference recommendations were found.');
+        return showRecommendations(res);
+      } catch (err) {
+        return addError('Could not load model recommendations: ' + (err.message || err));
+      } finally {
+        setState('idle');
+      }
+    }
+
+    case 'auto': {
+      if (busy) return;
+      if (!arg) return addError('Usage: /auto <request>');
+      if (appMode === 'code' && !cwd) return addError('Pick a working directory first (DIR button, top left).');
+      setState('selecting model…');
+      let route;
+      try {
+        route = await window.api.autoRouteModel({
+          mode: appMode,
+          needsVision: pendingImages.length > 0,
+        });
+      } catch (err) {
+        route = { ok: false, error: err.message || String(err) };
+      } finally {
+        setState('idle');
+      }
+      if (!route.ok) return addError('AUTO could not select a model: ' + route.error);
+      if (!currentModels.includes(route.model)) return addError(`AUTO selected "${route.model}", but it is not in the current installed-model list.`);
+      modelSelect.value = route.model;
+      localStorage.setItem('model', route.model);
+      localStorage.setItem(`model:${appMode}`, route.model);
+      addInfo(`AUTO selected ${route.model} — ${route.reason}.${route.warning ? `\nWarning: ${route.warning}` : ''}`);
+      input.value = arg;
+      return send();
     }
 
     case 'usage': {
@@ -1898,7 +2308,8 @@ async function refreshGit() {
 async function showDiff() {
   if (!cwd) return addError('No directory set.');
   const res = await window.api.gitDiff(cwd);
-  showOverlay('GIT DIFF — ' + cwd, res.diff, { diff: true });
+  if (!res.ok) return addError('Could not load diff: ' + res.error);
+  window.DiffViewer.show(res, { $, hideOverlay });
 }
 
 $('diff-btn').addEventListener('click', showDiff);
@@ -1910,9 +2321,12 @@ $('commit-btn').addEventListener('click', () => {
 // ---------- overlay ----------
 function showOverlay(title, text, opts = {}) {
   $('overlay-title').textContent = title;
+  $('overlay-box').classList.remove('recommendations-overlay');
+  $('overlay-box').classList.remove('diff-v2-overlay');
   const body = $('overlay-body');
+  body.className = '';
+  body.replaceChildren();
   if (opts.diff) {
-    body.innerHTML = '';
     for (const line of text.split('\n')) {
       const div = document.createElement('div');
       div.textContent = line || ' ';
@@ -1926,6 +2340,43 @@ function showOverlay(title, text, opts = {}) {
     body.textContent = text;
   }
   $('overlay').classList.remove('hidden');
+}
+
+function showRecommendations(result) {
+  return window.RecommendationsView.show(result, {
+    $,
+    modelSelect,
+    hideOverlay,
+    addInfo,
+    installModel: installRecommendedModel,
+    modelInstalled: refreshAfterModelInstall,
+  });
+}
+
+async function installRecommendedModel(model, onProgress) {
+  const removeProgressListener = window.api.onModelInstallProgress((progress) => {
+    if (progress?.model === model) onProgress(progress);
+  });
+  try {
+    return await window.api.installModel(model);
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  } finally {
+    removeProgressListener();
+  }
+}
+
+async function refreshAfterModelInstall(model) {
+  const models = await reloadModels(model);
+  if (!models.includes(model)) {
+    addError(`Ollama completed the pull, but ${model} is not in the installed-model list yet. Use CHECK AGAIN to refresh.`);
+    return;
+  }
+  modelSelect.value = model;
+  modelSelect.dispatchEvent(new Event('change'));
+  const refreshed = await window.api.getModelRecommendations(appMode);
+  if (refreshed.ok) showRecommendations(refreshed);
+  addInfo(`Installed ${model} with Ollama and set it as the active model.`);
 }
 
 function hideOverlay() {

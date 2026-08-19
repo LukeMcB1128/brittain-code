@@ -1,0 +1,228 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const { median, queryBenchmarks, readBenchResults } = require('../../src/main/benchmark-service');
+const { createCheckpointService } = require('../../src/main/checkpoint-service');
+const { createHardwareProfile, megabytesToBytes } = require('../../src/main/hardware-profile');
+const { createHistoryStore, safeChatId } = require('../../src/main/history-store');
+const {
+  compactRecommendationShow,
+  createRecommendationsService,
+  needsVerboseRecommendationShow,
+  sameRecommendationHardware,
+} = require('../../src/main/recommendations-service');
+
+function tempDirectory(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-service-test-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  return directory;
+}
+
+test('history store saves runtime data and keeps file names inside its directory', async (t) => {
+  const userData = tempDirectory(t);
+  const store = createHistoryStore({
+    userDataDir: () => userData,
+    runtimeMetadata: async (name) => ({ model: { name: name || null }, source: 'test' }),
+  });
+
+  assert.equal(safeChatId('chat:/one'), 'chatone');
+  assert.deepEqual(store.list(), []);
+  assert.deepEqual(await store.save({
+    id: 'chat:/one',
+    title: 'Saved chat',
+    model: 'main:8b',
+    coderModel: 'coder:8b',
+    subModel: 'scout:3b',
+    mode: 'chat',
+    contextState: { projectPath: '/project', pinnedFiles: ['README.md'] },
+  }, [{ role: 'user', content: 'Hello' }]), { ok: true });
+
+  assert.equal(store.list()[0].id, 'chatone');
+  const loaded = store.load('chat:/one');
+  assert.equal(loaded.ok, true);
+  assert.equal(loaded.chat.runtime.roles.coder.name, 'coder:8b');
+  assert.equal(loaded.chat.conversation[0].content, 'Hello');
+  assert.deepEqual(loaded.chat.contextState, { projectPath: '/project', pinnedFiles: ['README.md'] });
+  assert.deepEqual(store.remove('chat:/one'), { ok: true });
+  assert.deepEqual(store.list(), []);
+});
+
+test('hardware profile reports unified memory and reuses the hardware scan', async () => {
+  let endpoint = 'http://localhost:11434';
+  let graphicsCalls = 0;
+  const profile = createHardwareProfile({
+    getEndpoint: () => endpoint,
+    isLocalEndpoint: (value) => value.includes('localhost'),
+    processRef: {
+      platform: 'darwin',
+      arch: 'arm64',
+      getSystemMemoryInfo: () => ({ total: 16 * 1024 * 1024, free: 1024, purgeable: 512 }),
+    },
+    osRef: {
+      totalmem: () => 1,
+      cpus: () => [{ model: 'Test Apple chip' }],
+    },
+    systemInformationRef: {
+      graphics: async () => {
+        graphicsCalls += 1;
+        return { controllers: [{ model: 'Integrated GPU', memoryTotal: 16384, vramDynamic: true }] };
+      },
+    },
+  });
+
+  const local = await profile();
+  assert.equal(local.totalMemoryBytes, 16 * 1024 ** 3);
+  assert.equal(local.unifiedMemory, true);
+  assert.equal(local.totalVramBytes, 0);
+  assert.equal(local.controllers[0].vramBytes, megabytesToBytes(16384));
+  endpoint = 'https://remote.example';
+  assert.equal((await profile()).appliesToEndpoint, false);
+  assert.equal(graphicsCalls, 1);
+});
+
+test('benchmark service reads results and groups scores by task and model', (t) => {
+  const directory = tempDirectory(t);
+  const resultsPath = path.join(directory, 'results.json');
+  fs.writeFileSync(resultsPath, JSON.stringify([
+    { task: 'fix', model: 'a', mode: 'solo', total: 60 },
+    { task: 'fix', model: 'a', mode: 'solo', total: 80 },
+    { task: 'fix', model: 'b', mode: 'solo', total: 65 },
+    { task: 'build', model: 'a', mode: 'solo', total: 90 },
+  ]));
+
+  assert.equal(median([9, 1, 5, 3]), 4);
+  const result = queryBenchmarks(readBenchResults(resultsPath), 'fix');
+  assert.equal(result.available, true);
+  assert.deepEqual(result.tasks, ['build', 'fix']);
+  assert.deepEqual(result.rows.map((row) => [row.model, row.median, row.runs]), [
+    ['a', 70, 2],
+    ['b', 65, 1],
+  ]);
+  assert.deepEqual(readBenchResults(path.join(directory, 'missing.json')), []);
+});
+
+test('checkpoint service reports an absent checkpoint without changing files', async () => {
+  const gitCalls = [];
+  const service = createCheckpointService({
+    gitRun: async (args) => {
+      gitCalls.push(args);
+      return { ok: false, out: '', err: 'not a repository' };
+    },
+    getTempDirectory: () => os.tmpdir(),
+    publishState: () => assert.fail('state must not publish when checkpoint creation fails'),
+  });
+
+  assert.equal(await service.create('/missing'), null);
+  assert.deepEqual(await service.undo('/missing'), {
+    ok: false,
+    error: 'No checkpoint for this folder in this session.',
+  });
+  assert.deepEqual(gitCalls, [['rev-parse', '--git-dir']]);
+});
+
+test('checkpoint service can adopt a validated persisted checkpoint', () => {
+  let published = null;
+  const store = createCheckpointService({
+    gitRun: async () => ({ ok: true, out: '' }),
+    getTempDirectory: () => os.tmpdir(),
+    publishState: (state) => { published = state; },
+  });
+  assert.equal(store.adopt({ ref: 'refs/brittain/checkpoints/saved', cwd: '/project', at: 123 }), true);
+  assert.deepEqual(store.current(), { ref: 'refs/brittain/checkpoints/saved', cwd: '/project', at: 123 });
+  assert.deepEqual(published, { available: true, cwd: '/project' });
+});
+
+test('recommendations service loads Ollama metadata through its injected boundary', async (t) => {
+  const directory = tempDirectory(t);
+  const calls = [];
+  const service = createRecommendationsService({
+    ollamaJson: async (route, body) => {
+      calls.push([route, body]);
+      if (route === '/api/tags') {
+        return { models: [{ name: 'test:8b', size: 4 * 1024 ** 3, details: { parameter_size: '8B', quantization_level: 'Q4_K_M' } }] };
+      }
+      if (route === '/api/ps') return { models: [] };
+      return {
+        details: { parameter_size: '8B', quantization_level: 'Q4_K_M' },
+        capabilities: ['completion', 'tools'],
+        model_info: { 'test.context_length': 32768, 'tokenizer.test': 'removed' },
+      };
+    },
+    hardwareProfile: async () => ({
+      platform: 'darwin',
+      arch: 'arm64',
+      appliesToEndpoint: true,
+      unifiedMemory: true,
+      totalMemoryBytes: 32 * 1024 ** 3,
+    }),
+    getRuntimeSettings: () => ({ mainContextCap: 8192 }),
+    getEndpoint: () => 'http://localhost:11434',
+    isLocalEndpoint: () => true,
+    getHistoryDirectory: () => path.join(directory, 'chats'),
+    benchmarkDirectory: path.join(directory, 'benchmark'),
+    readBenchResults: () => [],
+    modelSpeedSamples: new Map(),
+    defaultContext: 32768,
+    getKvCacheType: () => 'q8_0',
+  });
+
+  const result = await service({ mode: 'code' });
+  assert.equal(result.ok, true);
+  assert.equal(result.kvCacheType, 'q8_0');
+  assert.equal(result.models[0].name, 'test:8b');
+  assert.equal(result.models[0].quantization, 'Q4_K_M');
+  assert.equal(result.models[0].capabilities.tools, true);
+  assert.deepEqual(calls.map(([route]) => route), ['/api/tags', '/api/ps', '/api/show']);
+});
+
+test('recommendations service uses the packaged baseline when Ollama has no models', async (t) => {
+  const directory = tempDirectory(t);
+  const service = createRecommendationsService({
+    ollamaJson: async (route) => route === '/api/tags' ? { models: [] } : { models: [] },
+    hardwareProfile: async () => ({
+      platform: 'darwin',
+      arch: 'arm64',
+      appliesToEndpoint: true,
+      unifiedMemory: true,
+      totalMemoryBytes: 36 * 1024 ** 3,
+    }),
+    getRuntimeSettings: () => ({ mainContextCap: 32768 }),
+    getEndpoint: () => 'http://localhost:11434',
+    isLocalEndpoint: () => true,
+    getHistoryDirectory: () => path.join(directory, 'chats'),
+    benchmarkDirectory: path.join(directory, 'benchmark'),
+    readBenchResults: () => [],
+    modelSpeedSamples: new Map(),
+    defaultContext: 32768,
+  });
+
+  const result = await service({ mode: 'code' });
+  assert.equal(result.ok, true);
+  assert.equal(result.usingBaseline, true);
+  assert.equal(result.installAvailable, true);
+  assert.equal(result.reference.label, 'Apple M3 Max (36 GB)');
+  assert.equal(result.models.length > 0, true);
+  assert.equal(result.models.every((model) => model.installed === false), true);
+  assert.equal(result.models.some((model) => model.name === 'gpt-oss:20b'), true);
+});
+
+test('recommendation metadata helpers remove tokenizer data and detect hybrid models', () => {
+  const compact = compactRecommendationShow({
+    model_info: { 'model.context_length': 8192, 'tokenizer.large': 'discard' },
+    capabilities: ['tools'],
+  });
+  assert.deepEqual(compact.model_info, { 'model.context_length': 8192 });
+  assert.equal(needsVerboseRecommendationShow({
+    model_info: {
+      'model.attention.sliding_window': 4096,
+      'model.attention.sliding_window_pattern': null,
+    },
+  }), true);
+  assert.equal(sameRecommendationHardware(
+    { platform: 'darwin', arch: 'arm64', totalMemoryBytes: 32 },
+    { platform: 'darwin', arch: 'arm64', totalMemoryBytes: 33 },
+  ), true);
+});

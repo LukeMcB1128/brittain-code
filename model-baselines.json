@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-19",
+  "reference": {
+    "label": "Apple M3 Max (36 GB)",
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M3 Max",
+    "totalMemoryBytes": 38654705664,
+    "contextTokens": 32768,
+    "scoreModel": "brittainmark-v3"
+  },
+  "models": [
+    {
+      "name": "qwen3.6:27b",
+      "digest": "a50eda8ed977ab48a12431878896b27ffd5cef552c17af3317d9623b939a7f1e",
+      "sizeBytes": 17420432739,
+      "parameterSize": "27.8B",
+      "quantization": "Q4_K_M",
+      "nativeContext": 262144,
+      "capabilities": { "tools": true, "vision": null, "thinking": null },
+      "speed": { "tokensPerSecond": 11.9, "samples": 4 },
+      "brittainmark": { "score": 87.1, "tasks": 7, "runs": 7, "version": 3 }
+    },
+    {
+      "name": "gpt-oss:20b",
+      "digest": "17052f91a42e97930aa6e28a6c6c06a983e6a58dbb00434885a0cf5313e376f7",
+      "sizeBytes": 13793441244,
+      "parameterSize": "20.9B",
+      "quantization": "MXFP4",
+      "nativeContext": 131072,
+      "capabilities": { "tools": true, "vision": false, "thinking": true },
+      "speed": { "tokensPerSecond": 54.6, "samples": 6 },
+      "brittainmark": { "score": 74.5, "tasks": 7, "runs": 7, "version": 3 }
+    },
+    {
+      "name": "qwen3-coder:30b",
+      "digest": "06c1097efce0431c2045fe7b2e5108366e43bee1b4603a7aded8f21689e90bca",
+      "sizeBytes": 18556700761,
+      "parameterSize": "30.5B",
+      "quantization": "Q4_K_M",
+      "nativeContext": 262144,
+      "capabilities": { "tools": true, "vision": false, "thinking": null },
+      "speed": { "tokensPerSecond": 46.5, "samples": 6 },
+      "brittainmark": { "score": 66.5, "tasks": 7, "runs": 7, "version": 3 }
+    },
+    {
+      "name": "gemma4:26b",
+      "digest": "5571076f3d70050487b26b341705799e0ab29b808164f90d20d4cf84f699d251",
+      "sizeBytes": 17987581215,
+      "parameterSize": "25.8B",
+      "quantization": "Q4_K_M",
+      "nativeContext": 262144,
+      "capabilities": { "tools": true, "vision": null, "thinking": null },
+      "speed": { "tokensPerSecond": 50.3, "samples": 6 },
+      "brittainmark": { "score": 60.6, "tasks": 7, "runs": 7, "version": 3 }
+    },
+    {
+      "name": "gemma4:latest",
+      "digest": "c6eb396dbd5992bbe3f5cdb947e8bbc0ee413d7c17e2beaae69f5d569cf982eb",
+      "sizeBytes": 9608350718,
+      "parameterSize": "8.0B",
+      "quantization": "Q4_K_M",
+      "nativeContext": 131072,
+      "capabilities": { "tools": true, "vision": null, "thinking": null },
+      "speed": { "tokensPerSecond": 49.1, "samples": 6 },
+      "brittainmark": { "score": 61.4, "tasks": 7, "runs": 7, "version": 3 }
+    },
+    {
+      "name": "qwen3:8b",
+      "digest": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
+      "sizeBytes": 5225388164,
+      "parameterSize": "8.2B",
+      "quantization": "Q4_K_M",
+      "nativeContext": 40960,
+      "capabilities": { "tools": true, "vision": false, "thinking": true },
+      "speed": { "tokensPerSecond": 36.4, "samples": 3 },
+      "brittainmark": { "score": 54.9, "tasks": 7, "runs": 7, "version": 3 }
+    }
+  ]
+}

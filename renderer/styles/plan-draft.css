@@ -1,0 +1,92 @@
+.plan-card {
+  border: 1px solid var(--purple);
+  background: var(--bg-panel);
+  padding: 12px;
+  font-family: var(--mono);
+}
+
+.plan-head {
+  display: flex;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+
+.plan-title { color: var(--purple); font-weight: 700; }
+.plan-status { color: var(--yellow); margin-left: auto; }
+.plan-card[data-status="executed"] { border-color: var(--green); }
+.plan-card[data-status="executed"] .plan-status { color: var(--green); }
+.plan-card[data-status="running"] .plan-status { color: var(--yellow); }
+
+.plan-goal {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.plan-meta {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.plan-field {
+  display: block;
+  margin-top: 9px;
+}
+
+.plan-field-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.plan-input {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  font: 12px/1.4 var(--mono);
+  resize: vertical;
+}
+
+.plan-input:focus { outline: none; border-color: var(--purple); }
+.plan-input[readonly] { background: var(--bg); color: var(--text-dim); cursor: default; }
+
+.plan-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 11px;
+}
+
+.plan-task {
+  padding: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.plan-task-head { display: flex; align-items: center; gap: 8px; }
+.plan-task-number { color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+.plan-remove { margin-left: auto; }
+
+.plan-task-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.plan-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+@media (max-width: 720px) {
+  .plan-task-details { grid-template-columns: 1fr; gap: 0; }
+}

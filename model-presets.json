@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-07",
+  "models": [
+    {
+      "name": "qwen3.6:27b",
+      "marker": "STRONG AGENT",
+      "priority": 100
+    },
+    {
+      "name": "gemma4:26b",
+      "marker": "STRONG AGENT",
+      "priority": 95
+    },
+    {
+      "name": "gpt-oss:20b",
+      "marker": "BALANCED",
+      "priority": 90
+    },
+    {
+      "name": "qwen3-coder:30b",
+      "marker": "CODE",
+      "priority": 85
+    },
+    {
+      "name": "qwen3:8b",
+      "marker": "FAST",
+      "priority": 75
+    },
+    {
+      "name": "gemma4:latest",
+      "marker": "FAST",
+      "priority": 70
+    },
+    {
+      "name": "qwen2.5-coder:7b",
+      "marker": "LIGHT CODE",
+      "priority": 65
+    },
+    {
+      "name": "qwen2.5-coder:1.5b",
+      "marker": "TINY",
+      "priority": 30
+    }
+  ]
+}

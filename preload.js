@@ -3,13 +3,23 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   listModels: () => ipcRenderer.invoke('models:list'),
+  getModelRecommendations: (mode) => ipcRenderer.invoke('models:recommendations', { mode }),
+  installModel: (model) => ipcRenderer.invoke('models:install', { model }),
+  onModelInstallProgress: (cb) => {
+    const handler = (_event, progress) => cb(progress);
+    ipcRenderer.on('models:install-progress', handler);
+    return () => ipcRenderer.removeListener('models:install-progress', handler);
+  },
+  autoRouteModel: (options) => ipcRenderer.invoke('models:autoRoute', options),
   pickCwd: () => ipcRenderer.invoke('cwd:pick'),
   dirExists: (p) => ipcRenderer.invoke('dir:exists', p),
   send: (payload) => ipcRenderer.invoke('chat:send', payload),
   stop: () => ipcRenderer.send('chat:stop'),
   reset: () => ipcRenderer.invoke('chat:reset'),
   getConversation: () => ipcRenderer.invoke('chat:get'),
-  loadConversation: (msgs, model, runMetrics) => ipcRenderer.invoke('chat:load', msgs, model, runMetrics),
+  loadConversation: (msgs, model, runMetrics, contextState) => ipcRenderer.invoke('chat:load', msgs, model, runMetrics, contextState),
+  contextState: () => ipcRenderer.invoke('context:state'),
+  contextControl: (payload) => ipcRenderer.invoke('context:control', payload),
   gitStatus: (cwd) => ipcRenderer.invoke('git:status', cwd),
   gitDiff: (cwd) => ipcRenderer.invoke('git:diff', cwd),
   gitGraph: (cwd) => ipcRenderer.invoke('git:graph', cwd),
@@ -19,7 +29,6 @@ contextBridge.exposeInMainWorld('api', {
   mcpStatus: () => ipcRenderer.invoke('mcp:status'),
   mcpToggle: (name, on) => ipcRenderer.invoke('mcp:toggle', name, on),
   mcpOpenConfig: () => ipcRenderer.invoke('mcp:openConfig'),
-  benchQuery: (task) => ipcRenderer.invoke('bench:query', task),
   contextInspect: (payload) => ipcRenderer.invoke('context:inspect', payload),
   isDev: () => ipcRenderer.invoke('app:isDev'),
   openOllamaSite: () => ipcRenderer.invoke('app:openOllamaSite'),
@@ -27,15 +36,27 @@ contextBridge.exposeInMainWorld('api', {
   onCheckpointState: (cb) => ipcRenderer.on('checkpoint:state', (_e, d) => cb(d)),
   onRunReport: (cb) => ipcRenderer.on('run:report', (_e, d) => cb(d)),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
+  updateState: () => ipcRenderer.invoke('updates:state'),
+  checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  installUpdate: () => ipcRenderer.invoke('updates:install'),
+  onUpdateState: (cb) => {
+    const handler = (_event, state) => cb(state);
+    ipcRenderer.on('updates:state', handler);
+    return () => ipcRenderer.removeListener('updates:state', handler);
+  },
   settingsGet: () => ipcRenderer.invoke('settings:get'),
   settingsSave: (settings) => ipcRenderer.invoke('settings:save', settings),
   settingsTestEndpoint: (endpoint) => ipcRenderer.invoke('settings:testEndpoint', endpoint),
   compact: (payload) => ipcRenderer.invoke('chat:compact', payload),
   loop: (payload = {}) => ipcRenderer.invoke('chat:loop', payload),
+  plan: (payload) => ipcRenderer.invoke('chat:plan', payload),
+  review: (payload) => ipcRenderer.invoke('chat:review', payload),
+  reviewFix: (payload) => ipcRenderer.invoke('chat:reviewFix', payload),
   orchestrate: (payload) => ipcRenderer.invoke('chat:orchestrate', payload),
   missionStart: (payload) => ipcRenderer.invoke('mission:start', payload),
   missionGet: () => ipcRenderer.invoke('mission:get'),
   missionStop: () => ipcRenderer.invoke('mission:stop'),
+  missionResume: (payload) => ipcRenderer.invoke('mission:resume', payload),
   exportChat: () => ipcRenderer.invoke('chat:export'),
   historyList: () => ipcRenderer.invoke('history:list'),
   historySave: (meta, conversation) => ipcRenderer.invoke('history:save', meta, conversation),

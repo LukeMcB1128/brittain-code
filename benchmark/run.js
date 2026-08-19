@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { TASKS, getTask } = require('./tasks');
 const { prepareFixture, resetFixture } = require('./setup');
-const { runSingleBenchmark, gradeChat, rankModels, slug, stopAllManagedProcesses, initTools } = require('./runner');
+const { runSingleBenchmark, gradeChat, rankModels, slug, stopAllManagedProcesses, initTools, recordFailedRun } = require('./runner');
 const { OllamaProvider } = require('./providers/ollama');
 const { OpenAIProvider } = require('./providers/openai');
 const { AnthropicProvider } = require('./providers/anthropic');
@@ -54,6 +54,7 @@ Flags:
   --temperature <n>         Sampling temperature (default 0.2)
   --think <on|off>          Enable provider thinking when supported (default on)
   --max-steps <n>           Max agent steps per run (default 30)
+  --run-timeout <minutes>   Wall-clock budget for a single run (default 15)
   --resume <batch>          Resume an existing batch id or manifest path
   --list-local-models       Print Ollama model names and exit
   --dry-run                 Show the plan without executing runs
@@ -68,6 +69,7 @@ function parseArgs(argv) {
     temperature: 0.2,
     think: true,
     maxSteps: 30,
+    runTimeoutMinutes: 15,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -84,6 +86,7 @@ function parseArgs(argv) {
     else if (arg === '--context-cap') args.contextCap = Number(argv[++i]);
     else if (arg === '--temperature') args.temperature = Number(argv[++i]);
     else if (arg === '--max-steps') args.maxSteps = Number(argv[++i]);
+    else if (arg === '--run-timeout') args.runTimeoutMinutes = Number(argv[++i]);
     else if (arg === '--resume') args.resume = argv[++i];
     else if (arg === '--think') {
       const value = String(argv[++i] || '').toLowerCase();
@@ -207,6 +210,7 @@ async function main() {
     args.think = manifest.settings?.think ?? args.think;
     args.contextCap = manifest.settings?.contextCap ?? args.contextCap;
     args.maxSteps = manifest.settings?.maxSteps ?? args.maxSteps;
+    args.runTimeoutMinutes = manifest.settings?.runTimeoutMinutes ?? args.runTimeoutMinutes;
     args.promoteTop = manifest.settings?.promoteTop ?? args.promoteTop;
     args.repeats = manifest.settings?.initialRepeats ?? args.repeats;
     args.totalRepeats = manifest.settings?.totalRepeats ?? args.totalRepeats;
@@ -233,6 +237,7 @@ async function main() {
       think: args.think,
       contextCap: args.contextCap || null,
       maxSteps: args.maxSteps,
+      runTimeoutMinutes: args.runTimeoutMinutes,
     },
     runs: [],
     rankings: [],
@@ -249,6 +254,7 @@ async function main() {
     think: args.think,
     contextCap: args.contextCap || null,
     maxSteps: args.maxSteps,
+    runTimeoutMinutes: args.runTimeoutMinutes,
   };
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
@@ -305,6 +311,7 @@ async function main() {
       temperature: args.temperature,
       contextCap: args.contextCap,
       maxSteps: args.maxSteps,
+      runTimeoutMs: args.runTimeoutMinutes * 60 * 1000,
       chatDir,
       chatSlug,
     });
@@ -332,8 +339,31 @@ async function main() {
     fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   }
 
+  async function recordZero(runSpec, err, startedAt) {
+    try {
+      const { provider, model } = providerForSpec(runSpec.modelSpec, providers);
+      const record = await recordFailedRun({
+        provider,
+        providerModel: model,
+        task: getTask(runSpec.taskId),
+        taskId: runSpec.taskId,
+        error: err,
+        wallTimeMs: Date.now() - startedAt,
+        think: args.think,
+        temperature: args.temperature,
+        contextCap: args.contextCap,
+        runTimeoutMs: args.runTimeoutMinutes * 60 * 1000,
+      });
+      if (record) console.error(`[recorded zero] ${runSpec.modelSpec} :: ${runSpec.taskId} (exceeded time budget)`);
+      else console.error(`[not scored] ${runSpec.modelSpec} :: ${runSpec.taskId} — infrastructure failure, not attributed to the model`);
+    } catch (recordErr) {
+      console.error(`[zero record failed] ${recordErr.message}`);
+    }
+  }
+
   try {
     for (const runSpec of runQueue) {
+      const startedAt = Date.now();
       try {
         await executeRun(runSpec);
       } catch (err) {
@@ -349,6 +379,7 @@ async function main() {
           failedAt: new Date().toISOString(),
         });
         fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+        await recordZero(runSpec, err, startedAt);
       }
     }
 
@@ -363,6 +394,7 @@ async function main() {
           for (const taskId of taskIds) {
             const spec = { phase: 'promoted', repeat, modelSpec, taskId };
             if (completedKeys.has(runKey(spec))) continue;
+            const startedAt = Date.now();
             try {
               await executeRun(spec);
             } catch (err) {
@@ -378,6 +410,7 @@ async function main() {
                 failedAt: new Date().toISOString(),
               });
               fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+              await recordZero(spec, err, startedAt);
             }
           }
         }

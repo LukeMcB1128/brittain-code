@@ -5,12 +5,37 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { spawn } = require('node:child_process');
 const { McpManager } = require('./mcp');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
 const { readActiveMission, writeActiveMission, interruptRunningMission } = require('./missions');
+const { isLocalEndpoint } = require('./recommendations');
+const { createHardwareProfile } = require('./src/main/hardware-profile');
+const { createHistoryStore } = require('./src/main/history-store');
+const { createRecommendationsService } = require('./src/main/recommendations-service');
+const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
+const { selectAutoModel } = require('./src/main/model-router');
+const { createCheckpointService } = require('./src/main/checkpoint-service');
+const { createDiffService } = require('./src/main/diff-service');
+const { normalizeCodeReview, SUBMIT_CODE_REVIEW_TOOL } = require('./src/main/code-review');
+const { captureMissionRecovery, validateMissionRecovery } = require('./src/main/mission-recovery');
+const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
+const { LOCAL_BROWSER_TOOL_NAMES, createLocalBrowserService } = require('./src/main/local-browser-service');
+const { createModelInstallService } = require('./src/main/model-install-service');
+const { createUpdateService } = require('./src/main/update-service');
+const { autoUpdater } = require('electron-updater');
+const {
+  normalizeContextState,
+  pinFile: pinContextFile,
+  pinnedFilesPrompt,
+  pinnedMessagesPrompt,
+  setMessagePinned,
+  setToolExcluded,
+  unpinFile: unpinContextFile,
+} = require('./src/main/context-controls');
 
 const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user message
 // The context window we actually request from Ollama. Without an explicit
@@ -27,6 +52,11 @@ let settingsUserDataDir = '';
 function inferenceEndpoint() {
   return runtimeSettings.inferenceEndpoint;
 }
+
+const hardwareProfile = createHardwareProfile({
+  getEndpoint: inferenceEndpoint,
+  isLocalEndpoint,
+});
 
 function compactThreshold() {
   return runtimeSettings.compactThreshold;
@@ -68,7 +98,12 @@ function stripOldImages(msgs) {
 }
 
 function modelReadyMessages(msgs) {
-  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, ...message }) => message);
+  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, pinned, excludedFromInference, ...message }) => {
+    if (excludedFromInference && message.role === 'tool') {
+      return { ...message, content: '[Tool result content excluded from inference by the user.]' };
+    }
+    return message;
+  });
 }
 
 // Drop oldest messages until the set fits the budget (used for the summarizer
@@ -89,6 +124,7 @@ function fitToWindow(msgs, maxTokens) {
 
 let win = null;
 let activeMission = null;
+let updateService = null;
 
 function publishMission() {
   if (win && !win.isDestroyed()) win.webContents.send('mission:update', activeMission);
@@ -113,6 +149,7 @@ function recoverMission() {
 
 // ---------- conversation state (lives in main so tool messages stay in history) ----------
 let conversation = [];            // ollama-format messages, excluding system
+let contextState = normalizeContextState();
 let currentAbort = null;          // AbortController for the in-flight run
 let stopRequested = false;
 
@@ -158,6 +195,18 @@ function freshUsage() {
   };
 }
 let usage = freshUsage();
+const modelSpeedSamples = new Map();
+
+function recordModelSpeed(model, stats, contextTokens) {
+  if (!model || !stats || stats.evalTokens < 8 || !Number.isFinite(stats.tokPerSec) || stats.tokPerSec <= 0) return;
+  const samples = modelSpeedSamples.get(model) || [];
+  samples.push({
+    tokensPerSecond: stats.tokPerSec,
+    contextTokens,
+    recordedAt: new Date().toISOString(),
+  });
+  modelSpeedSamples.set(model, samples.slice(-12));
+}
 
 function recordUsage(bucket, stats) {
   if (!stats) return;
@@ -218,7 +267,7 @@ function publishContextStats(stats, contextLength, scope = 'conversation') {
 
 async function publishPersistedConversationContext(model) {
   const contextLength = await effectiveContext(model);
-  const contextTokens = estimateTokens(stripOldImages(conversation));
+  const contextTokens = estimateTokens(modelReadyMessages(conversation));
   usage.context = { tokens: contextTokens, limit: contextLength };
   win.webContents.send('stream:stats', {
     contextTokens,
@@ -244,6 +293,7 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  win.webContents.once('did-finish-load', () => updateService?.start());
 }
 
 // Packaged apps launched from Finder inherit launchd's minimal PATH — node,
@@ -262,6 +312,15 @@ if (process.platform !== 'win32') {
 }
 
 const mcp = new McpManager();
+const localBrowser = createLocalBrowserService({
+  BrowserWindow,
+  getDataDir: () => settingsUserDataDir || app.getPath('userData'),
+});
+const modelInstaller = createModelInstallService({
+  spawnImpl: spawn,
+  getEndpoint: inferenceEndpoint,
+  isLocalEndpoint,
+});
 
 app.whenReady().then(() => {
   settingsUserDataDir = app.getPath('userData');
@@ -275,13 +334,26 @@ app.whenReady().then(() => {
     }
   });
   createWindow();
+  const packageMetadata = require('./package.json');
+  updateService = createUpdateService({
+    updater: autoUpdater,
+    enabled: app.isPackaged && packageMetadata.updateEnabled === true,
+    currentVersion: app.getVersion(),
+    isBusy: () => !!currentAbort || activeMission?.status === 'running',
+    publish: (state) => {
+      if (win && !win.isDestroyed()) win.webContents.send('updates:state', state);
+    },
+  });
+  if (!win.webContents.isLoading()) updateService.start();
 });
 app.on('before-quit', () => {
   if (activeMission?.status === 'running') updateMission({
-    status: 'interrupted', currentPhase: 'interrupted', endedAt: new Date().toISOString(),
+    status: 'interrupted', interruptedPhase: activeMission.currentPhase || 'unknown', currentPhase: 'interrupted', endedAt: new Date().toISOString(),
     lastEvent: 'Brittain Code closed before this mission finished.',
   });
   stopAllManagedProcesses();
+  modelInstaller.stopAll();
+  localBrowser.closeAll();
   mcp.stopAll();
 });
 app.on('window-all-closed', () => app.quit());
@@ -515,6 +587,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
           generationMs: (chunk.eval_duration || 0) / 1e6,
           totalMs: (chunk.total_duration || 0) / 1e6,
         };
+        recordModelSpeed(model, stats, numCtx);
       }
     }
   }
@@ -693,6 +766,8 @@ function chatSystemPrompt(onlineResearch = false) {
   if (runtimeSettings.globalChatInstructions) {
     lines.push('', 'User-wide Chat instructions:', runtimeSettings.globalChatInstructions);
   }
+  const pinnedMessages = pinnedMessagesPrompt(conversation);
+  if (pinnedMessages) lines.push('', pinnedMessages);
   return lines.join('\n');
 }
 
@@ -706,7 +781,7 @@ function systemPrompt(cwd, model = '', onlineResearch = false) {
     '- Never infer what code does — read it. One read_file beats three paragraphs of reasoning about what a file probably contains.',
     '- Commit to an approach and act. If you notice yourself reconsidering a choice you already made, stop deliberating and make the smallest change that tests it. Plans are cheap; a tool result is evidence.',
     '- Verify your work: read a file back after editing it, or run a command that proves the change works. Do not claim success without evidence from a tool result.',
-    '- Edit existing code with edit_file: copy the exact old text from the file and give the new text. Use write_file only for new files or full rewrites of files you have read completely. Never write placeholders like "... existing code ...".',
+    '- Prefer apply_patch for precise multi-file edits: preview first, then apply the same patch. Use edit_file for one small exact replacement. Use write_file only for new files or full rewrites of files you have read completely. Never write placeholders like "... existing code ...".',
     '- Commands run in zsh with a 60 second timeout; do not start interactive programs or servers that never exit.',
     '- If a tool call errors twice, stop and ask the user for guidance with ask_user. If the user denies a tool call, do not retry it.',
     '- For ambiguous or destructive decisions, ask with ask_user and give 2-4 concrete options. Otherwise state your assumption in one line and proceed.',
@@ -728,6 +803,10 @@ function systemPrompt(cwd, model = '', onlineResearch = false) {
   if (runtimeSettings.globalCodeInstructions) {
     lines.push('', 'User-wide Code instructions:', runtimeSettings.globalCodeInstructions);
   }
+  const pinnedMessages = pinnedMessagesPrompt(conversation);
+  if (pinnedMessages) lines.push('', pinnedMessages);
+  const pinnedFiles = pinnedFilesPrompt(contextState, cwd);
+  if (pinnedFiles) lines.push('', pinnedFiles);
   const memory = readMemory(cwd).trim();
   if (memory) {
     // cap so a huge memory file cannot blow up the prompt (keep the newest lines)
@@ -983,6 +1062,9 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
             ? await safeExecute(name, args, cwd)
             : 'The user denied this sensitive read. Do not retry it unless the user explicitly asks.';
           win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(sensitive read denied by user)', denied: !approved });
+        } else if (name === 'apply_patch' && args.dry_run !== false) {
+          result = await safeExecute(name, args, cwd);
+          win.webContents.send('stream:toolresult', { name, result: preview(result) });
         } else if (RISKY_TOOLS.has(name) && !autoApprove) {
           const approved = await requestApproval({ name, args });
           result = approved
@@ -1034,70 +1116,14 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
 // hidden ref under refs/brittain/checkpoints/ — using a TEMPORARY index so the
 // user's real index, branch, and commit history are never touched. UNDO RUN
 // restores the tree to the snapshot even if the user never committed.
-const CHECKPOINT_KEEP = 20;
-let lastCheckpoint = null; // { ref, cwd, at }
-
-async function createCheckpoint(cwd) {
-  try {
-    if (!(await gitRun(['rev-parse', '--git-dir'], cwd)).ok) return null; // not a repo
-    const tmpIndex = path.join(app.getPath('temp'), 'brittain-ckpt-' + Date.now() + '-' + Math.random().toString(36).slice(2));
-    const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
-    try {
-      const add = await gitRun(['add', '-A', '--', '.'], cwd, env);
-      if (!add.ok) return null;
-      const tree = await gitRun(['write-tree'], cwd, env);
-      if (!tree.ok) return null;
-      const head = await gitRun(['rev-parse', 'HEAD'], cwd);
-      const parentArgs = head.ok ? ['-p', head.out.trim()] : [];
-      const commit = await gitRun(['commit-tree', tree.out.trim(), ...parentArgs, '-m', 'brittain checkpoint ' + new Date().toISOString()], cwd, env);
-      if (!commit.ok) return null;
-      const ref = 'refs/brittain/checkpoints/' + Date.now();
-      if (!(await gitRun(['update-ref', ref, commit.out.trim()], cwd)).ok) return null;
-      lastCheckpoint = { ref, cwd, at: Date.now() };
-      win.webContents.send('checkpoint:state', { available: true, cwd });
-      pruneCheckpoints(cwd); // fire and forget
-      return lastCheckpoint;
-    } finally {
-      try { fs.unlinkSync(tmpIndex); } catch {}
-    }
-  } catch {
-    return null;
-  }
-}
-
-async function pruneCheckpoints(cwd) {
-  const list = await gitRun(['for-each-ref', '--format=%(refname)', 'refs/brittain/checkpoints/'], cwd);
-  if (!list.ok) return;
-  const refs = list.out.split('\n').filter(Boolean).sort(); // timestamped names sort chronologically
-  for (const ref of refs.slice(0, Math.max(0, refs.length - CHECKPOINT_KEEP))) {
-    await gitRun(['update-ref', '-d', ref], cwd);
-  }
-}
-
-ipcMain.handle('checkpoint:undo', async (_e, cwd) => {
-  const target = lastCheckpoint;
-  if (!target || target.cwd !== cwd) return { ok: false, error: 'No checkpoint for this folder in this session.' };
-  try {
-    const stat = await gitRun(['diff', '--shortstat', target.ref, '--', '.'], cwd);
-    // snapshot the CURRENT state first, so UNDO itself is undoable
-    await createCheckpoint(cwd);
-    // restore tracked content (worktree only — the user's index stays theirs)
-    const restore = await gitRun(['restore', '--source=' + target.ref, '--worktree', '--', '.'], cwd);
-    if (!restore.ok) return { ok: false, error: restore.err || 'restore failed' };
-    // delete files that exist now but did not exist at the checkpoint
-    const inRef = await gitRun(['ls-tree', '-r', '--name-only', target.ref], cwd);
-    const nowFiles = await gitRun(['ls-files', '--cached', '--others', '--exclude-standard'], cwd);
-    if (inRef.ok && nowFiles.ok) {
-      const keep = new Set(inRef.out.split('\n').filter(Boolean));
-      for (const f of nowFiles.out.split('\n').filter(Boolean)) {
-        if (!keep.has(f)) { try { fs.unlinkSync(path.join(cwd, f)); } catch {} }
-      }
-    }
-    return { ok: true, restoredFrom: new Date(target.at).toLocaleTimeString(), changes: (stat.out || '').trim() || 'no differences detected' };
-  } catch (err) {
-    return { ok: false, error: String(err.message || err) };
-  }
+const checkpointService = createCheckpointService({
+  gitRun,
+  getTempDirectory: () => app.getPath('temp'),
+  publishState: (state) => win.webContents.send('checkpoint:state', state),
 });
+const createCheckpoint = checkpointService.create;
+
+ipcMain.handle('checkpoint:undo', (_e, cwd) => checkpointService.undo(cwd));
 
 // ---------- auto-branch (Tier 1 safety, toggleable) ----------
 async function maybeAutoBranch(cwd, taskText, enabled) {
@@ -1122,6 +1148,7 @@ async function emitRunReport(cwd, runLog) {
   if (!runLog || (!runLog.mutations.size && !runLog.commands.length)) return; // read-only turns stay quiet
   const lines = ['\u2501 RUN REPORT \u2501'];
   let diffPart = '';
+  const lastCheckpoint = checkpointService.current();
   if (lastCheckpoint && lastCheckpoint.cwd === cwd) {
     // Scope to cwd: when the project folder sits INSIDE a larger repo (e.g.
     // ~/Downloads is itself a repo), an unscoped diff reports every pending
@@ -1146,7 +1173,7 @@ async function emitRunReport(cwd, runLog) {
 async function maybePrecompact(model) {
   if (conversation.length < 2) return;
   const contextLength = await effectiveContext(model);
-  const estimated = estimateTokens(stripOldImages(conversation));
+  const estimated = estimateTokens(modelReadyMessages(conversation));
   if (!shouldAutoCompact(estimated, contextLength)) return;
   win.webContents.send('stream:info', `Context is ~${Math.round((estimated / contextLength) * 100)}% full before sending — auto-compacting first…`);
   win.webContents.send('stream:state', 'auto-compacting…');
@@ -1363,11 +1390,94 @@ async function runSubagent(task, subModel, cwd) {
   return `Subagent report (${subModel}, ${steps} tool calls):\n${report}`;
 }
 
+// ---------- structured code review ----------
+const REVIEW_MAX_STEPS = 14;
+
+function reviewerSystemPrompt(cwd, base) {
+  return [
+    'You are a strict read-only code reviewer inside Brittain Code.',
+    `Working directory: ${cwd}. Review target base: ${base}.`,
+    'Inspect the supplied diff and use read-only project tools when more context is required.',
+    'Report only actionable defects introduced by the reviewed changes. Do not report style preferences or unsupported guesses.',
+    'Each finding must include severity, numeric confidence, exact project-relative file and line, concrete evidence, and a specific suggested fix.',
+    'Use critical only for data loss, security compromise, or total application failure. Use high for likely serious runtime failures, medium for bounded defects, and low for small but real correctness problems.',
+    'When finished, call submit_code_review exactly once. An empty findings array is correct when no actionable defect is supported by evidence.',
+    scopedProjectContext(cwd),
+  ].filter(Boolean).join('\n');
+}
+
+async function collectReviewEvidence(cwd, requestedBase) {
+  const base = String(requestedBase || 'HEAD').trim() || 'HEAD';
+  if (base.startsWith('-') || /[\0\r\n]/.test(base)) throw new Error('The review base is not a valid Git revision.');
+  const verified = await gitRun(['rev-parse', '--verify', `${base}^{commit}`], cwd);
+  if (!verified.ok) throw new Error(`Git revision "${base}" was not found.`);
+  const [diff, status, untracked] = await Promise.all([
+    gitRun(['diff', '--no-ext-diff', '--unified=20', base, '--', '.'], cwd),
+    gitRun(['status', '--short', '--untracked-files=normal', '--', '.'], cwd),
+    gitRun(['ls-files', '--others', '--exclude-standard', '--', '.'], cwd),
+  ]);
+  if (!diff.ok) throw new Error(diff.err || 'Could not read the review diff.');
+  return {
+    base,
+    diff: diff.out.slice(0, 140_000),
+    status: status.out.slice(0, 20_000),
+    untracked: untracked.out.split('\n').filter(Boolean).slice(0, 200),
+  };
+}
+
+async function runStructuredReview(model, cwd, requestedBase) {
+  const evidence = await collectReviewEvidence(cwd, requestedBase);
+  if (!evidence.diff.trim() && !evidence.untracked.length) {
+    return normalizeCodeReview({ summary: `No changes were found relative to ${evidence.base}.`, findings: [] }, evidence.base);
+  }
+  const numCtx = await effectiveContext(model, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
+  const useThink = (await supportsThinking(model)) ? false : undefined;
+  const tools = [...SUBAGENT_TOOLS, SUBMIT_CODE_REVIEW_TOOL];
+  const msgs = [
+    { role: 'system', content: reviewerSystemPrompt(cwd, evidence.base) },
+    {
+      role: 'user',
+      content: `REVIEW THIS WORKING TREE.\n\nGIT STATUS:\n${evidence.status || '(clean)'}\n\nUNTRACKED FILES:\n${evidence.untracked.join('\n') || '(none)'}\n\nDIFF AGAINST ${evidence.base}:\n${evidence.diff || '(tracked diff is empty; inspect the untracked files)'}\n\nInspect any needed files, then submit the structured review.`,
+    },
+  ];
+  let lastContent = '';
+  for (let step = 0; step < REVIEW_MAX_STEPS; step++) {
+    if (stopRequested) throw new DOMException('Stopped', 'AbortError');
+    let { content, toolCalls, stats } = await streamChat(model, msgs, currentAbort.signal, useThink, true, numCtx, tools);
+    recordUsage('verifier', stats);
+    if (!toolCalls.length) {
+      const recovered = parseRawToolCalls(content);
+      if (recovered) {
+        toolCalls = recovered.calls;
+        content = recovered.cleaned;
+      }
+    }
+    if (content) lastContent = content;
+    const assistant = { role: 'assistant', content };
+    if (toolCalls.length) assistant.tool_calls = toolCalls;
+    msgs.push(assistant);
+    if (!toolCalls.length) {
+      msgs.push({ role: 'user', content: 'Stop narrating. Call submit_code_review now with only evidence-supported findings.' });
+      continue;
+    }
+    for (const call of toolCalls) {
+      const name = call.function?.name;
+      let args = call.function?.arguments || {};
+      if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
+      if (name === 'submit_code_review') return normalizeCodeReview(args, evidence.base);
+      const result = SUBAGENT_TOOL_NAMES.has(name)
+        ? await safeExecute(name, args, cwd)
+        : `Error: tool "${name}" is not available to the reviewer.`;
+      msgs.push({ role: 'tool', tool_name: name, content: String(result) });
+    }
+  }
+  return normalizeCodeReview({ summary: lastContent || 'Reviewer reached its step limit.', findings: [] }, evidence.base);
+}
+
 // ---------- orchestrated coding (/orchestrate) ----------
 const ORCHESTRATOR_MAX_STEPS = 18;
 const CODER_MAX_STEPS = 30;
 const CODER_CTX_CAP = 32_768;
-const ORCHESTRATOR_MAX_TASKS = 6;
 const ORCHESTRATOR_MAX_REPAIRS = 1;
 const SCOPED_MAX_COMPACTIONS = 2;
 
@@ -1379,40 +1489,11 @@ function scopedProjectContext(cwd) {
     const instructions = fs.readFileSync(path.join(cwd, 'BRITTAIN.md'), 'utf8').trim();
     if (instructions) sections.push('Project instructions from BRITTAIN.md:\n' + instructions.slice(0, 12_000));
   } catch {}
+  const pinnedFiles = pinnedFilesPrompt(contextState, cwd);
+  if (pinnedFiles) sections.push(pinnedFiles);
+  const pinnedMessages = pinnedMessagesPrompt(conversation);
+  if (pinnedMessages) sections.push(pinnedMessages);
   return sections.length ? '\n\n' + sections.join('\n\n') : '';
-}
-
-function cleanStringList(value, cap = 20) {
-  return Array.isArray(value)
-    ? value.map((item) => String(item || '').trim()).filter(Boolean).slice(0, cap)
-    : [];
-}
-
-function normalizeImplementationPlan(value, goal) {
-  const rawTasks = Array.isArray(value?.tasks) ? value.tasks.slice(0, ORCHESTRATOR_MAX_TASKS) : [];
-  const tasks = rawTasks.map((task, index) => ({
-    id: `task-${index + 1}`,
-    title: String(task?.title || `Implementation task ${index + 1}`).trim().slice(0, 120),
-    objective: String(task?.objective || '').trim(),
-    acceptance_criteria: cleanStringList(task?.acceptance_criteria, 12),
-    relevant_files: cleanStringList(task?.relevant_files, 30),
-    constraints: cleanStringList(task?.constraints, 20),
-  })).filter((task) => task.objective);
-
-  if (!tasks.length) {
-    tasks.push({
-      id: 'task-1',
-      title: 'Implement the requested goal',
-      objective: goal,
-      acceptance_criteria: ['The requested goal is implemented and verified with available project checks.'],
-      relevant_files: [],
-      constraints: [],
-    });
-  }
-  return {
-    summary: String(value?.summary || 'Implement and verify the requested goal.').trim().slice(0, 2000),
-    tasks,
-  };
 }
 
 // Planner and coder histories are deliberately isolated from the persisted
@@ -1516,6 +1597,7 @@ async function executeWithApproval(name, args, cwd, autoApprove, onlineResearch)
     const approved = await requestApproval({ name, args, sensitive: true });
     return approved ? safeExecute(name, args, cwd) : 'The user denied this sensitive read.';
   }
+  if (name === 'apply_patch' && args.dry_run !== false) return safeExecute(name, args, cwd);
   if (RISKY_TOOLS.has(name) && !autoApprove) {
     const approved = await requestApproval({ name, args });
     return approved ? safeExecute(name, args, cwd) : 'The user denied this tool call.';
@@ -1657,7 +1739,7 @@ function coderSystemPrompt(cwd) {
     'Inspect the relevant files yourself, implement the task with tool calls, and verify the result.',
     'You are always offline. Do not attempt network access or delegate to other agents.',
     'Preserve pre-existing user changes. Do not commit, revert, or rewrite unrelated code.',
-    'Use edit_file/edit_files for existing files and write_file only for new files or files you have fully read.',
+    'Prefer apply_patch for precise multi-file edits: preview it first, then apply the same patch. Use edit_file/edit_files for small exact replacements and write_file only for new files or files you have fully read.',
     'Use run_project_check without a check name first to discover verification for package, CMake, Cargo, Go, Python, or Make projects, then run the most relevant discovered check. Never claim a check passed unless its tool result proves it.',
     'Work in one bounded pass. After you have made a useful change or run the relevant check, stop broad exploration and return your concise report. If a PREVIOUS ATTEMPT packet is provided, treat it as the handoff from the prior coder: do not re-list or re-read already inspected files unless the verifier feedback or current task requires it.',
     'When finished, return a concise report listing changed files, checks run, and any unresolved issue.',
@@ -1796,7 +1878,7 @@ async function collectOrchestrationGitEvidence(cwd) {
 }
 
 const ORCHESTRATION_MUTATING_TOOLS = new Set([
-  'write_file', 'edit_file', 'edit_files', 'append_file', 'create_directory',
+  'write_file', 'edit_file', 'edit_files', 'apply_patch', 'append_file', 'create_directory',
   'delete_file', 'copy_file', 'move_file',
 ]);
 
@@ -1808,7 +1890,38 @@ function evidencePaths(entry) {
   if (Array.isArray(entry.args?.edits)) {
     for (const edit of entry.args.edits) if (edit?.path) paths.push(String(edit.path));
   }
+  if (entry.name === 'apply_patch' && entry.result) {
+    try {
+      const parsed = JSON.parse(entry.result);
+      for (const file of parsed.files || []) if (file?.path) paths.push(String(file.path));
+    } catch {}
+  }
   return paths;
+}
+
+// Workflow reports render as markdown in the chat, where a single newline is
+// NOT a line break — consecutive lines collapse into one paragraph. Facts are
+// therefore emitted as list items, and any value that may contain newlines
+// (shell commands, verifier prose) is flattened first so it cannot break out
+// of its bullet.
+function mdInline(value, max = 0) {
+  let text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (max && text.length > max) text = text.slice(0, max).trimEnd() + '…';
+  return text;
+}
+
+// Inline code for a path/command, with backticks in the value neutralized.
+function mdCode(value, max = 0) {
+  const text = mdInline(value, max).replace(/`/g, 'ˋ');
+  return text ? '`' + text + '`' : '';
+}
+
+// Absolute tool paths are unreadable in a report ("/Users/…/project/src/a.js").
+// Keep the last two segments, which is enough to disambiguate same-named files
+// without spilling the whole home directory into the chat.
+function shortPath(value) {
+  const parts = String(value ?? '').split(/[\\/]/).filter(Boolean);
+  return parts.slice(-2).join('/') || String(value ?? '');
 }
 
 function conciseTaskResult(result, index) {
@@ -1825,15 +1938,16 @@ function conciseTaskResult(result, index) {
       const parsed = JSON.parse(entry.result);
       if (typeof parsed.exit_code === 'number') failed = parsed.exit_code !== 0;
     } catch {}
-    return `${String(label).slice(0, 100)} — ${failed ? 'issue reported' : 'completed'}`;
+    return `${mdCode(label, 80)} — ${failed ? '⚠ issue reported' : '✔ completed'}`;
   });
   const lines = [
-    `### ${index + 1}. ${result.task.title} — ${result.complete ? 'verified' : 'incomplete'}`,
-    `Changed: ${changed.length ? changed.join(', ') : 'no modified paths recorded by coding tools'}`,
-    `Checks: ${checks.length ? checks.join('; ') : 'no verification command recorded'}`,
+    `### ${index + 1}. ${mdInline(result.task.title, 120)} — ${result.complete ? '✔ verified' : '✖ incomplete'}`,
+    '',
+    `- **Changed:** ${changed.length ? changed.map((p) => mdCode(shortPath(p))).join(', ') : '_no modified paths recorded by coding tools_'}`,
+    `- **Checks:** ${checks.length ? checks.join(' · ') : '_no verification command recorded_'}`,
   ];
-  if (result.repairs) lines.push(`Repair attempts: ${result.repairs}`);
-  if (!result.complete) lines.push(`Remaining: ${String(result.verdict || 'Verifier did not return a verdict.').slice(0, 900)}`);
+  if (result.repairs) lines.push(`- **Repair attempts:** ${result.repairs}`);
+  if (!result.complete) lines.push(`- **Remaining:** ${mdInline(result.verdict || 'Verifier did not return a verdict.', 600)}`);
   lines.push('');
   return lines;
 }
@@ -1977,7 +2091,7 @@ function wholeGoalVerificationTask(goal, plan) {
   };
 }
 
-async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, loopLog, onProgress = () => {} }) {
+async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, loopLog, iterationOffset = 0, onProgress = () => {} }) {
   const info = (text) => win.webContents.send('stream:info', text);
   const state = (text) => win.webContents.send('stream:state', text);
   const verifierModel = subModel || 'qwen3:8b';
@@ -1985,7 +2099,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
   const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
 
   conversation.push({ role: 'user', content: `MISSION (max ${max}): ${goal}` });
-  onProgress({ currentPhase: 'planning', lastEvent: 'Inspecting the project and preparing a plan.' });
+  await onProgress({ currentPhase: 'planning', lastEvent: 'Inspecting the project and preparing a plan.' });
   state(`planning coder loop (${model})`);
   info(`Supervisor ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
   const submittedPlan = await runOrchestratorPlan(model, goal, cwd, verifierModel, !!onlineResearch, !!think, baselineStatus, max);
@@ -2007,7 +2121,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
     const isRepair = !!feedback;
     if (isRepair) usage.metrics.repairs += 1;
     info(`━ Coder loop iteration ${iteration}/${max}: ${task.title}${isRepair ? ' (repair)' : ''} ━`);
-    onProgress({ currentPhase: isRepair ? 'repair' : 'implementation', currentIteration: iteration, lastEvent: `${isRepair ? 'Repairing' : 'Implementing'}: ${task.title}` });
+    await onProgress({ currentPhase: isRepair ? 'repair' : 'implementation', currentIteration: iterationOffset + iteration, lastEvent: `${isRepair ? 'Repairing' : 'Implementing'}: ${task.title}` });
     state(`coder loop ${iteration}/${max} (${coderModel})`);
 
     const priorAttempt = results.find((entry) => entry.task.id === task.id)?.coderResult || null;
@@ -2032,7 +2146,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
     if (isRepair) result.repairs += 1;
 
     const gitEvidence = await collectOrchestrationGitEvidence(cwd);
-    onProgress({ currentPhase: 'verification', currentIteration: iteration, lastEvent: `Verifying: ${task.title}` });
+    await onProgress({ currentPhase: 'verification', currentIteration: iterationOffset + iteration, lastEvent: `Verifying: ${task.title}` });
     state(`verifying coder loop ${iteration}/${max} (${verifierModel})`);
     const verdict = await runOrchestrationVerifier(
       verifierModel,
@@ -2073,7 +2187,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
       evidence: results.flatMap((entry) => entry.coderResult.evidence),
     };
     const finalEvidence = await collectOrchestrationGitEvidence(cwd);
-    onProgress({ currentPhase: 'verification', currentIteration: iteration, lastEvent: 'Running final whole-goal verification.' });
+    await onProgress({ currentPhase: 'verification', currentIteration: iterationOffset + iteration, lastEvent: 'Running final whole-goal verification.' });
     state(`final coder-loop verification (${verifierModel})`);
     finalVerdict = await runOrchestrationVerifier(
       verifierModel,
@@ -2101,19 +2215,20 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
   }
   const finalEvidence = await collectOrchestrationGitEvidence(cwd);
   const report = capWorkflowText([
-    complete ? '## Coder loop complete' : '## Coder loop stopped with remaining work',
+    complete ? '## ✔ Coder loop complete' : '## ✖ Coder loop stopped with remaining work',
     '',
-    `Models: ${model} supervisor → ${coderModel} coder → ${verifierModel} verifier`,
-    `Iterations: ${iterationsUsed}/${max}`,
-    `Online research: ${onlineResearch ? 'supervisor only' : 'off'}`,
+    `- **Supervisor:** ${mdCode(model)} · **Coder:** ${mdCode(coderModel)} · **Verifier:** ${mdCode(verifierModel)}`,
+    `- **Iterations:** ${iterationsUsed}/${max}`,
+    `- **Online research:** ${onlineResearch ? 'supervisor only' : 'off'}`,
     '',
-    `Plan: ${plan.summary}`,
+    `**Plan:** ${mdInline(plan.summary, 700)}`,
     '',
     ...results.flatMap(conciseTaskResult),
-    `Final verification: ${complete ? 'GOAL_COMPLETE' : String(finalVerdict).slice(0, 1000)}`,
+    `**Final verification:** ${complete ? '`GOAL_COMPLETE`' : mdInline(finalVerdict, 800)}`,
     '',
-    `Working tree: ${conciseWorkingTree(finalEvidence)}`,
-    'Open DIFF to inspect the full patch and untracked paths.',
+    `**Working tree:** ${mdInline(conciseWorkingTree(finalEvidence), 600)}`,
+    '',
+    '_Open DIFF to inspect the full patch and untracked paths._',
   ].join('\n'), 6000);
   conversation.push({ role: 'assistant', content: report });
   return { ok: true, report, complete };
@@ -2211,33 +2326,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
 // ---------- durable missions (/mission) ----------
 // Missions intentionally reuse the bounded coder loop. They add a visible,
 // persisted control plane without creating a second, less-tested agent engine.
-ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
-  if (activeMission?.status === 'running') return { ok: false, error: 'A mission is already running. Use /mission status or /mission stop.' };
-  if (!model) return { ok: false, error: 'Select a model first.' };
-  if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
-  if (!goal?.trim()) return { ok: false, error: 'A mission goal is required.' };
-  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
-
-  const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
-  const startedAt = new Date().toISOString();
-  activeMission = {
-    id: `mission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    status: 'running',
-    goal: goal.trim(),
-    projectPath: cwd,
-    startedAt,
-    endedAt: null,
-    maxIterations: max,
-    currentIteration: 0,
-    currentPhase: 'starting',
-    lastEvent: 'Preparing mission.',
-    models: { main: model, coder: coderModel, verifier: subModel || 'qwen3:8b' },
-    onlineResearch: !!onlineResearch,
-    finalReport: null,
-  };
-  writeActiveMission(settingsUserDataDir, activeMission);
-  publishMission();
-
+async function runActiveMission({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, iterationOffset = 0 }) {
   stopRequested = false;
   currentAbort = new AbortController();
   const runStartedAt = Date.now();
@@ -2245,8 +2334,6 @@ ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, 
   const loopLog = { mutations: new Set(), commands: [], verified: false };
 
   try {
-    await maybeAutoBranch(cwd, goal, !!autoBranch);
-    await createCheckpoint(cwd);
     const result = await runCoderGoalLoop({
       model,
       coderModel,
@@ -2258,7 +2345,18 @@ ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, 
       onlineResearch,
       max,
       loopLog,
-      onProgress: (progress) => updateMission(progress),
+      iterationOffset,
+      onProgress: async (progress) => {
+        const recovery = await captureMissionRecovery({
+          cwd,
+          checkpointRef: activeMission.recovery.checkpointRef,
+          gitRun,
+        });
+        updateMission({
+          ...progress,
+          recovery: { ...recovery, checkpointAt: activeMission.recovery.checkpointAt },
+        });
+      },
     });
     await emitRunReport(cwd, loopLog);
     const stopped = stopRequested || result.stopped;
@@ -2292,6 +2390,55 @@ ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, 
     currentAbort = null;
     win.webContents.send('stream:done');
   }
+}
+
+ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch, chatId }) => {
+  if (activeMission?.status === 'running') return { ok: false, error: 'A mission is already running. Use /mission status or /mission stop.' };
+  if (!model) return { ok: false, error: 'Select a model first.' };
+  if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
+  if (!goal?.trim()) return { ok: false, error: 'A mission goal is required.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  if (!chatId) return { ok: false, error: 'A mission must be started from a chat.' };
+
+  const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
+  const startedAt = new Date().toISOString();
+  activeMission = {
+    id: `mission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    status: 'running',
+    goal: goal.trim(),
+    projectPath: cwd,
+    chatId,
+    startedAt,
+    endedAt: null,
+    maxIterations: max,
+    currentIteration: 0,
+    currentPhase: 'starting',
+    lastEvent: 'Preparing mission.',
+    models: { main: model, coder: coderModel, verifier: subModel || 'qwen3:8b' },
+    onlineResearch: !!onlineResearch,
+    finalReport: null,
+    recovery: null,
+  };
+  writeActiveMission(settingsUserDataDir, activeMission);
+  publishMission();
+
+  try {
+    await maybeAutoBranch(cwd, goal, !!autoBranch);
+    const checkpoint = await createCheckpoint(cwd);
+    if (!checkpoint) throw new Error('Could not create the mission recovery checkpoint.');
+    const recovery = await captureMissionRecovery({ cwd, checkpointRef: checkpoint.ref, gitRun });
+    updateMission({
+      projectPath: recovery.projectPath,
+      recovery: { ...recovery, checkpointAt: checkpoint.at },
+      lastEvent: 'Recovery checkpoint saved. Starting mission.',
+    });
+  } catch (error) {
+    const message = String(error.message || error);
+    updateMission({ status: 'failed', currentPhase: 'failed', endedAt: new Date().toISOString(), lastEvent: message, finalReport: message });
+    return { ok: false, error: message };
+  }
+
+  return runActiveMission({ model, coderModel, subModel, goal: goal.trim(), cwd: activeMission.projectPath, autoApprove, think, onlineResearch, max });
 });
 
 ipcMain.handle('mission:get', () => ({ ok: true, mission: activeMission }));
@@ -2306,7 +2453,142 @@ ipcMain.handle('mission:stop', () => {
   return { ok: true };
 });
 
-ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch }) => {
+ipcMain.handle('mission:resume', async (_e, { cwd, chatId, autoApprove, think, onlineResearch }) => {
+  if (!activeMission) return { ok: false, error: 'There is no saved mission.' };
+  if (activeMission.status !== 'interrupted') return { ok: false, error: `Only an interrupted mission can resume. Current status: ${activeMission.status}.` };
+  if (!cwd) return { ok: false, error: 'Pick the saved mission directory first.' };
+  if (!chatId || chatId !== activeMission.chatId) return { ok: false, error: 'Open the chat that started this mission before resuming it.' };
+
+  const validation = await validateMissionRecovery({ mission: activeMission, cwd, gitRun });
+  if (!validation.ok) {
+    return { ok: false, error: 'Mission recovery validation failed:\n- ' + validation.errors.join('\n- ') };
+  }
+  const checkpointAt = Number(activeMission.recovery.checkpointAt) || Date.now();
+  checkpointService.adopt({ ref: activeMission.recovery.checkpointRef, cwd: validation.current.projectPath, at: checkpointAt });
+  const iterationOffset = Math.max(0, (Number(activeMission.currentIteration) || 1) - 1);
+  const remaining = Math.max(1, (Number(activeMission.maxIterations) || 1) - iterationOffset);
+  const models = activeMission.models || {};
+  updateMission({
+    status: 'running',
+    currentPhase: 'resuming',
+    endedAt: null,
+    resumedAt: new Date().toISOString(),
+    lastEvent: `Recovery state validated. Resuming with ${remaining} iteration${remaining === 1 ? '' : 's'} available.`,
+  });
+  return runActiveMission({
+    model: models.main,
+    coderModel: models.coder,
+    subModel: models.verifier,
+    goal: activeMission.goal,
+    cwd: validation.current.projectPath,
+    autoApprove: !!autoApprove,
+    think: !!think,
+    onlineResearch: !!onlineResearch,
+    max: remaining,
+    iterationOffset,
+  });
+});
+
+ipcMain.handle('chat:plan', async (_e, { model, subModel, goal, cwd, think, onlineResearch }) => {
+  if (!model) return { ok: false, error: 'Select a planner model first.' };
+  if (!goal?.trim()) return { ok: false, error: 'A planning goal is required.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
+  const verifierModel = subModel || 'qwen3:8b';
+  const baseline = await gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd);
+  const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
+
+  try {
+    win.webContents.send('stream:state', `planning (${model})`);
+    win.webContents.send('stream:info', `Planner ${model} is inspecting the project. No files will be changed.`);
+    const plan = await runOrchestratorPlan(
+      model,
+      goal.trim(),
+      cwd,
+      verifierModel,
+      !!onlineResearch,
+      !!think,
+      baselineStatus,
+    );
+    return { ok: true, plan };
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      runOutcome = 'stopped';
+      return { ok: true, stopped: true };
+    }
+    runOutcome = 'failed';
+    return { ok: false, error: String(err.message || err) };
+  } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
+    try { await publishPersistedConversationContext(model); } catch {}
+    currentAbort = null;
+    win.webContents.send('stream:done');
+  }
+});
+
+ipcMain.handle('chat:review', async (_e, { model, cwd, base }) => {
+  if (!model) return { ok: false, error: 'Select a reviewer model first.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
+  try {
+    win.webContents.send('stream:state', `reviewing (${model})`);
+    win.webContents.send('stream:info', `Reviewer ${model} is inspecting changes relative to ${base || 'HEAD'}. No files will be changed.`);
+    const review = await runStructuredReview(model, cwd, base);
+    return { ok: true, review };
+  } catch (error) {
+    if (error.name === 'AbortError') return { ok: true, stopped: true };
+    runOutcome = 'failed';
+    return { ok: false, error: String(error.message || error) };
+  } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
+    currentAbort = null;
+    win.webContents.send('stream:done');
+  }
+});
+
+ipcMain.handle('chat:reviewFix', async (_e, { coderModel, cwd, findings, autoApprove, autoBranch, think }) => {
+  if (!coderModel) return { ok: false, error: 'Select a coder model first.' };
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  const review = normalizeCodeReview({ summary: 'Selected review findings', findings }, 'selected findings');
+  if (!review.findings.length) return { ok: false, error: 'Select at least one valid review finding.' };
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let runOutcome = 'ok';
+  try {
+    await maybeAutoBranch(cwd, 'fix selected review findings', !!autoBranch);
+    await createCheckpoint(cwd);
+    const task = {
+      title: `Fix ${review.findings.length} selected review finding${review.findings.length === 1 ? '' : 's'}`,
+      objective: 'Correct every selected structured review finding. Inspect the current code before editing and preserve unrelated changes.\n\n' + JSON.stringify(review.findings, null, 2),
+      acceptance_criteria: review.findings.map((finding) => `${finding.file}:${finding.line} — ${finding.title} is corrected and verified.`),
+      relevant_files: [...new Set(review.findings.map((finding) => finding.file))],
+      constraints: ['Do not change findings that were not selected.', 'Run the most relevant available verification check.'],
+    };
+    const result = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think);
+    const mutations = new Set(result.evidence.filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name)).flatMap(evidencePaths));
+    const commands = result.evidence.filter((entry) => entry.name === 'run_command' || entry.name === 'run_project_check').map((entry) => entry.args?.command || entry.args?.check || entry.name);
+    await emitRunReport(cwd, { mutations, commands, verified: commands.length > 0 });
+    return { ok: true, report: result.report };
+  } catch (error) {
+    if (error.name === 'AbortError') return { ok: true, stopped: true };
+    runOutcome = 'failed';
+    return { ok: false, error: String(error.message || error) };
+  } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
+    currentAbort = null;
+    win.webContents.send('stream:done');
+  }
+});
+
+ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, plan: approvedPlan }) => {
   if (!model) return { ok: false, error: 'Select an orchestrator model first.' };
   if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
   if (!goal?.trim()) return { ok: false, error: 'An orchestration goal is required.' };
@@ -2323,9 +2605,16 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
   conversation.push({ role: 'user', content: `ORCHESTRATE: ${goal.trim()}` });
 
   try {
-    win.webContents.send('stream:state', `planning (${model})`);
-    win.webContents.send('stream:info', `Orchestrator ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
-    const plan = await runOrchestratorPlan(model, goal.trim(), cwd, verifierModel, !!onlineResearch, !!think, baselineStatus);
+    let plan;
+    if (approvedPlan) {
+      plan = normalizeImplementationPlan(approvedPlan, goal.trim());
+      win.webContents.send('stream:state', `starting approved plan (${coderModel})`);
+      win.webContents.send('stream:info', `Using the approved plan without running the planner again. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
+    } else {
+      win.webContents.send('stream:state', `planning (${model})`);
+      win.webContents.send('stream:info', `Orchestrator ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
+      plan = await runOrchestratorPlan(model, goal.trim(), cwd, verifierModel, !!onlineResearch, !!think, baselineStatus);
+    }
     win.webContents.send('stream:info', `Plan: ${plan.summary}\n${plan.tasks.map((task, i) => `${i + 1}. ${task.title}`).join('\n')}`);
 
     const results = [];
@@ -2402,18 +2691,19 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
         : `Final verifier found remaining whole-goal work:\n${finalVerdict.slice(0, 2000)}`);
     }
     const report = [
-      allComplete ? '## Orchestration complete' : '## Orchestration stopped with remaining work',
+      allComplete ? '## ✔ Orchestration complete' : '## ✖ Orchestration stopped with remaining work',
       '',
-      `Models: ${model} planner → ${coderModel} coder → ${verifierModel} verifier`,
-      `Online research: ${onlineResearch ? 'planner only' : 'off'}`,
+      `- **Planner:** ${mdCode(model)} · **Coder:** ${mdCode(coderModel)} · **Verifier:** ${mdCode(verifierModel)}`,
+      `- **Online research:** ${onlineResearch ? 'planner only' : 'off'}`,
       '',
-      `Plan: ${plan.summary}`,
+      `**Plan:** ${mdInline(plan.summary, 700)}`,
       '',
       ...results.flatMap(conciseTaskResult),
-      `Final verification: ${allComplete ? 'GOAL_COMPLETE' : String(finalVerdict).slice(0, 1000)}`,
+      `**Final verification:** ${allComplete ? '`GOAL_COMPLETE`' : mdInline(finalVerdict, 800)}`,
       '',
-      `Working tree: ${conciseWorkingTree(finalEvidence)}`,
-      'Open DIFF to inspect the full patch and untracked paths.',
+      `**Working tree:** ${mdInline(conciseWorkingTree(finalEvidence), 600)}`,
+      '',
+      '_Open DIFF to inspect the full patch and untracked paths._',
     ].join('\n').slice(0, 6000);
     conversation.push({ role: 'assistant', content: report });
     return { ok: true, report, complete: allComplete };
@@ -2431,6 +2721,7 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
 
 async function safeExecute(name, args, cwd) {
   try {
+    if (LOCAL_BROWSER_TOOL_NAMES.has(name)) return await localBrowser.execute(name, args, cwd);
     return await executeTool(name, args, cwd);
   } catch (err) {
     return `Error: ${err.message}`;
@@ -2454,6 +2745,7 @@ ipcMain.on('chat:stop', () => {
 
 ipcMain.handle('chat:reset', () => {
   conversation = [];
+  contextState = normalizeContextState();
   usage = freshUsage();
   return { ok: true };
 });
@@ -2492,50 +2784,12 @@ ipcMain.handle('mcp:openConfig', () => {
   }
 });
 
-// ---------- benchmark-informed model router ----------
+// ---------- benchmark data ----------
 // Dev-only: reads the local benchmark harness's own results.json (gitignored,
 // never bundled into a packaged build — benchmarking is a source-tree
 // workflow, not a shipped feature). Missing file is a normal, expected state,
 // not an error: it just means no benchmarks have been run yet.
-function median(nums) {
-  const sorted = [...nums].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
-function readBenchResults() {
-  try {
-    const raw = fs.readFileSync(path.join(__dirname, 'benchmark', 'results.json'), 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-ipcMain.handle('bench:query', (_e, taskFilter) => {
-  const entries = readBenchResults();
-  if (!entries.length) return { ok: true, available: false, tasks: [], rows: [] };
-
-  const tasks = [...new Set(entries.map((e) => e.task).filter(Boolean))].sort();
-  const filtered = taskFilter ? entries.filter((e) => e.task === taskFilter) : entries;
-
-  // group by (task, model) — median score is far more robust than any single
-  // run, given how much variance one glitch-token stumble can introduce
-  const groups = new Map();
-  for (const e of filtered) {
-    if (typeof e.total !== 'number' || !e.model) continue;
-    const key = e.task + ' ' + e.model;
-    if (!groups.has(key)) groups.set(key, { task: e.task, model: e.model, mode: e.mode, scores: [] });
-    groups.get(key).scores.push(e.total);
-  }
-
-  const rows = [...groups.values()]
-    .map((g) => ({ task: g.task, model: g.model, mode: g.mode, runs: g.scores.length, median: median(g.scores) }))
-    .sort((a, b) => b.median - a.median || b.runs - a.runs);
-
-  return { ok: true, available: true, tasks, rows };
-});
+const readBenchResults = () => readBenchResultsFile(path.join(__dirname, 'benchmark', 'results.json'));
 
 // true when running from source (npm start) rather than the installed build
 ipcMain.handle('app:isDev', () => !app.isPackaged);
@@ -2560,7 +2814,10 @@ ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch 
         if (!flags.includes('images evicted')) flags.push('images evicted');
       }
       if (msg.role === 'tool' && String(msg.content || '').length > 1500) flags.push('large tool output');
+      if (original?.pinned) flags.push('pinned');
+      if (original?.excludedFromInference) flags.push('tool output excluded');
       return {
+        index: i,
         role: msg.role,
         toolName: msg.tool_name || null,
         tokens: estimateTokens(msg),
@@ -2581,6 +2838,7 @@ ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch 
       contextLength,
       percentUsed: contextLength ? Math.round((totalTokens / contextLength) * 100) : 0,
       messageCount: ready.length,
+      pinnedFiles: [...contextState.pinnedFiles],
     };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
@@ -2591,6 +2849,16 @@ ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch 
 // Hardcoded destination — never opens an arbitrary/user-supplied URL.
 ipcMain.handle('app:openOllamaSite', () => { shell.openExternal('https://ollama.com/download'); return { ok: true }; });
 ipcMain.handle('app:getVersion', () => require('./package.json').version);
+ipcMain.handle('updates:state', () => updateService?.state() || {
+  enabled: false,
+  status: 'disabled',
+  currentVersion: app.getVersion(),
+  version: null,
+  percent: 0,
+  message: 'Automatic updates are not ready yet.',
+});
+ipcMain.handle('updates:check', () => updateService?.check({ manual: true }) || { ok: false, error: 'Automatic updates are not ready yet.' });
+ipcMain.handle('updates:install', () => updateService?.install() || { ok: false, error: 'Automatic updates are not ready yet.' });
 
 ipcMain.handle('settings:get', () => ({
   ok: true,
@@ -2635,12 +2903,29 @@ ipcMain.handle('settings:save', (_e, value) => {
 // array lives here — these let it read the current one and swap in a stored one.
 ipcMain.handle('chat:get', () => conversation);
 
-ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage) => {
+ipcMain.handle('context:state', () => ({ ok: true, state: normalizeContextState(contextState) }));
+
+ipcMain.handle('context:control', (_e, payload = {}) => {
+  try {
+    const action = String(payload.action || '');
+    if (action === 'pin-message') setMessagePinned(conversation, Number(payload.index), payload.value !== false);
+    else if (action === 'exclude-tool') setToolExcluded(conversation, Number(payload.index), payload.value !== false);
+    else if (action === 'pin-file') contextState = pinContextFile(contextState, payload.cwd, payload.path).state;
+    else if (action === 'unpin-file') contextState = unpinContextFile(contextState, payload.cwd, payload.path).state;
+    else return { ok: false, error: `Unknown context control action "${action}".` };
+    return { ok: true, conversation, state: normalizeContextState(contextState) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextState) => {
   conversation = Array.isArray(msgs) ? msgs : [];
+  contextState = normalizeContextState(savedContextState);
   usage = restoreUsage(savedUsage);
   // estimate the loaded context so the bar and /usage aren't blank until the
   // next message (Ollama reports the exact count on the next request)
-  const approxTokens = estimateTokens(stripOldImages(conversation));
+  const approxTokens = estimateTokens(modelReadyMessages(conversation));
   const contextLength = model ? await effectiveContext(model) : 0;
   usage.context = { tokens: approxTokens, limit: contextLength };
   usage.metrics.peakContextTokens = Math.max(usage.metrics.peakContextTokens || 0, approxTokens);
@@ -2651,82 +2936,15 @@ ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage) => {
 // ---------- durable chat storage ----------
 // One JSON file per chat in userData/chats/ plus a light index.json holding
 // only sidebar metadata. Saves rewrite one chat's file, never the whole history.
-function chatsDir() {
-  return path.join(app.getPath('userData'), 'chats');
-}
-
-function safeChatId(id) {
-  return String(id).replace(/[^\w.-]/g, '');
-}
-
-function readChatIndex() {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(chatsDir(), 'index.json'), 'utf8'));
-  } catch {
-    return [];
-  }
-}
-
-function writeChatIndex(list) {
-  fs.mkdirSync(chatsDir(), { recursive: true });
-  fs.writeFileSync(path.join(chatsDir(), 'index.json'), JSON.stringify(list, null, 2), 'utf8');
-}
-
-ipcMain.handle('history:list', () => readChatIndex());
-
-ipcMain.handle('history:save', async (_e, meta, convo) => {
-  try {
-    const id = safeChatId(meta.id);
-    if (!id) return { ok: false, error: 'invalid chat id' };
-    const entry = {
-      id,
-      title: meta.title || 'Chat',
-      model: meta.model || '',
-      mode: meta.mode === 'chat' ? 'chat' : 'code',
-      cwd: meta.cwd || '',
-      think: !!meta.think,
-      autoApprove: !!meta.autoApprove,
-      timestamp: meta.timestamp || new Date().toISOString(),
-    };
-    const mainRuntime = await runtimeMetadata(meta.model || '');
-    const roleNames = {
-      main: meta.model || '',
-      coder: meta.coderModel || '',
-      subagent: meta.subModel || '',
-    };
-    const roleEntries = await Promise.all(Object.entries(roleNames).map(async ([role, name]) => [role, (await runtimeMetadata(name)).model]));
-    const detailed = {
-      subModel: meta.subModel || '',
-      coderModel: meta.coderModel || '',
-      onlineResearch: !!meta.onlineResearch,
-      runMetrics: meta.runMetrics || null,
-      runtime: { ...mainRuntime, roles: Object.fromEntries(roleEntries) },
-    };
-    fs.mkdirSync(chatsDir(), { recursive: true });
-    fs.writeFileSync(path.join(chatsDir(), id + '.json'), JSON.stringify({ ...entry, ...detailed, conversation: convo || [] }), 'utf8');
-    const index = readChatIndex().filter((c) => c.id !== id);
-    index.push(entry);
-    writeChatIndex(index);
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+const historyStore = createHistoryStore({
+  userDataDir: () => app.getPath('userData'),
+  runtimeMetadata,
 });
 
-ipcMain.handle('history:load', (_e, id) => {
-  try {
-    const chat = JSON.parse(fs.readFileSync(path.join(chatsDir(), safeChatId(id) + '.json'), 'utf8'));
-    return { ok: true, chat };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('history:delete', (_e, id) => {
-  try { fs.unlinkSync(path.join(chatsDir(), safeChatId(id) + '.json')); } catch {}
-  writeChatIndex(readChatIndex().filter((c) => c.id !== safeChatId(id)));
-  return { ok: true };
-});
+ipcMain.handle('history:list', () => historyStore.list());
+ipcMain.handle('history:save', (_e, meta, convo) => historyStore.save(meta, convo));
+ipcMain.handle('history:load', (_e, id) => historyStore.load(id));
+ipcMain.handle('history:delete', (_e, id) => historyStore.remove(id));
 
 ipcMain.handle('models:list', async () => {
   try {
@@ -2735,6 +2953,33 @@ ipcMain.handle('models:list', async () => {
   } catch (err) {
     return { ok: false, error: 'Cannot reach the inference endpoint at ' + inferenceEndpoint() + ' — is it running and Ollama-compatible?' };
   }
+});
+
+const getModelRecommendations = createRecommendationsService({
+  ollamaJson,
+  hardwareProfile,
+  getRuntimeSettings: () => runtimeSettings,
+  getEndpoint: inferenceEndpoint,
+  isLocalEndpoint,
+  getHistoryDirectory: historyStore.directory,
+  benchmarkDirectory: path.join(__dirname, 'benchmark'),
+  readBenchResults,
+  modelSpeedSamples,
+  defaultContext: NUM_CTX_CAP,
+});
+
+ipcMain.handle('models:recommendations', (_event, options) => getModelRecommendations(options));
+ipcMain.handle('models:install', (event, { model } = {}) => modelInstaller.install(model, (progress) => {
+  try { event.sender.send('models:install-progress', progress); } catch {}
+}));
+ipcMain.handle('models:autoRoute', async (_event, options = {}) => {
+  const mode = options.mode === 'chat' ? 'chat' : 'code';
+  const recommendations = await getModelRecommendations({ mode });
+  if (!recommendations.ok) return recommendations;
+  return selectAutoModel(recommendations.models, {
+    mode,
+    needsVision: !!options.needsVision,
+  });
 });
 
 // ---------- git integration (gitRun lives in tools.js) ----------
@@ -2755,16 +3000,8 @@ ipcMain.handle('git:status', async (_e, cwd) => {
   };
 });
 
-ipcMain.handle('git:diff', async (_e, cwd) => {
-  const staged = await gitRun(['diff', '--cached', '--', '.'], cwd);
-  const unstaged = await gitRun(['diff', '--', '.'], cwd);
-  const untracked = await gitRun(['ls-files', '--others', '--exclude-standard'], cwd);
-  const parts = [];
-  if (staged.out.trim()) parts.push('═══ STAGED ═══\n' + staged.out);
-  if (unstaged.out.trim()) parts.push(unstaged.out);
-  if (untracked.out.trim()) parts.push('═══ UNTRACKED FILES ═══\n' + untracked.out);
-  return { ok: true, diff: parts.join('\n') || '(working tree clean)' };
-});
+const diffService = createDiffService({ gitRun });
+ipcMain.handle('git:diff', (_e, cwd) => diffService.get(cwd));
 
 ipcMain.handle('git:graph', async (_e, cwd) => {
   const res = await gitRun(['log', '--graph', '--oneline', '--all', '--no-color'], cwd);
@@ -2799,14 +3036,21 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     // drop images and bulky tool outputs from what the summarizer sees, then
     // hard-fit to the window — the summarizer must not context-shift itself
     const windowBudget = Math.floor((await effectiveContext(model)) * 0.8);
-    let msgs = stripOldImages(conversation)
-      .map(({ images, imageTypes, displayContent, attachments, ...m }) => m) // summarizer never needs UI attachment metadata
+    const pinnedConversation = conversation
+      .filter((message) => message?.pinned && (message.role === 'user' || message.role === 'assistant'))
+      .map(({ tool_calls, ...message }) => ({ ...message }));
+    const unpinnedConversation = conversation.filter((message) => !message?.pinned);
+    const pinnedContext = pinnedMessagesPrompt(pinnedConversation);
+    const pinnedReady = pinnedContext ? [{ role: 'user', content: pinnedContext }] : [];
+    let recentReady = modelReadyMessages(unpinnedConversation)
       .map((m) =>
         m.role === 'tool' && String(m.content).length > 1500
           ? { ...m, content: String(m.content).slice(0, 1500) + '…[truncated]' }
           : m
       );
-    msgs = fitToWindow(msgs, windowBudget);
+    const pinnedCost = estimateTokens(pinnedReady);
+    recentReady = fitToWindow(recentReady, Math.max(1200, windowBudget - pinnedCost));
+    const msgs = [...pinnedReady, ...recentReady];
     msgs.push({
       role: 'user',
       content: 'Summarize this entire conversation so work can continue seamlessly in a fresh session: the goal, key decisions, files created or modified and their current state, and unresolved tasks. Output only the summary.',
@@ -2835,6 +3079,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     }
 
     conversation = [
+      ...pinnedConversation,
       {
         role: 'user',
         content: 'This conversation was compacted to save context. Continue from the summary below.'
@@ -2846,7 +3091,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     ];
 
     // Update the central usage object in main process
-    const approxTokens = estimateTokens(stripOldImages(conversation));
+    const approxTokens = estimateTokens(modelReadyMessages(conversation));
     const contextLength = await effectiveContext(model);
     usage.context = { tokens: approxTokens, limit: contextLength };
 

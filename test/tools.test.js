@@ -38,7 +38,11 @@ test('tool schemas have unique names and matching execution cases', () => {
 
   const source = fs.readFileSync(path.join(__dirname, '..', 'tools.js'), 'utf8');
   const implemented = new Set([...source.matchAll(/case '([^']+)'/g)].map((match) => match[1]));
-  const mainProcessTools = new Set(['ask_user', 'run_subagent']);
+  const mainProcessTools = new Set([
+    'ask_user', 'run_subagent',
+    'browser_open', 'browser_snapshot', 'browser_click', 'browser_type',
+    'browser_console', 'browser_screenshot', 'browser_close',
+  ]);
   for (const name of names) {
     if (!mainProcessTools.has(name)) assert.equal(implemented.has(name), true, `${name} needs an executeTool case`);
   }
@@ -75,6 +79,8 @@ test('orchestration roles receive deliberately scoped toolsets', () => {
   assert.equal(coderNames.has('browse_files'), true);
   assert.equal(coderNames.has('search_files'), true);
   assert.equal(coderNames.has('file_metadata'), true);
+  assert.equal(coderNames.has('browser_snapshot'), true);
+  assert.equal(coderNames.has('browser_click'), true);
   assert.equal(coderNames.has('replace_in_file'), false);
   assert.equal(coderNames.has('run_project_check'), true);
   assert.equal(coderNames.has('web_search'), false);
@@ -104,6 +110,46 @@ test('canonical browse, search, and metadata tools cover the retired read-only h
   assert.equal(metadata.type, 'javascript');
   assert.equal(metadata.line_count, 3);
   assert.equal(metadata.hash.algorithm, 'sha256');
+});
+
+test('semantic navigation outlines definitions and finds bounded references', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(cwd, 'src'));
+  fs.mkdirSync(path.join(cwd, 'node_modules', 'ignored'), { recursive: true });
+  fs.writeFileSync(path.join(cwd, 'src', 'sample.js'), [
+    'class SampleService {',
+    '  run() { return helper(); }',
+    '}',
+    'function helper() { return 1; }',
+    'const makeSample = () => new SampleService();',
+    'module.exports = { SampleService, helper, makeSample };',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(cwd, 'src', 'worker.py'), 'def helper():\n    return 2\n');
+  fs.writeFileSync(path.join(cwd, 'node_modules', 'ignored', 'fake.js'), 'class SampleService {}\n');
+
+  const outline = JSON.parse(await executeTool('project_outline', { path: 'src' }, cwd));
+  assert.equal(outline.file_count, 2);
+  assert.equal(outline.symbol_count, 4);
+  assert.deepEqual(outline.files[0].symbols.map((item) => item.name), ['SampleService', 'helper', 'makeSample']);
+
+  const symbols = JSON.parse(await executeTool('find_symbol', { name: 'helper' }, cwd));
+  assert.equal(symbols.count, 2);
+  assert.deepEqual(symbols.results.map((item) => item.path), ['src/sample.js', 'src/worker.py']);
+
+  const references = JSON.parse(await executeTool('find_references', {
+    name: 'SampleService',
+    include_definitions: false,
+    max_results: 2,
+  }, cwd));
+  assert.equal(references.count, 2);
+  assert.equal(references.results.every((item) => item.is_definition === false), true);
+  assert.equal(references.results.some((item) => item.path.includes('node_modules')), false);
+  assert.equal(references.truncated, true);
+
+  const invalid = await executeTool('find_references', { name: 'SampleService.run' }, cwd);
+  assert.match(invalid, /one identifier/);
 });
 
 test('folder-free Chat mode receives only conversation and research tools', () => {
@@ -315,6 +361,76 @@ test('edit_files applies a validated multi-file batch and rejects partial change
   assert.equal(fs.readFileSync(first, 'utf8'), beforeFirst);
   assert.equal(fs.readFileSync(second, 'utf8'), beforeSecond);
   assert.equal(RISKY_TOOLS.has('edit_files'), true);
+});
+
+test('apply_patch previews and applies a validated multi-file patch atomically', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, 'first.js'), 'const first = 1;\n');
+  fs.writeFileSync(path.join(cwd, 'data.json'), '{"old":true}\n');
+  const patch = [
+    '--- a/first.js',
+    '+++ b/first.js',
+    '@@ -1 +1 @@',
+    '-const first = 1;',
+    '+const first = 2;',
+    '--- a/data.json',
+    '+++ b/data.json',
+    '@@ -1 +1 @@',
+    '-{"old":true}',
+    '+{"old":false}',
+  ].join('\n');
+
+  const preview = JSON.parse(await executeTool('apply_patch', { patch }, cwd));
+  assert.equal(preview.dry_run, true);
+  assert.equal(preview.applied, false);
+  assert.equal(fs.readFileSync(path.join(cwd, 'first.js'), 'utf8'), 'const first = 1;\n');
+
+  const applied = JSON.parse(await executeTool('apply_patch', { patch, dry_run: false }, cwd));
+  assert.equal(applied.applied, true);
+  assert.equal(applied.files.length, 2);
+  assert.equal(fs.readFileSync(path.join(cwd, 'first.js'), 'utf8'), 'const first = 2;\n');
+  assert.equal(fs.readFileSync(path.join(cwd, 'data.json'), 'utf8'), '{"old":false}\n');
+});
+
+test('apply_patch rejects invalid syntax and unsafe paths before any write', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, 'safe.js'), 'const safe = true;\n');
+  const invalid = [
+    '--- a/safe.js', '+++ b/safe.js', '@@ -1 +1 @@',
+    '-const safe = true;', '+const = ;',
+  ].join('\n');
+  const syntaxResult = await executeTool('apply_patch', { patch: invalid, dry_run: false }, cwd);
+  assert.match(syntaxResult, /syntax error/);
+  assert.equal(fs.readFileSync(path.join(cwd, 'safe.js'), 'utf8'), 'const safe = true;\n');
+
+  const escape = ['--- /dev/null', '+++ b/../outside.js', '@@ -0,0 +1 @@', '+bad'].join('\n');
+  const escapeResult = await executeTool('apply_patch', { patch: escape, dry_run: false }, cwd);
+  assert.match(escapeResult, /escapes the working directory/);
+  assert.equal(fs.existsSync(path.join(cwd, '..', 'outside.js')), false);
+});
+
+test('apply_patch creates and deletes files while preserving patch newline markers', async (t) => {
+  const cwd = tempProject();
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, 'old.txt'), 'remove me\n');
+  const patch = [
+    '--- /dev/null', '+++ b/new.txt', '@@ -0,0 +1 @@', '+created',
+    '--- a/old.txt', '+++ /dev/null', '@@ -1 +0,0 @@', '-remove me',
+  ].join('\n');
+  const result = JSON.parse(await executeTool('apply_patch', { patch, dry_run: false }, cwd));
+  assert.equal(result.applied, true);
+  assert.equal(fs.readFileSync(path.join(cwd, 'new.txt'), 'utf8'), 'created\n');
+  assert.equal(fs.existsSync(path.join(cwd, 'old.txt')), false);
+
+  const noNewline = [
+    '--- a/new.txt', '+++ b/new.txt', '@@ -1 +1 @@', '-created', '+changed',
+    '\\ No newline at end of file',
+  ].join('\n');
+  const changed = JSON.parse(await executeTool('apply_patch', { patch: noNewline, dry_run: false }, cwd));
+  assert.equal(changed.applied, true);
+  assert.equal(fs.readFileSync(path.join(cwd, 'new.txt'), 'utf8'), 'changed');
 });
 
 test('managed processes can be started, polled, and stopped by opaque id', async (t) => {

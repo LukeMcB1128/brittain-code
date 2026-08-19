@@ -35,6 +35,7 @@ function interruptRunningMission(mission, now = new Date().toISOString()) {
   return {
     ...mission,
     status: 'interrupted',
+    interruptedPhase: mission.currentPhase || 'unknown',
     currentPhase: 'interrupted',
     lastEvent: 'Brittain Code closed before this mission finished.',
     endedAt: now,

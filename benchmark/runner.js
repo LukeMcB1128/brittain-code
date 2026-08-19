@@ -77,6 +77,7 @@ async function runSingleBenchmark({
   temperature,
   contextCap,
   maxSteps,
+  runTimeoutMs,
   chatDir,
 }) {
   const runStartedAt = Date.now();
@@ -100,7 +101,7 @@ async function runSingleBenchmark({
   };
   let finalContent = '';
   let emptyNudges = 0;
-  const signal = AbortSignal.timeout(15 * 60 * 1000);
+  const signal = AbortSignal.timeout(runTimeoutMs || 15 * 60 * 1000);
 
   for (let step = 0; step < maxSteps; step++) {
     metrics.loopIterations += 1;
@@ -226,4 +227,70 @@ function rankModels(records, models, taskIds) {
     || a.modelSpec.localeCompare(b.modelSpec));
 }
 
-module.exports = { runSingleBenchmark, gradeChat, rankModels, slug, stopAllManagedProcesses, initTools };
+async function recordFailedRun({ provider, providerModel, task, taskId, error, wallTimeMs, think, temperature, contextCap, runTimeoutMs }) {
+  const message = String(error?.message || error || '');
+  const timedOut = /timeout|aborted/i.test(message);
+  // Only a genuine time-budget overrun is the model's failure and scores zero.
+  // Infrastructure failures (inference server crash, dropped connection) are not
+  // attributable to the model and must not be scored; they stay in the batch
+  // manifest as errors so the run can be retried or diagnosed.
+  if (!timedOut) return null;
+  const runtime = await provider.runtimeMetadata(providerModel, { contextCap, temperature });
+  const reason = `run exceeded the ${Math.round((runTimeoutMs || 15 * 60 * 1000) / 60000)} minute budget`;
+  const label = provider.label(providerModel);
+  const record = {
+    schemaVersion: 3,
+    suiteVersion: 3,
+    graderVersion: 3,
+    scoreModel: 'brittainmark-v3',
+    chatId: null,
+    task: taskId,
+    taskVersion: task.version,
+    taskLanguage: task.language || null,
+    mode: 'solo',
+    model: label,
+    plannerModel: label,
+    coderModel: null,
+    verifierModel: null,
+    modelLabel: label,
+    total: 0,
+    correctness: 0, safety: 0, reliability: 0, efficiency: 0,
+    C1: 0, C2: 0, S1: 0, S2: 0, R1: 0, R2: 0, R3: 0, E1: 0, E2: 0, E3: 0,
+    visible: 0, visibleTotal: 0, hidden: 0, hiddenTotal: 0,
+    changed: [], collateral: [], protectedTampered: false,
+    zeroed: true,
+    zeroedReasons: [reason],
+    fullPass: false,
+    toolCalls: 0, toolErrors: 0, promptTokens: 0, generatedTokens: 0,
+    wallTimeMs: wallTimeMs || 0,
+    scorePerMinute: 0,
+    recoveredToolCalls: 0, toolCallRetries: 0, compactions: 0,
+    loopIterations: 0, coderLoopIterations: 0, repairs: 0, peakContextTokens: 0,
+    settings: {
+      think: !!think,
+      onlineResearch: false,
+      autoApprove: true,
+      contextCap: contextCap || null,
+      temperature: temperature ?? null,
+    },
+    runtime,
+    baseline: null,
+    ranAt: new Date().toISOString(),
+    gradedAt: new Date().toISOString(),
+    failure: { error: message, timedOut },
+  };
+  record.modelDigests = { main: runtime.roles?.main?.digest || null };
+  const fingerprint = `main:${runtime.roles?.main?.digest || runtime.roles?.main?.name || '?'}`;
+  record.configKey = [record.suiteVersion, record.task, record.taskVersion, record.mode, fingerprint,
+    `think=${record.settings.think}`, `ctx=${record.settings.contextCap || '?'}`, `app=${runtime.appVersion || '?'}`].join('|');
+
+  const resultsPath = path.join(__dirname, 'results.json');
+  let results = [];
+  try { results = JSON.parse(fs.readFileSync(resultsPath, 'utf8')); } catch {}
+  results.push(record);
+  fs.writeFileSync(resultsPath, JSON.stringify(results, null, 2));
+  try { require('./report.js').writeReport(resultsPath, path.join(__dirname, 'report.html')); } catch {}
+  return record;
+}
+
+module.exports = { runSingleBenchmark, gradeChat, rankModels, slug, stopAllManagedProcesses, initTools, recordFailedRun };

@@ -17,12 +17,14 @@ Ollama must be running (`ollama serve`, or the menu bar app).
 
 | Command | Output |
 |---|---|
-| `npm run dist` | macOS `.dmg` and `.zip` |
+| `npm run dist` | Local macOS `.dmg` and `.zip` without production updates |
 | `npm run dist:win` | Windows x64 NSIS installer |
 | `npm run dist:all` | both |
 | `npm run deploy` | macOS: build and copy straight into /Applications |
 
-On macOS the standalone app lands in `dist/mac-arm64/Brittain Code.app`; drag it into Applications or the Dock to launch it without a terminal. Builds are unsigned, so the first launch needs the usual right-click → Open (macOS) or SmartScreen "More info" → "Run anyway" (Windows).
+On macOS the standalone app lands in `dist/mac-arm64/Brittain Code.app`; drag it into Applications or the Dock to launch it without a terminal. Local builds use an ad-hoc signature, so the first launch can need the usual right-click → Open. Local Windows builds can show the SmartScreen "More info" → "Run anyway" action.
+
+Official releases are built from stable `vX.Y.Z` tags by `.github/workflows/release.yml`. Those builds check GitHub Releases for newer stable versions, download an update in the background, and offer a restart when it is ready. Development and local package builds do not contact the update server. The macOS release job requires `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` repository secrets. The Windows job requires `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`. The workflow uploads both platforms into a draft and publishes it only after both jobs succeed.
 
 The built app is a snapshot of the code at build time — editing `main.js` or the `renderer/` files does **not** change it; rebuild after changes. During development, `npm start` always runs the live code.
 
@@ -83,18 +85,21 @@ Type these in the message box:
 | `/help` | List all commands |
 | `/clear` | New session |
 | `/compact` | Summarize the conversation to free up context (great for long agent sessions on small-context models) |
-| `/diff` | Show the git diff of the working directory in an overlay |
+| `/diff` | Review staged, unstaged, and untracked files with per-file navigation and collapsible patches |
 | `/commit <message>` | Stage everything and commit |
 | `/graph` | Show a visual tree of the git commit history |
 | `/model <name>` | Switch model (partial match) |
 | `/coder [name]` | Show or set the writable coding-worker model (default qwen3-coder:30b when installed) |
 | `/subagent [name]` | Show or set the subagent/verifier model (default qwen3:8b) |
 | `/loop [n] <goal>` | Work toward a goal with the selected model for up to n iterations (default 8). Turn AUTO-APPROVE on for unattended runs |
+| `/plan <goal>` | Inspect the project and show an editable implementation plan. Run, edit, or cancel it before any coding starts |
+| `/review [base]` | Review changes relative to a Git base with structured findings, then send selected findings to the coder |
 | `/orchestrate <goal>` | Use the selected model as a read-only planner, delegate sequential tasks to the coder model, and verify each task with the subagent model |
-| `/mission [n] <goal>` | Run a persisted, visible coder mission for up to n iterations; `/mission status` inspects it and `/mission stop` cancels it |
+| `/mission [n] <goal>` | Run a persisted coder mission; use `/mission status`, `/mission stop`, or validated `/mission resume` recovery |
 | `/usage` | Show context remaining and token spend across planner/main agent, scouts, coders, and verifier |
 | `/context` | Show exactly what will be sent next turn — system prompt, per-message tokens, eviction flags |
-| `/best [task] [use]` | Rank installed models by their local benchmark score for a task; `use` switches to the top result |
+| `/recs` | Compare installed models by memory fit, capabilities, measured speed, and local Brittainmark results |
+| `/auto <request>` | Select the best compatible installed model for the current mode and attachments, then run the request |
 | `/mcp [on\|off <server>]` | External MCP tool servers: status, enable, disable |
 | `/memory` | View what the agent has remembered for the selected project |
 | `/export` | Save the chat as a markdown file |
@@ -102,11 +107,11 @@ Type these in the message box:
 
 ## Offline orchestration
 
-`/orchestrate` separates planning from implementation while keeping inference local by default. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. Tasks run sequentially to avoid loading multiple large models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at the configured compaction threshold, with at most two compactions per stage; every coder task still starts with a fresh context. The final chat response stays concise; use DIFF when you want the complete patch and working-tree detail.
+`/orchestrate` separates planning from implementation while keeping inference local by default. The model in the main dropdown inspects the project and submits a structured plan, `/coder` selects the model that edits and verifies code, and `/subagent` selects the read-only scout/verifier. `/plan` runs only the inspection stage and shows the result in an editable card. **RUN** sends that exact approved plan to the coder without running the planner again; **CANCEL** changes no files. Tasks run sequentially to avoid loading multiple large models at once. Each failed verification gets one bounded repair attempt. Planner and coder contexts checkpoint automatically at the configured compaction threshold, with at most two compactions per stage; every coder task still starts with a fresh context. The final chat response stays concise; use DIFF when you want the complete patch and working-tree detail.
 
-`/loop` is the original single-model, conversation-preserving loop. For planned, verifier-guided implementation and repair work, use `/mission`: it records its goal, project, models, phase, latest evidence, and final report under Brittain Code’s application-data directory. It keeps the same tool permissions and approval rules as ordinary Code mode. Only one mission can run at a time; closing the app marks an active mission as interrupted rather than attempting to resume it. Missions do not run after the app exits and have no messaging, scheduling, or external-notification integration.
+`/loop` is the original single-model, conversation-preserving loop. For planned, verifier-guided implementation and repair work, use `/mission`: it records its goal, project, models, phase, latest evidence, final report, and recovery anchors under Brittain Code’s application-data directory. It keeps the same tool permissions and approval rules as ordinary Code mode. Only one mission can run at a time. Closing the app marks an active mission as interrupted. `/mission resume` continues only after the project path, Git commit, working-tree fingerprint, and saved checkpoint all match the last persisted mission event. Missions do not run after the app exits and have no messaging, scheduling, or external-notification integration.
 
-The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is enabled, with the same per-request approval boundary as ordinary chats. Coding workers and verifiers never receive network tools. Restart Brittain Code after installing a new Ollama model so the model list refreshes; for example, `gpt-oss:20b` can then be selected in the main dropdown, with `/coder gpt-oss:20b`, or with `/subagent gpt-oss:20b` for role-by-role comparison.
+The planner can use `web_search` and `web_fetch` only when ONLINE RESEARCH is enabled, with the same per-request approval boundary as ordinary chats. Coding workers and verifiers never receive network tools. Run `/recs` after installing a new Ollama model to refresh the model list. The recommendations popup compares installed models at the current context cap. Memory values are marked as measured or estimated, and speed is learned from responses during the current app run.
 
 ## MCP servers
 
@@ -148,7 +153,7 @@ A batch runner creates fixtures, drives the tool loop, saves chats, and grades e
 node benchmark/run.js --models 'local:*' --tasks all
 ```
 
-Local models run through Ollama; OpenAI and Anthropic adapters exist **for benchmarking only** (the app itself stays Ollama-compatible) and require their own API keys. Grading appends to `results.json` and rebuilds an HTML report with a leaderboard, model-by-task matrix, and telemetry-backed timing. `/best` inside the app ranks your installed models from those results.
+Local models run through Ollama; OpenAI and Anthropic adapters exist **for benchmarking only** (the app itself stays Ollama-compatible) and require their own API keys. Grading appends to `results.json` and rebuilds an HTML report with a leaderboard, model-by-task matrix, and telemetry-backed timing. `/auto` uses compatible local Brittainmark data as one signal when it selects an installed model.
 
 See [`benchmark/README.md`](benchmark/README.md) for tasks, repetition guidance, grading, and report commands.
 

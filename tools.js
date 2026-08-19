@@ -1,8 +1,8 @@
 // Brittain Code — agent tools.
-// Everything the agent can do lives here: tool schemas (TOOL_DEFS), which ones
-// need user approval (RISKY_TOOLS), and their implementations (executeTool).
-// Add a new tool by updating TOOL_DEFS and executeTool together, and adding it
-// to RISKY_TOOLS if it modifies files or runs commands.
+// Tool schemas and implementations live here. Role and approval policy lives
+// in src/tools/policy.js. Add a new tool to TOOL_DEFS and executeTool together,
+// then update the policy if the tool changes files, runs commands, or belongs
+// to a restricted role.
 //
 // This module is deliberately electron-free so it can be tested with plain
 // node — main.js injects the userData directory via initTools() at startup.
@@ -14,6 +14,13 @@ const crypto = require('crypto');
 const net = require('net');
 const dns = require('dns').promises;
 const { execFile, exec, spawn } = require('child_process');
+const { createToolPolicy } = require('./src/tools/policy');
+const {
+  findReferences,
+  findSymbol,
+  projectOutline,
+} = require('./src/tools/semantic-navigation');
+const { applyUnifiedPatch } = require('./src/tools/apply-patch');
 
 const MAX_TOOL_OUTPUT = 40_000;   // chars of tool output fed back to the model
 
@@ -137,10 +144,13 @@ function truncate(s) {
   return s.slice(0, MAX_TOOL_OUTPUT) + `\n...[truncated, ${s.length} chars total]`;
 }
 
-function syntaxCheck(filePath) {
-  if (!/\.(js|mjs|cjs)$/.test(filePath)) return Promise.resolve({ ok: true });
+function syntaxCheckContent(filePath, code) {
+  if (/\.json$/i.test(filePath)) {
+    try { JSON.parse(code); return Promise.resolve({ ok: true }); }
+    catch (e) { return Promise.resolve({ ok: false, msg: e.message }); }
+  }
+  if (!/\.(js|mjs|cjs)$/i.test(filePath)) return Promise.resolve({ ok: true, unverified: true });
   try {
-    const code = fs.readFileSync(filePath, 'utf8');
     new (require('vm').Script)(code, { filename: filePath });
     return Promise.resolve({ ok: true });
   } catch (e) {
@@ -152,6 +162,10 @@ function syntaxCheck(filePath) {
     }
     return Promise.resolve({ ok: false, msg: e.message });
   }
+}
+
+function syntaxCheck(filePath) {
+  return syntaxCheckContent(filePath, fs.readFileSync(filePath, 'utf8'));
 }
 
 // ---------- degraded-model guards ----------
@@ -728,6 +742,74 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'apply_patch',
+      description: 'Preview or atomically apply a standard unified diff across text files. Validates all project paths and hunks before writing, checks supported JavaScript and JSON syntax, and rolls back the full batch after any write failure. Preview is the default.',
+      parameters: {
+        type: 'object',
+        properties: {
+          patch: { type: 'string', description: 'Unified diff with ---/+++ file headers and @@ hunks. Supports file creation and deletion; does not support binary patches or renames.' },
+          dry_run: { type: 'boolean', description: 'Validate and preview without writing (default: true). Set exactly false to apply.' },
+        },
+        required: ['patch'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'project_outline',
+      description: 'Build a bounded, language-aware outline of symbols in project source files. Returns file paths, symbol kinds, names, lines, and signatures. Skips dependencies and generated output.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Project-relative file or directory to inspect (default: working directory).' },
+          max_files: { type: 'number', description: 'Maximum source files to inspect from 1 to 500 (default: 100).' },
+          max_symbols: { type: 'number', description: 'Maximum symbols to return from 1 to 2000 (default: 500).' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_symbol',
+      description: 'Find language-aware symbol definitions by exact name. Returns the definition kind, project-relative file, line, and signature.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Exact symbol name to find.' },
+          path: { type: 'string', description: 'Project-relative file or directory to search (default: working directory).' },
+          kind: { type: 'string', description: 'Optional exact symbol kind, such as class, function, type, or variable.' },
+          case_sensitive: { type: 'boolean', description: 'Match case exactly (default: true).' },
+          max_files: { type: 'number', description: 'Maximum source files to inspect from 1 to 2000 (default: 500).' },
+          max_results: { type: 'number', description: 'Maximum definitions to return from 1 to 200 (default: 50).' },
+        },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_references',
+      description: 'Find bounded lexical references to an identifier in source files. Marks lines that also contain a detected definition. This is language-aware navigation, not compiler-level type resolution.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Identifier to find, without dots or spaces.' },
+          path: { type: 'string', description: 'Project-relative file or directory to search (default: working directory).' },
+          include_definitions: { type: 'boolean', description: 'Include detected definition lines (default: true).' },
+          case_sensitive: { type: 'boolean', description: 'Match case exactly (default: true).' },
+          max_files: { type: 'number', description: 'Maximum source files to inspect from 1 to 2000 (default: 500).' },
+          max_results: { type: 'number', description: 'Maximum references to return from 1 to 500 (default: 100).' },
+        },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'search_local_docs',
       description: 'Search project documentation and locally installed direct-dependency documentation without internet access. Searches Markdown/text/reStructuredText docs while ordinary source search continues to skip node_modules.',
       parameters: {
@@ -989,6 +1071,115 @@ const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'browser_open',
+      description: 'Open an isolated hidden browser session for a loopback HTTP or HTTPS page. External navigation, windows, and resources are blocked.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Loopback URL on localhost, 127.0.0.0/8, or ::1.' },
+          width: { type: 'number', description: 'Viewport width from 320 to 1920 (default: 1280).' },
+          height: { type: 'number', description: 'Viewport height from 240 to 1080 (default: 800).' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_snapshot',
+      description: 'Read a browser session DOM snapshot with bounded HTML and stable selectors for interactive elements.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          max_chars: { type: 'number', description: 'Maximum HTML characters from 1000 to 80000 (default: 30000).' },
+        },
+        required: ['session_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_click',
+      description: 'Click one element in a loopback browser session by CSS selector.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          selector: { type: 'string', description: 'CSS selector from browser_snapshot or project knowledge.' },
+          wait_ms: { type: 'number', description: 'Optional wait after the click from 0 to 5000 milliseconds.' },
+        },
+        required: ['session_id', 'selector'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_type',
+      description: 'Enter text into an input, textarea, or content-editable element in a loopback browser session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          selector: { type: 'string', description: 'CSS selector for the target element.' },
+          text: { type: 'string', description: 'Text to enter.' },
+          clear: { type: 'boolean', description: 'Replace existing content (default: true).' },
+          press_enter: { type: 'boolean', description: 'Dispatch Enter after typing (default: false).' },
+          wait_ms: { type: 'number', description: 'Optional wait after typing from 0 to 5000 milliseconds.' },
+        },
+        required: ['session_id', 'selector', 'text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_console',
+      description: 'Read recent console messages from a loopback browser session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          max_entries: { type: 'number', description: 'Maximum recent messages from 1 to 200 (default: 100).' },
+          clear: { type: 'boolean', description: 'Clear buffered messages after reading (default: false).' },
+        },
+        required: ['session_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_screenshot',
+      description: 'Capture the visible loopback page and save a PNG in Brittain Code application data.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Session id returned by browser_open.' },
+          filename: { type: 'string', description: 'Optional safe filename. It is stored in application data, not the project.' },
+        },
+        required: ['session_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_close',
+      description: 'Close an isolated loopback browser session and release its resources.',
+      parameters: {
+        type: 'object',
+        properties: { session_id: { type: 'string', description: 'Session id returned by browser_open.' } },
+        required: ['session_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'create_git_branch',
       description: 'Create a new git branch and switch to it.',
       parameters: {
@@ -1151,35 +1342,6 @@ const TOOL_DEFS = [
     },
   },
 ];
-
-const NETWORK_TOOLS = new Set(['web_search', 'web_fetch']);
-const SENSITIVE_TOOLS = new Set(['get_environment_variables', 'list_processes']);
-const DESTRUCTIVE_TOOLS = new Set(['revert_to_last_commit']);
-
-const RISKY_TOOLS = new Set([
-  'write_file',
-  'run_command',
-  'run_project_check',
-  'start_process',
-  'stop_process',
-  'local_http_request',
-  'append_file',
-  'create_directory',
-  'delete_file',
-  'copy_file',
-  'move_file',
-  'edit_file',
-  'edit_files',
-  'create_git_branch',
-  'revert_to_last_commit',
-  'get_environment_variables',
-  'list_processes',
-  'initiate_research_session',
-  'record_observation',
-  'finalize_research',
-  'web_search',
-  'web_fetch',
-]);
 
 async function executeTool(name, args, cwd) {
   // futility tracking must see every call so any non-write action resets it
@@ -1379,6 +1541,38 @@ async function executeTool(name, args, cwd) {
         }
       }
       return results.length ? truncate(results.join(contextLines ? '\n\n' : '\n')) : 'No matches found.';
+    }
+    case 'apply_patch': {
+      try {
+        const result = await applyUnifiedPatch({
+          cwd,
+          patch: args.patch,
+          dryRun: args.dry_run,
+          resolveForWrite,
+          checkSyntax: syntaxCheckContent,
+        });
+        return truncate(JSON.stringify(result, null, 2));
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
+    }
+    case 'project_outline': {
+      const target = resolveInside(cwd, args.path);
+      return truncate(JSON.stringify(projectOutline(fs.realpathSync(cwd), target, args), null, 2));
+    }
+    case 'find_symbol': {
+      if (!String(args.name || '').trim()) return 'Error: name must not be empty.';
+      const target = resolveInside(cwd, args.path);
+      return truncate(JSON.stringify(findSymbol(fs.realpathSync(cwd), target, args), null, 2));
+    }
+    case 'find_references': {
+      if (!String(args.name || '').trim()) return 'Error: name must not be empty.';
+      const target = resolveInside(cwd, args.path);
+      try {
+        return truncate(JSON.stringify(findReferences(fs.realpathSync(cwd), target, args), null, 2));
+      } catch (err) {
+        return `Error: ${err.message}`;
+      }
     }
     case 'search_local_docs': {
       const query = String(args.query || '');
@@ -2114,84 +2308,20 @@ function gitRun(args, cwd, env) {
   });
 }
 
-// The restricted toolset available to subagents (run_subagent): read/search/
-// analyze only. No writes, shell, ask_user, or nesting.
-const SUBAGENT_TOOL_NAMES = new Set([
-  'read_file', 'browse_files', 'search_files', 'search_local_docs',
-  'get_file_lines', 'file_metadata',
-  'get_git_log', 'read_git_diff', 'check_port_usage',
-]);
-const SUBAGENT_TOOLS = TOOL_DEFS.filter((d) => SUBAGENT_TOOL_NAMES.has(d.function.name));
-
-// Scoped toolsets for /orchestrate. The planner can inspect and delegate but
-// cannot modify the project. The coder can change and verify code, but cannot
-// use the network, inspect sensitive host state, commit, revert, or spawn more
-// agents. submit_implementation_plan is handled by main.js because it controls
-// the orchestration state machine rather than touching the filesystem.
-const SUBMIT_IMPLEMENTATION_PLAN_TOOL = {
-  type: 'function',
-  function: {
-    name: 'submit_implementation_plan',
-    description: 'Finish planning by submitting an ordered implementation plan. Call this exactly once after inspecting enough of the project. Tasks run sequentially, so later tasks may depend on earlier tasks.',
-    parameters: {
-      type: 'object',
-      properties: {
-        summary: { type: 'string', description: 'Short architectural summary of the approach.' },
-        tasks: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 6,
-          items: {
-            type: 'object',
-            properties: {
-              title: { type: 'string', description: 'Short task title.' },
-              objective: { type: 'string', description: 'Concrete implementation objective for the coding model.' },
-              acceptance_criteria: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Observable conditions required for this task to be complete.',
-              },
-              relevant_files: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Project-relative files the coder should inspect first. This is guidance, not a write allowlist.',
-              },
-              constraints: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Important project or safety constraints for this task.',
-              },
-            },
-            required: ['title', 'objective', 'acceptance_criteria'],
-          },
-        },
-      },
-      required: ['summary', 'tasks'],
-    },
-  },
-};
-
-const ORCHESTRATOR_TOOL_NAMES = new Set([
-  ...SUBAGENT_TOOL_NAMES,
-  'run_subagent', 'web_search', 'web_fetch',
-]);
-const ORCHESTRATOR_TOOLS = [
-  ...TOOL_DEFS.filter((d) => ORCHESTRATOR_TOOL_NAMES.has(d.function.name)),
-  SUBMIT_IMPLEMENTATION_PLAN_TOOL,
-];
-
-const CODER_TOOL_NAMES = new Set([
-  'read_file', 'write_file', 'edit_file', 'edit_files', 'append_file',
-  'create_directory', 'delete_file', 'copy_file', 'move_file',
-  'browse_files', 'search_files', 'search_local_docs', 'get_file_lines', 'file_metadata',
-  'run_command', 'run_project_check', 'git_status', 'read_git_diff',
-]);
-const CODER_TOOLS = TOOL_DEFS.filter((d) => CODER_TOOL_NAMES.has(d.function.name));
-
-// Folder-free Chat mode can ask the user questions and optionally research the
-// public web. It never receives project, shell, Git, process, or memory tools.
-const CHAT_TOOL_NAMES = new Set(['ask_user', 'web_search', 'web_fetch']);
-const CHAT_TOOLS = TOOL_DEFS.filter((d) => CHAT_TOOL_NAMES.has(d.function.name));
+const {
+  NETWORK_TOOLS,
+  SENSITIVE_TOOLS,
+  DESTRUCTIVE_TOOLS,
+  RISKY_TOOLS,
+  SUBAGENT_TOOLS,
+  SUBAGENT_TOOL_NAMES,
+  ORCHESTRATOR_TOOLS,
+  ORCHESTRATOR_TOOL_NAMES,
+  CODER_TOOLS,
+  CODER_TOOL_NAMES,
+  CHAT_TOOLS,
+  CHAT_TOOL_NAMES,
+} = createToolPolicy(TOOL_DEFS);
 
 module.exports = {
   initTools,
