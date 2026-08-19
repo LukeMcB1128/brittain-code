@@ -46,7 +46,7 @@
   }
 
   function show(result, dependencies) {
-    const { $, modelSelect, hideOverlay, addInfo } = dependencies;
+    const { $, modelSelect, hideOverlay, addInfo, installModel, modelInstalled } = dependencies;
     $('overlay-title').textContent = 'MODEL RECOMMENDATIONS';
     $('overlay-box').classList.add('recommendations-overlay');
     const body = $('overlay-body');
@@ -60,6 +60,12 @@
     context.appendChild(document.createTextNode(`up to ${formatContext(result.requestedContext)}`));
     summary.appendChild(hardware);
     summary.appendChild(context);
+    if (result.usingBaseline && result.reference?.label) {
+      const reference = element('span');
+      reference.appendChild(element('strong', '', 'REFERENCE '));
+      reference.appendChild(document.createTextNode(result.reference.label));
+      summary.appendChild(reference);
+    }
     body.appendChild(summary);
 
     const wrap = element('div', 'recommendations-table-wrap');
@@ -79,7 +85,10 @@
 
       const modelCell = element('div', 'recommendations-model');
       const nameLine = element('div', 'recommendations-model-name', model.name);
-      if (model.recommended) nameLine.appendChild(element('span', 'recommendations-badge best', 'BEST AVAILABLE'));
+      if (model.recommended) {
+        nameLine.appendChild(element('span', 'recommendations-badge best', model.installed === false ? 'RECOMMENDED' : 'BEST AVAILABLE'));
+      }
+      if (model.installed === false) nameLine.appendChild(element('span', 'recommendations-badge installable', 'NOT INSTALLED'));
       if (model.profile?.marker) nameLine.appendChild(element('span', 'recommendations-badge', model.profile.marker));
       modelCell.appendChild(nameLine);
       const modelMeta = [model.parameterSize, model.quantization, model.capabilities.thinking ? 'THINK' : ''].filter(Boolean).join(' · ');
@@ -100,7 +109,10 @@
       if (model.speed) {
         speedCell.appendChild(element('div', 'recommendations-value', `${model.speed.tokensPerSecond.toFixed(1)} t/s`));
         const speedContext = model.speed.contextTokens ? ` @ ${formatContext(model.speed.contextTokens)}` : '';
-        speedCell.appendChild(element('div', 'recommendations-meta', `${model.speed.samples} MEASURED SAMPLE${model.speed.samples === 1 ? '' : 'S'}${speedContext}`));
+        const speedSource = model.speed.source === 'reference'
+          ? `${model.speed.samples} REFERENCE SAMPLE${model.speed.samples === 1 ? '' : 'S'}`
+          : `${model.speed.samples} MEASURED SAMPLE${model.speed.samples === 1 ? '' : 'S'}`;
+        speedCell.appendChild(element('div', 'recommendations-meta', `${speedSource}${speedContext}`));
       } else {
         speedCell.appendChild(element('div', 'recommendations-unknown', 'NOT MEASURED'));
         speedCell.appendChild(element('div', 'recommendations-meta', 'RUN MODEL TO LEARN'));
@@ -116,14 +128,44 @@
       }
       appendCell(row, benchmarkCell);
 
-      const useButton = element('button', 'recommendations-use', modelSelect.value === model.name ? 'ACTIVE' : 'USE');
+      const isInstalled = model.installed !== false;
+      const isActive = isInstalled && modelSelect.value === model.name;
+      const canInstall = !isInstalled && result.installAvailable !== false;
+      const useButton = element('button', 'recommendations-use', isInstalled ? (isActive ? 'ACTIVE' : 'USE') : canInstall ? 'INSTALL' : 'LOCAL ONLY');
       useButton.type = 'button';
-      useButton.disabled = modelSelect.value === model.name;
-      useButton.addEventListener('click', () => {
-        modelSelect.value = model.name;
-        modelSelect.dispatchEvent(new Event('change'));
-        hideOverlay();
-        addInfo('Model set to ' + model.name);
+      useButton.disabled = isActive || (!isInstalled && !canInstall);
+      if (!isInstalled && !canInstall) useButton.title = 'Install is available only when Brittain Code uses a local Ollama endpoint.';
+      useButton.addEventListener('click', async () => {
+        if (isInstalled) {
+          modelSelect.value = model.name;
+          modelSelect.dispatchEvent(new Event('change'));
+          hideOverlay();
+          addInfo('Model set to ' + model.name);
+          return;
+        }
+
+        useButton.disabled = true;
+        useButton.classList.add('installing');
+        useButton.replaceChildren(element('span', 'recommendations-spinner'), document.createTextNode('PULLING…'));
+        const installStatus = element('div', 'recommendations-install-status', 'Starting ollama pull…');
+        modelCell.appendChild(installStatus);
+        const installResult = await installModel(model.name, (progress) => {
+          const percent = Number.isFinite(progress.percent) ? `${progress.percent}%` : 'PULLING…';
+          useButton.replaceChildren(element('span', 'recommendations-spinner'), document.createTextNode(percent));
+          installStatus.textContent = progress.status || 'Downloading model…';
+        });
+        useButton.classList.remove('installing');
+        if (!installResult.ok) {
+          useButton.disabled = false;
+          useButton.textContent = 'RETRY';
+          installStatus.classList.add('error');
+          installStatus.textContent = installResult.error || 'Model install failed.';
+          return;
+        }
+        useButton.textContent = 'INSTALLED';
+        installStatus.classList.add('complete');
+        installStatus.textContent = 'Install complete.';
+        await modelInstalled(model.name);
       });
       appendCell(row, useButton);
       tableBody.appendChild(row);
@@ -137,6 +179,9 @@
       'Measured values come from Ollama while a model is loaded.',
       'Speed uses measured local responses from saved chats, Brittainmark runs, and this app session.',
     ];
+    if (result.usingBaseline && result.reference?.label) {
+      noteParts.push(`No installed models were found. These installable reference results were recorded on ${result.reference.label}; speed is not an estimate for this computer.`);
+    }
     if (!result.benchmarkAvailable) noteParts.push('No local Brittainmark v3 results matched these models.');
     body.appendChild(element('div', 'recommendations-note', noteParts.join(' ')));
     $('overlay').classList.remove('hidden');

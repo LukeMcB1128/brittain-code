@@ -197,6 +197,7 @@ test('model recommendations are wired through the command, bridge, and packaged 
   const packageJson = JSON.parse(source('package.json'));
 
   assert.match(html, /id="overlay-body"/);
+  assert.match(html, /id="onboarding-recommendations"/);
   assert.match(html, /features\/recommendations\.js/);
   assert.match(html, /styles\/recommendations\.css/);
   assert.match(renderer, /case 'recs'/);
@@ -204,13 +205,16 @@ test('model recommendations are wired through the command, bridge, and packaged 
   assert.match(renderer, /function showRecommendations/);
   assert.match(recommendationsView, /global\.RecommendationsView/);
   assert.match(preload, /ipcRenderer\.invoke\('models:recommendations'/);
+  assert.match(preload, /ipcRenderer\.invoke\('models:install'/);
   assert.match(main, /ipcMain\.handle\('models:recommendations'/);
+  assert.match(main, /ipcMain\.handle\('models:install'/);
   assert.match(main, /createRecommendationsService/);
   assert.match(hardwareProfile, /processRef\.getSystemMemoryInfo/);
   assert.match(hardwareProfile, /systemInformationRef\.graphics\(\)/);
   assert.match(recommendationsService, /buildRecommendations/);
   assert.equal(packageJson.build.files.includes('recommendations.js'), true);
   assert.equal(packageJson.build.files.includes('model-presets.json'), true);
+  assert.equal(packageJson.build.files.includes('model-baselines.json'), true);
   assert.equal(packageJson.build.files.includes('src/**'), true);
   assert.equal(packageJson.dependencies.systeminformation, '^5.33.1');
 });

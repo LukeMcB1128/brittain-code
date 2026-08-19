@@ -5,6 +5,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { spawn } = require('node:child_process');
 const { McpManager } = require('./mcp');
 const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
@@ -23,6 +24,7 @@ const { normalizeCodeReview, SUBMIT_CODE_REVIEW_TOOL } = require('./src/main/cod
 const { captureMissionRecovery, validateMissionRecovery } = require('./src/main/mission-recovery');
 const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
 const { LOCAL_BROWSER_TOOL_NAMES, createLocalBrowserService } = require('./src/main/local-browser-service');
+const { createModelInstallService } = require('./src/main/model-install-service');
 const {
   normalizeContextState,
   pinFile: pinContextFile,
@@ -310,6 +312,11 @@ const localBrowser = createLocalBrowserService({
   BrowserWindow,
   getDataDir: () => settingsUserDataDir || app.getPath('userData'),
 });
+const modelInstaller = createModelInstallService({
+  spawnImpl: spawn,
+  getEndpoint: inferenceEndpoint,
+  isLocalEndpoint,
+});
 
 app.whenReady().then(() => {
   settingsUserDataDir = app.getPath('userData');
@@ -330,6 +337,7 @@ app.on('before-quit', () => {
     lastEvent: 'Brittain Code closed before this mission finished.',
   });
   stopAllManagedProcesses();
+  modelInstaller.stopAll();
   localBrowser.closeAll();
   mcp.stopAll();
 });
@@ -2936,6 +2944,9 @@ const getModelRecommendations = createRecommendationsService({
 });
 
 ipcMain.handle('models:recommendations', (_event, options) => getModelRecommendations(options));
+ipcMain.handle('models:install', (event, { model } = {}) => modelInstaller.install(model, (progress) => {
+  try { event.sender.send('models:install-progress', progress); } catch {}
+}));
 ipcMain.handle('models:autoRoute', async (_event, options = {}) => {
   const mode = options.mode === 'chat' ? 'chat' : 'code';
   const recommendations = await getModelRecommendations({ mode });

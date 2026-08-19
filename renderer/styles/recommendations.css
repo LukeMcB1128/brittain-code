@@ -70,12 +70,38 @@
 }
 
 .recommendations-badge.best { border-color: var(--accent); color: var(--accent); }
+.recommendations-badge.installable { border-color: var(--yellow); color: var(--yellow); }
 .recommendations-fit-good, .recommendations-fit-loaded, .recommendations-fit-proven { color: var(--green); }
 .recommendations-fit-caution { color: var(--yellow); }
 .recommendations-fit-risk { color: var(--red); }
 .recommendations-fit-unknown { color: var(--text-dim); }
 .recommendations-use { min-width: 58px; padding: 4px 7px; font-size: 10px; }
 .recommendations-use:disabled { cursor: default; opacity: 0.55; }
+.recommendations-use.installing { display: inline-flex; align-items: center; justify-content: center; gap: 5px; opacity: 0.8; }
+
+.recommendations-spinner {
+  width: 9px;
+  height: 9px;
+  border: 1px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: recommendations-spin 0.7s linear infinite;
+}
+
+.recommendations-install-status {
+  max-width: 220px;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recommendations-install-status.complete { color: var(--green); }
+.recommendations-install-status.error { color: var(--red); white-space: normal; }
+
+@keyframes recommendations-spin { to { transform: rotate(360deg); } }
 
 .recommendations-note {
   padding: 10px 14px 14px;

@@ -54,6 +54,13 @@ test('AUTO reports when no image-capable model is installed', () => {
   assert.deepEqual(result, { ok: false, error: 'No installed model reports image support.' });
 });
 
+test('AUTO ignores reference models that are not installed', () => {
+  const result = selectAutoModel([
+    model('reference:8b', { installed: false, recommended: true }),
+  ], { mode: 'code' });
+  assert.deepEqual(result, { ok: false, error: 'No installed models are available.' });
+});
+
 test('AUTO avoids a memory-risk model when a compatible safe model exists', () => {
   const result = selectAutoModel([
     model('too-large:70b', { fit: { level: 'risk', label: 'MEMORY RISK' }, recommended: true }),

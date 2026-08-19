@@ -1,7 +1,7 @@
 {
   "name": "brittain-code",
   "productName": "Brittain Code",
-  "version": "1.4.1",
+  "version": "1.4.6",
   "description": "Local-first coding agent for Ollama with optional online research",
   "author": "Luke Brittain",
   "main": "main.js",
@@ -24,6 +24,7 @@
       "ollama-recovery.js",
       "recommendations.js",
       "model-presets.json",
+      "model-baselines.json",
       "tools.js",
       "mcp.js",
       "preload.js",

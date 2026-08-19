@@ -143,6 +143,7 @@ function renderOnboarding(state, detail) {
   const title = $('onboarding-title');
   const body = $('onboarding-body');
   const ollamaBtn = $('onboarding-ollama');
+  const recommendationsBtn = $('onboarding-recommendations');
 
   if (state === 'ok') {
     overlay.classList.add('hidden');
@@ -151,6 +152,7 @@ function renderOnboarding(state, detail) {
 
   overlay.classList.remove('hidden');
   ollamaBtn.classList.toggle('hidden', state !== 'unreachable');
+  recommendationsBtn.classList.toggle('hidden', state !== 'empty');
 
   if (state === 'unreachable') {
     title.textContent = 'NO LOCAL MODEL SERVER FOUND';
@@ -169,7 +171,7 @@ function renderOnboarding(state, detail) {
     title.textContent = 'NO MODELS INSTALLED YET';
     body.innerHTML = '';
     const p1 = document.createElement('p');
-    p1.textContent = 'Ollama is running, but no models are pulled. Any tool-calling model works — for example:';
+    p1.textContent = 'Ollama is running, but no models are pulled. View the Mac benchmark recommendations, or pull a model directly:';
     body.appendChild(p1);
     addCopyableCommand(body, 'ollama pull gpt-oss:20b');
     const p2 = document.createElement('p');
@@ -200,6 +202,20 @@ $('onboarding-retry').addEventListener('click', async () => {
   await reloadModels(defaultModelForMode(appMode));
   applySessionDefaults();
   $('onboarding-retry').textContent = 'CHECK AGAIN';
+});
+
+$('onboarding-recommendations').addEventListener('click', async () => {
+  const button = $('onboarding-recommendations');
+  button.textContent = 'LOADING…';
+  try {
+    const result = await window.api.getModelRecommendations(appMode);
+    if (!result.ok) return addError(result.error);
+    showRecommendations(result);
+  } catch (err) {
+    addError('Could not load model recommendations: ' + (err.message || err));
+  } finally {
+    button.textContent = 'VIEW RECOMMENDATIONS';
+  }
 });
 
 $('onboarding-settings').addEventListener('click', () => {
@@ -2138,7 +2154,7 @@ async function handleSlash(raw) {
         await reloadModels(modelSelect.value);
         const res = await window.api.getModelRecommendations(appMode);
         if (!res.ok) return addError(res.error);
-        if (!res.models.length) return addInfo('No installed models were found.');
+        if (!res.models.length) return addInfo('No installed models or reference recommendations were found.');
         return showRecommendations(res);
       } catch (err) {
         return addError('Could not load model recommendations: ' + (err.message || err));
@@ -2279,7 +2295,40 @@ function showOverlay(title, text, opts = {}) {
 }
 
 function showRecommendations(result) {
-  return window.RecommendationsView.show(result, { $, modelSelect, hideOverlay, addInfo });
+  return window.RecommendationsView.show(result, {
+    $,
+    modelSelect,
+    hideOverlay,
+    addInfo,
+    installModel: installRecommendedModel,
+    modelInstalled: refreshAfterModelInstall,
+  });
+}
+
+async function installRecommendedModel(model, onProgress) {
+  const removeProgressListener = window.api.onModelInstallProgress((progress) => {
+    if (progress?.model === model) onProgress(progress);
+  });
+  try {
+    return await window.api.installModel(model);
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  } finally {
+    removeProgressListener();
+  }
+}
+
+async function refreshAfterModelInstall(model) {
+  const models = await reloadModels(model);
+  if (!models.includes(model)) {
+    addError(`Ollama completed the pull, but ${model} is not in the installed-model list yet. Use CHECK AGAIN to refresh.`);
+    return;
+  }
+  modelSelect.value = model;
+  modelSelect.dispatchEvent(new Event('change'));
+  const refreshed = await window.api.getModelRecommendations(appMode);
+  if (refreshed.ok) showRecommendations(refreshed);
+  addInfo(`Installed ${model} with Ollama and set it as the active model.`);
 }
 
 function hideOverlay() {

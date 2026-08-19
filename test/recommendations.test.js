@@ -3,11 +3,13 @@ const assert = require('node:assert/strict');
 
 const {
   GIB,
+  buildBaselineRecommendations,
   buildRecommendations,
   estimateKvCacheBytes,
   fitForMemory,
   isLocalEndpoint,
   kvCacheBytesPerElement,
+  sameHardwareClass,
   summarizeBenchmarks,
 } = require('../recommendations');
 
@@ -186,6 +188,46 @@ test('recommendations merge Ollama data, measured data, and benchmarks', () => {
   assert.equal(result[0].profile.marker, 'TEST');
   assert.equal(result[1].capabilities.tools, false);
   assert.equal(result[1].contextTokens, 8192);
+});
+
+test('baseline recommendations describe installable models from the recorded hardware', () => {
+  const baseline = {
+    reference: {
+      label: 'Test Mac (32 GB)',
+      platform: 'darwin',
+      arch: 'arm64',
+      totalMemoryBytes: 32 * GIB,
+      contextTokens: 32768,
+    },
+    models: [{
+      name: 'reference:8b',
+      sizeBytes: 5 * GIB,
+      parameterSize: '8B',
+      quantization: 'Q4_K_M',
+      nativeContext: 131072,
+      capabilities: { tools: true, vision: false, thinking: true },
+      speed: { tokensPerSecond: 42, samples: 3 },
+      brittainmark: { score: 88, tasks: 7, runs: 7, version: 3 },
+    }],
+  };
+  const hardware = {
+    appliesToEndpoint: true,
+    platform: 'darwin',
+    arch: 'arm64',
+    unifiedMemory: true,
+    totalMemoryBytes: 32 * GIB,
+  };
+  const [model] = buildBaselineRecommendations({ baseline, hardware, kvCacheType: 'q8_0' });
+
+  assert.equal(model.installed, false);
+  assert.equal(model.recommended, true);
+  assert.equal(model.fit.label, 'BENCHED FIT');
+  assert.equal(model.speed.source, 'reference');
+  assert.equal(model.speed.tokensPerSecond, 42);
+  assert.equal(model.contextTokens, 32768);
+  assert.equal(model.brittainmark.score, 88);
+  assert.equal(model.reference.label, 'Test Mac (32 GB)');
+  assert.equal(sameHardwareClass(baseline.reference, hardware), true);
 });
 
 test('remote endpoints do not use client memory for fit claims', () => {

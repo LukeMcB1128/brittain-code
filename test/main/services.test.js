@@ -178,6 +178,37 @@ test('recommendations service loads Ollama metadata through its injected boundar
   assert.deepEqual(calls.map(([route]) => route), ['/api/tags', '/api/ps', '/api/show']);
 });
 
+test('recommendations service uses the packaged baseline when Ollama has no models', async (t) => {
+  const directory = tempDirectory(t);
+  const service = createRecommendationsService({
+    ollamaJson: async (route) => route === '/api/tags' ? { models: [] } : { models: [] },
+    hardwareProfile: async () => ({
+      platform: 'darwin',
+      arch: 'arm64',
+      appliesToEndpoint: true,
+      unifiedMemory: true,
+      totalMemoryBytes: 36 * 1024 ** 3,
+    }),
+    getRuntimeSettings: () => ({ mainContextCap: 32768 }),
+    getEndpoint: () => 'http://localhost:11434',
+    isLocalEndpoint: () => true,
+    getHistoryDirectory: () => path.join(directory, 'chats'),
+    benchmarkDirectory: path.join(directory, 'benchmark'),
+    readBenchResults: () => [],
+    modelSpeedSamples: new Map(),
+    defaultContext: 32768,
+  });
+
+  const result = await service({ mode: 'code' });
+  assert.equal(result.ok, true);
+  assert.equal(result.usingBaseline, true);
+  assert.equal(result.installAvailable, true);
+  assert.equal(result.reference.label, 'Apple M3 Max (36 GB)');
+  assert.equal(result.models.length > 0, true);
+  assert.equal(result.models.every((model) => model.installed === false), true);
+  assert.equal(result.models.some((model) => model.name === 'gpt-oss:20b'), true);
+});
+
 test('recommendation metadata helpers remove tokenizer data and detect hybrid models', () => {
   const compact = compactRecommendationShow({
     model_info: { 'model.context_length': 8192, 'tokenizer.large': 'discard' },

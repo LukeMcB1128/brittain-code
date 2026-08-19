@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
-const { buildRecommendations } = require('../../recommendations');
+const { buildBaselineRecommendations, buildRecommendations } = require('../../recommendations');
 const modelPresets = require('../../model-presets.json');
+const modelBaselines = require('../../model-baselines.json');
 
 function compactRecommendationShow(show) {
   return {
@@ -133,24 +134,37 @@ function createRecommendationsService({
         const normalized = String(name).replace(/^ollama:/i, '').trim().toLowerCase();
         speedSamples[normalized] = [...(speedSamples[normalized] || []), ...samples].slice(-24);
       }
-      const models = buildRecommendations({
-        tags,
-        shows: Object.fromEntries(showEntries),
-        running: runningResponse.models || [],
-        hardware,
-        benchmarkEntries: readBenchResults(),
-        speedSamples,
-        presets: modelPresets,
-        requestedContext,
-        mode: mode === 'chat' ? 'chat' : 'code',
-        kvCacheType,
-      });
+      const recommendationMode = mode === 'chat' ? 'chat' : 'code';
+      const usingBaseline = tags.length === 0;
+      const models = usingBaseline
+        ? buildBaselineRecommendations({
+          baseline: modelBaselines,
+          hardware,
+          presets: modelPresets,
+          mode: recommendationMode,
+          kvCacheType,
+        })
+        : buildRecommendations({
+          tags,
+          shows: Object.fromEntries(showEntries),
+          running: runningResponse.models || [],
+          hardware,
+          benchmarkEntries: readBenchResults(),
+          speedSamples,
+          presets: modelPresets,
+          requestedContext,
+          mode: recommendationMode,
+          kvCacheType,
+        });
       return {
         ok: true,
         models,
         hardware,
         requestedContext,
         kvCacheType,
+        usingBaseline,
+        reference: usingBaseline ? modelBaselines.reference : null,
+        installAvailable: usingBaseline && isLocalEndpoint(getEndpoint()),
         benchmarkAvailable: models.some((model) => !!model.brittainmark),
       };
     } catch (err) {

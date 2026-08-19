@@ -4,6 +4,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   listModels: () => ipcRenderer.invoke('models:list'),
   getModelRecommendations: (mode) => ipcRenderer.invoke('models:recommendations', { mode }),
+  installModel: (model) => ipcRenderer.invoke('models:install', { model }),
+  onModelInstallProgress: (cb) => {
+    const handler = (_event, progress) => cb(progress);
+    ipcRenderer.on('models:install-progress', handler);
+    return () => ipcRenderer.removeListener('models:install-progress', handler);
+  },
   autoRouteModel: (options) => ipcRenderer.invoke('models:autoRoute', options),
   pickCwd: () => ipcRenderer.invoke('cwd:pick'),
   dirExists: (p) => ipcRenderer.invoke('dir:exists', p),

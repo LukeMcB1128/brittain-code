@@ -11,7 +11,9 @@ function routeReason(model, { mode, needsVision }) {
 }
 
 function selectAutoModel(models, { mode = 'code', needsVision = false } = {}) {
-  const installed = Array.isArray(models) ? models.filter((model) => model?.name) : [];
+  const installed = Array.isArray(models)
+    ? models.filter((model) => model?.name && model.installed !== false)
+    : [];
   if (!installed.length) {
     return { ok: false, error: 'No installed models are available.' };
   }

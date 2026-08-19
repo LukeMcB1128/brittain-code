@@ -252,6 +252,16 @@ function parameterBillions(tag, show) {
   return match ? finiteNumber(match[1], 0) : 0;
 }
 
+function sameHardwareClass(reference, hardware) {
+  if (!reference || !hardware || !hardware.appliesToEndpoint) return false;
+  if (reference.platform && reference.platform !== hardware.platform) return false;
+  if (reference.arch && reference.arch !== hardware.arch) return false;
+  const referenceMemory = finiteNumber(reference.totalMemoryBytes, 0);
+  const currentMemory = finiteNumber(hardware.totalMemoryBytes, 0);
+  return !!referenceMemory && !!currentMemory
+    && Math.abs(referenceMemory - currentMemory) / currentMemory < 0.1;
+}
+
 const FIT_ORDER = { loaded: 1, proven: 1, good: 1, caution: 2, unknown: 3, risk: 4 };
 
 function recommendationSort(mode) {
@@ -320,6 +330,77 @@ function buildRecommendations({ tags, shows = {}, running = [], hardware, benchm
       speed: measuredSpeed,
       brittainmark: benchmarkByModel.get(normalized) || null,
       profile: preset ? { marker: preset.marker || null, priority: finiteNumber(preset.priority, 0) } : null,
+      installed: true,
+      reference: null,
+      recommended: false,
+    };
+  }).sort(recommendationSort(mode));
+
+  const preferred = models.find((model) => model.fit.level !== 'risk' && (mode !== 'code' || model.capabilities.tools !== false));
+  if (preferred) preferred.recommended = true;
+  return models;
+}
+
+function buildBaselineRecommendations({ baseline = {}, hardware, presets = {}, mode = 'code', kvCacheType = 'f16' }) {
+  const reference = baseline.reference || {};
+  const cacheElementBytes = kvCacheBytesPerElement(kvCacheType);
+  const referenceContext = Math.max(2048, finiteNumber(reference.contextTokens, 32768));
+  const provenHardware = sameHardwareClass(reference, hardware);
+  const models = (baseline.models || []).map((record) => {
+    const nativeContext = finiteNumber(record.nativeContext, 0) || null;
+    const contextTokens = Math.min(referenceContext, nativeContext || Infinity);
+    const tag = {
+      name: record.name,
+      size: finiteNumber(record.sizeBytes, 0),
+      details: {
+        parameter_size: record.parameterSize || null,
+        quantization_level: record.quantization || null,
+      },
+    };
+    const show = { details: tag.details, model_info: {} };
+    const estimate = estimateModelMemory(tag, show, contextTokens, cacheElementBytes);
+    let fit = fitForMemory(estimate?.bytes || null, hardware, false);
+    if (provenHardware) fit = { level: 'proven', label: 'BENCHED FIT' };
+    const preset = findPreset(record.name, presets);
+    const speedValue = finiteNumber(record.speed?.tokensPerSecond, 0);
+
+    return {
+      name: record.name,
+      digest: record.digest || null,
+      parameterSize: record.parameterSize || null,
+      parameterBillions: parameterBillions(tag, show),
+      quantization: record.quantization || null,
+      nativeContext,
+      contextTokens,
+      capabilities: {
+        tools: typeof record.capabilities?.tools === 'boolean' ? record.capabilities.tools : null,
+        vision: typeof record.capabilities?.vision === 'boolean' ? record.capabilities.vision : null,
+        thinking: typeof record.capabilities?.thinking === 'boolean' ? record.capabilities.thinking : null,
+      },
+      memory: {
+        bytes: estimate?.bytes || null,
+        source: estimate ? 'estimated' : 'unknown',
+        contextTokens,
+        unified: !!hardware?.unifiedMemory,
+      },
+      fit,
+      speed: speedValue ? {
+        tokensPerSecond: speedValue,
+        samples: Math.max(1, finiteNumber(record.speed?.samples, 1)),
+        exactContext: true,
+        contextTokens,
+        source: 'reference',
+      } : null,
+      brittainmark: record.brittainmark || null,
+      profile: preset ? { marker: preset.marker || null, priority: finiteNumber(preset.priority, 0) } : null,
+      installed: false,
+      reference: {
+        label: reference.label || null,
+        platform: reference.platform || null,
+        arch: reference.arch || null,
+        totalMemoryBytes: finiteNumber(reference.totalMemoryBytes, 0) || null,
+        contextTokens,
+      },
       recommended: false,
     };
   }).sort(recommendationSort(mode));
@@ -331,6 +412,7 @@ function buildRecommendations({ tags, shows = {}, running = [], hardware, benchm
 
 module.exports = {
   GIB,
+  buildBaselineRecommendations,
   buildRecommendations,
   estimateKvCacheBytes,
   estimateModelMemory,
@@ -341,5 +423,6 @@ module.exports = {
   median,
   nativeContextLength,
   normalizedModelName,
+  sameHardwareClass,
   summarizeBenchmarks,
 };
