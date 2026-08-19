@@ -1,4 +1,51 @@
 const os = require('os');
+const http = require('http');
+const https = require('https');
+
+// Node's global fetch (undici) applies a 300s headersTimeout. Ollama runs here are
+// non-streaming, so no response headers arrive until generation finishes, and any
+// single step slower than 5 minutes died with an opaque `TypeError: fetch failed`
+// (cause UND_ERR_HEADERS_TIMEOUT). node:http imposes no such limit, so long
+// generations are bounded only by the caller's AbortSignal.
+function requestJson(url, body, signal) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const lib = target.protocol === 'https:' ? https : http;
+    const payload = body ? JSON.stringify(body) : null;
+    const headers = { 'Content-Type': 'application/json' };
+    if (payload) headers['Content-Length'] = Buffer.byteLength(payload);
+
+    const req = lib.request(target, { method: body ? 'POST' : 'GET', headers }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`Ollama ${target.pathname} failed: ${res.statusCode} ${text}`));
+          return;
+        }
+        try { resolve(JSON.parse(text)); }
+        catch (err) { reject(new Error(`Ollama ${target.pathname} returned invalid JSON: ${err.message}`)); }
+      });
+    });
+
+    req.setTimeout(0);
+    req.on('error', reject);
+
+    if (signal) {
+      const abort = () => {
+        const err = new Error('The operation was aborted due to timeout');
+        err.name = 'TimeoutError';
+        req.destroy(err);
+      };
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
+    }
+
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
 
 class OllamaProvider {
   constructor(options = {}) {
@@ -22,14 +69,7 @@ class OllamaProvider {
         await new Promise((resolve) => setTimeout(resolve, attempts[index]));
       }
       try {
-        const res = await fetch(this.baseUrl + route, {
-          method: body ? 'POST' : 'GET',
-          headers: { 'Content-Type': 'application/json' },
-          body: body ? JSON.stringify(body) : undefined,
-          signal,
-        });
-        if (!res.ok) throw new Error(`Ollama ${route} failed: ${res.status} ${await res.text()}`);
-        return res.json();
+        return await requestJson(this.baseUrl + route, body, signal);
       } catch (err) {
         lastError = err;
         if (!this.shouldRetry(err) || index === attempts.length - 1) throw err;
