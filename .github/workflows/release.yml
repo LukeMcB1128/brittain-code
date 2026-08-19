@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Validate stable release tag
+        shell: bash
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${PACKAGE_VERSION}"
+          test "${PACKAGE_VERSION#*-}" = "${PACKAGE_VERSION}"
+
+  mac:
+    needs: test
+    runs-on: macos-14
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      MAC_RELEASE_BUILD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Require Apple release credentials
+        shell: bash
+        run: |
+          test -n "${CSC_LINK}"
+          test -n "${CSC_KEY_PASSWORD}"
+          test -n "${APPLE_ID}"
+          test -n "${APPLE_APP_SPECIFIC_PASSWORD}"
+          test -n "${APPLE_TEAM_ID}"
+      - name: Build, sign, notarize, and publish macOS release
+        run: npx electron-builder --config scripts/release-config.js --mac dmg zip --universal --publish always
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Require Windows release credentials
+        shell: bash
+        run: |
+          test -n "${CSC_LINK}"
+          test -n "${CSC_KEY_PASSWORD}"
+      - name: Build and publish Windows release
+        run: npx electron-builder --config scripts/release-config.js --win --x64 --publish always
+
+  publish:
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Publish complete release
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false --latest

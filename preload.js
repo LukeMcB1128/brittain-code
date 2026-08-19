@@ -36,6 +36,14 @@ contextBridge.exposeInMainWorld('api', {
   onCheckpointState: (cb) => ipcRenderer.on('checkpoint:state', (_e, d) => cb(d)),
   onRunReport: (cb) => ipcRenderer.on('run:report', (_e, d) => cb(d)),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
+  updateState: () => ipcRenderer.invoke('updates:state'),
+  checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  installUpdate: () => ipcRenderer.invoke('updates:install'),
+  onUpdateState: (cb) => {
+    const handler = (_event, state) => cb(state);
+    ipcRenderer.on('updates:state', handler);
+    return () => ipcRenderer.removeListener('updates:state', handler);
+  },
   settingsGet: () => ipcRenderer.invoke('settings:get'),
   settingsSave: (settings) => ipcRenderer.invoke('settings:save', settings),
   settingsTestEndpoint: (endpoint) => ipcRenderer.invoke('settings:testEndpoint', endpoint),

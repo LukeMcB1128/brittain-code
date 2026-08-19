@@ -17,12 +17,14 @@ Ollama must be running (`ollama serve`, or the menu bar app).
 
 | Command | Output |
 |---|---|
-| `npm run dist` | macOS `.dmg` and `.zip` |
+| `npm run dist` | Local macOS `.dmg` and `.zip` without production updates |
 | `npm run dist:win` | Windows x64 NSIS installer |
 | `npm run dist:all` | both |
 | `npm run deploy` | macOS: build and copy straight into /Applications |
 
-On macOS the standalone app lands in `dist/mac-arm64/Brittain Code.app`; drag it into Applications or the Dock to launch it without a terminal. Builds are unsigned, so the first launch needs the usual right-click → Open (macOS) or SmartScreen "More info" → "Run anyway" (Windows).
+On macOS the standalone app lands in `dist/mac-arm64/Brittain Code.app`; drag it into Applications or the Dock to launch it without a terminal. Local builds use an ad-hoc signature, so the first launch can need the usual right-click → Open. Local Windows builds can show the SmartScreen "More info" → "Run anyway" action.
+
+Official releases are built from stable `vX.Y.Z` tags by `.github/workflows/release.yml`. Those builds check GitHub Releases for newer stable versions, download an update in the background, and offer a restart when it is ready. Development and local package builds do not contact the update server. The macOS release job requires `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` repository secrets. The Windows job requires `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`. The workflow uploads both platforms into a draft and publishes it only after both jobs succeed.
 
 The built app is a snapshot of the code at build time — editing `main.js` or the `renderer/` files does **not** change it; rebuild after changes. During development, `npm start` always runs the live code.
 

@@ -17,6 +17,12 @@ const path = require('path');
 module.exports = async function afterSign(context) {
   if (context.electronPlatformName !== 'darwin') return;
   const appPath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
+  // CI release builds already have a Developer ID signature. Re-signing them
+  // ad-hoc would break the trust chain used by notarization and auto-update.
+  if (process.env.MAC_RELEASE_BUILD === '1') {
+    execFileSync('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath], { stdio: 'inherit' });
+    return;
+  }
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', appPath], { stdio: 'inherit' });
   execFileSync('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath], { stdio: 'inherit' });
 };

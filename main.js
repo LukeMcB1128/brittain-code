@@ -25,6 +25,8 @@ const { captureMissionRecovery, validateMissionRecovery } = require('./src/main/
 const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
 const { LOCAL_BROWSER_TOOL_NAMES, createLocalBrowserService } = require('./src/main/local-browser-service');
 const { createModelInstallService } = require('./src/main/model-install-service');
+const { createUpdateService } = require('./src/main/update-service');
+const { autoUpdater } = require('electron-updater');
 const {
   normalizeContextState,
   pinFile: pinContextFile,
@@ -122,6 +124,7 @@ function fitToWindow(msgs, maxTokens) {
 
 let win = null;
 let activeMission = null;
+let updateService = null;
 
 function publishMission() {
   if (win && !win.isDestroyed()) win.webContents.send('mission:update', activeMission);
@@ -290,6 +293,7 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  win.webContents.once('did-finish-load', () => updateService?.start());
 }
 
 // Packaged apps launched from Finder inherit launchd's minimal PATH — node,
@@ -330,6 +334,17 @@ app.whenReady().then(() => {
     }
   });
   createWindow();
+  const packageMetadata = require('./package.json');
+  updateService = createUpdateService({
+    updater: autoUpdater,
+    enabled: app.isPackaged && packageMetadata.updateEnabled === true,
+    currentVersion: app.getVersion(),
+    isBusy: () => !!currentAbort || activeMission?.status === 'running',
+    publish: (state) => {
+      if (win && !win.isDestroyed()) win.webContents.send('updates:state', state);
+    },
+  });
+  if (!win.webContents.isLoading()) updateService.start();
 });
 app.on('before-quit', () => {
   if (activeMission?.status === 'running') updateMission({
@@ -2834,6 +2849,16 @@ ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch 
 // Hardcoded destination — never opens an arbitrary/user-supplied URL.
 ipcMain.handle('app:openOllamaSite', () => { shell.openExternal('https://ollama.com/download'); return { ok: true }; });
 ipcMain.handle('app:getVersion', () => require('./package.json').version);
+ipcMain.handle('updates:state', () => updateService?.state() || {
+  enabled: false,
+  status: 'disabled',
+  currentVersion: app.getVersion(),
+  version: null,
+  percent: 0,
+  message: 'Automatic updates are not ready yet.',
+});
+ipcMain.handle('updates:check', () => updateService?.check({ manual: true }) || { ok: false, error: 'Automatic updates are not ready yet.' });
+ipcMain.handle('updates:install', () => updateService?.install() || { ok: false, error: 'Automatic updates are not ready yet.' });
 
 ipcMain.handle('settings:get', () => ({
   ok: true,

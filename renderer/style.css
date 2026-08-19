@@ -732,6 +732,11 @@ footer {
 #git-info.hidden { display: none; }
 #git-branch { color: var(--green); }
 
+#update-action {
+  border-color: var(--green);
+  color: var(--green);
+}
+
 button.mini {
   padding: 1px 6px;
   font-size: 10px;
@@ -955,6 +960,20 @@ button.mini:disabled {
 .setting-status.error { color: var(--red); }
 .settings-actions { justify-content: flex-end; border-top: 1px solid var(--border); border-bottom: 0; }
 .settings-actions .setting-status { flex: 1; }
+
+.update-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+#settings-update-version {
+  color: var(--accent);
+  font: 12px var(--mono);
+}
+
+#settings-update-status { flex: 1; }
 
 .ctx-bar {
   display: inline-block;

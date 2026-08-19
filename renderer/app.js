@@ -32,6 +32,7 @@ let missionCard = null;
 let latestMission = null;
 let pendingPlanDraft = null;
 let pendingPlanCard = null;
+let updateState = null;
 
 setAppMode(appMode, false, false);
 
@@ -50,10 +51,17 @@ setAppMode(appMode, false, false);
   // Display version number
   try {
     const version = await window.api.getVersion();
-    $('version-display').textContent = version;
+    $('version-display').textContent = `v${version}`;
+    $('settings-update-version').textContent = `CURRENT v${version}`;
     $('version-display').classList.remove('hidden');
   } catch (e) {
     console.error('Failed to load version:', e);
+  }
+
+  try {
+    renderUpdateState(await window.api.updateState());
+  } catch (e) {
+    console.error('Failed to load update state:', e);
   }
 
   // subagent model: validate the saved choice against what's installed
@@ -109,6 +117,46 @@ setAppMode(appMode, false, false);
   // Show startup message on boot
   showStartupMessage();
 })();
+
+window.api.onUpdateState(renderUpdateState);
+
+function renderUpdateState(state) {
+  if (!state) return;
+  updateState = state;
+  const status = $('settings-update-status');
+  const check = $('settings-check-update');
+  const install = $('settings-install-update');
+  const action = $('update-action');
+  status.textContent = state.message || '';
+  status.classList.toggle('error', state.status === 'error');
+  status.classList.toggle('ok', ['up-to-date', 'downloaded'].includes(state.status));
+  check.disabled = !state.enabled || ['checking', 'downloading', 'installing'].includes(state.status);
+  install.classList.toggle('hidden', state.status !== 'downloaded');
+  action.classList.toggle('hidden', !['downloading', 'downloaded'].includes(state.status));
+  action.disabled = state.status !== 'downloaded';
+  action.textContent = state.status === 'downloaded'
+    ? `UPDATE v${state.version}`
+    : `UPDATE ${state.percent || 0}%`;
+}
+
+async function installReadyUpdate() {
+  if (busy) return addError('Stop the active run before you restart to update.');
+  const version = updateState?.version ? ` ${updateState.version}` : '';
+  if (!(await confirmDialog(`Restart Brittain Code and install version${version}?`, { okLabel: 'RESTART' }))) return;
+  const result = await window.api.installUpdate();
+  if (!result.ok) addError(result.error);
+}
+
+$('settings-check-update').addEventListener('click', async () => {
+  const result = await window.api.checkForUpdates();
+  if (!result.ok && result.error) renderUpdateState(result.state || {
+    ...updateState,
+    status: 'error',
+    message: `Update check failed: ${result.error}`,
+  });
+});
+$('settings-install-update').addEventListener('click', installReadyUpdate);
+$('update-action').addEventListener('click', installReadyUpdate);
 
 function defaultModelForMode(mode) {
   const configured = mode === 'chat' ? appSettings?.chatModel : appSettings?.codeModel;
