@@ -10,7 +10,7 @@ Brittain Code 1.4.6 — a local-first coding agent for Ollama-compatible models.
 | macOS (Intel) | `Brittain Code-1.4.6.dmg` |
 | Windows x64 | `Brittain Code Setup 1.4.6.exe` |
 
-Ollama must be running (`ollama serve`). These builds are unsigned, so macOS wants right-click → **Open** on the first launch and Windows shows SmartScreen → **More info** → **Run anyway**.
+Ollama must be running (`ollama serve`). There is no paid signing identity behind these builds: macOS gets a deep ad-hoc signature, which keeps Gatekeeper on the ordinary right-click → **Open** path for the first launch, and Windows shows SmartScreen → **More info** → **Run anyway**.
 
 ## Auto-updates, on Windows
 
