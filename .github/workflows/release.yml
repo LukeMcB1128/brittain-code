@@ -69,5 +69,6 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      # No checkout here, so gh cannot infer the repository from a git remote.
       - name: Publish complete release
-        run: gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
+        run: gh release edit "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" --draft=false --latest
