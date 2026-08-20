@@ -923,7 +923,11 @@ let mdRenderQueued = false;
 // Render markdown safely. Falls back to plain text if the libs failed to load.
 function renderMarkdown(el, text) {
   if (window.marked && window.DOMPurify) {
-    el.innerHTML = DOMPurify.sanitize(marked.parse(text, { async: false }));
+    const protectedMath = window.MathRenderer
+      ? window.MathRenderer.protectMath(text)
+      : { text, segments: [] };
+    el.innerHTML = DOMPurify.sanitize(marked.parse(protectedMath.text, { async: false }));
+    window.MathRenderer?.renderProtectedMath(el, protectedMath.segments, window.katex);
     el.classList.add('md'); // switches white-space handling from pre-wrap to normal
   } else {
     el.textContent = text;

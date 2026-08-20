@@ -306,6 +306,17 @@ button:active { background: var(--border); }
 .md a { color: var(--accent); }
 .md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
 
+.math-inline { white-space: nowrap; }
+.math-display {
+  display: block;
+  max-width: 100%;
+  margin: 8px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+.math-error { color: var(--text-dim); }
+
 /* replayed tool messages when loading an old chat */
 .msg.tool {
   font-family: var(--mono);
