@@ -10,15 +10,15 @@ Brittain Code 1.4.6 — a local-first coding agent for Ollama-compatible models.
 | macOS (Intel) | `Brittain Code-1.4.6.dmg` |
 | Windows x64 | `Brittain Code Setup 1.4.6.exe` |
 
-Ollama must be running (`ollama serve`). Signed release builds come from the tagged GitHub workflow; if you are installing a local build instead, macOS wants right-click → **Open** on first launch and Windows shows SmartScreen → **More info** → **Run anyway**.
+Ollama must be running (`ollama serve`). These builds are unsigned, so macOS wants right-click → **Open** on the first launch and Windows shows SmartScreen → **More info** → **Run anyway**.
 
-## Auto-updates
+## Auto-updates, on Windows
 
-Release builds now check GitHub Releases for a newer stable version, download it in the background, show progress, and offer **RESTART TO UPDATE** when it is ready. If a run or mission is going, the restart is refused rather than killing the work.
+Windows release builds now check GitHub Releases for a newer stable version, download it in the background, show progress, and offer **RESTART TO UPDATE** when it is ready. If a run or mission is going, the restart is refused rather than killing the work. This is the first release carrying the updater, so 1.4.6 itself has to be installed by hand; later versions can update themselves.
 
-Updates are off for `npm start`, ordinary local `dist` builds, and `npm run deploy` — only the release configuration carries the updater flag. The release job runs the tests, builds a universal macOS release, signs and notarizes it, builds a signed Windows x64 installer, uploads both into a draft, and publishes only when both platforms succeed.
+macOS updates stay manual. Squirrel.Mac will not replace an app whose Developer ID signature it cannot verify, and these builds are ad-hoc signed, so a mac updater would download an update it could never install. Rather than ship that, the updater is off on macOS and the app says so instead of pretending to check. Grab the new dmg when there is one.
 
-One catch worth stating plainly: this is the first release that ships the updater, so you have to install 1.4.6 by hand. Everything after it can update itself.
+Updates are also off for `npm start`, ordinary local `dist` builds, and `npm run deploy`. The release job runs the tests, builds both macOS architectures and a Windows x64 installer, uploads them into a draft, and publishes only when both platforms succeed.
 
 ## New commands
 

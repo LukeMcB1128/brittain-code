@@ -31,12 +31,11 @@ jobs:
     runs-on: macos-14
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      MAC_RELEASE_BUILD: '1'
+      # No Developer ID. afterSign.js does the deep ad-hoc re-sign that keeps
+      # Gatekeeper on the ordinary "unidentified developer" path, and
+      # UPDATE_ENABLED stays unset because Squirrel.Mac refuses to swap an app
+      # it cannot verify a Developer ID signature for.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,24 +43,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Require Apple release credentials
-        shell: bash
-        run: |
-          test -n "${CSC_LINK}"
-          test -n "${CSC_KEY_PASSWORD}"
-          test -n "${APPLE_ID}"
-          test -n "${APPLE_APP_SPECIFIC_PASSWORD}"
-          test -n "${APPLE_TEAM_ID}"
-      - name: Build, sign, notarize, and publish macOS release
-        run: npx electron-builder --config scripts/release-config.js --mac dmg zip --universal --publish always
+      - name: Build and publish macOS release
+        run: npx electron-builder --config scripts/release-config.js --mac dmg zip --arm64 --x64 --publish always
 
   windows:
     needs: test
     runs-on: windows-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      # Unsigned NSIS builds still auto-update; only SmartScreen changes.
+      UPDATE_ENABLED: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -69,11 +60,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Require Windows release credentials
-        shell: bash
-        run: |
-          test -n "${CSC_LINK}"
-          test -n "${CSC_KEY_PASSWORD}"
       - name: Build and publish Windows release
         run: npx electron-builder --config scripts/release-config.js --win --x64 --publish always
 
