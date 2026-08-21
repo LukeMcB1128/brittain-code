@@ -18,6 +18,7 @@ const { createHistoryStore } = require('./src/main/history-store');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
+const { outcomeOf } = require('./src/main/ledger');
 const { retainedBudget, tailBudget, summaryBudget, selectVerbatimTail, validateSummary, retryInstruction, describeCompaction } = require('./src/main/compaction');
 const { createCheckpointService } = require('./src/main/checkpoint-service');
 const { createDiffService } = require('./src/main/diff-service');
@@ -1078,8 +1079,12 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           win.webContents.send('stream:toolresult', { name, result: preview(result) });
         }
 
-        recordToolTelemetry(result, /denied by user/i.test(String(result)));
-        if (!String(result).startsWith('Error:') && !/denied by user/.test(String(result))) {
+        // "denied by user" is the label the UI shows, never text the tool result
+        // carries — testing for it here counted every denial as a success and
+        // logged denied writes as mutations. Match the denial sentences instead.
+        const toolOutcome = outcomeOf(result);
+        recordToolTelemetry(result, toolOutcome === 'denied');
+        if (toolOutcome === 'ok') {
           if (RISKY_TOOLS.has(name) && name !== 'run_command' && args?.path) runLog.mutations.add(String(args.path));
           if (name === 'move_file' || name === 'copy_file') runLog.mutations.add(String(args.destination || ''));
           if (name === 'run_command' && args?.command) {
