@@ -133,3 +133,41 @@ test('a malformed policy is treated conservatively rather than permissively', ()
   assert.equal(decide({}, { name: 'write_file', risky: true, attended: false }).verdict, 'defer');
   assert.equal(decide({ allow: null, deny: null }, { name: 'write_file', risky: true }).verdict, 'ask');
 });
+
+test('the dial is wired end to end and the old checkbox is gone', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const root = path.join(__dirname, '..', '..');
+  const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
+
+  const html = read('renderer/index.html');
+  const app = read('renderer/app.js');
+
+  assert.match(html, /<select id="autonomy-select">/);
+  assert.doesNotMatch(html, /id="auto-approve"/, 'two controls for one concept is how an unintended write happens');
+  assert.doesNotMatch(html, /id="setting-auto-approve"/, 'the settings duplicate goes too');
+  assert.doesNotMatch(app, /autoApprove\.checked/);
+
+  assert.match(app, /window\.api\.autonomyState\(\)/);
+  assert.match(app, /window\.api\.autonomySet\(wanted\)/);
+  assert.match(app, /confirmDialog\(/, 'choosing an unattended policy is a deliberate act');
+  assert.match(app, /document\.body\.dataset\.autonomy/, 'unattended runs must be visible at a glance');
+
+  assert.match(read('preload.js'), /autonomyState: \(\) => ipcRenderer\.invoke\('autonomy:state'\)/);
+  assert.match(read('main.js'), /ipcMain\.handle\('autonomy:state'/);
+  assert.match(read('main.js'), /ipcMain\.handle\('autonomy:set'/);
+});
+
+test('every approval path in main.js goes through the policy', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const main = fs.readFileSync(path.join(__dirname, '..', '..', 'main.js'), 'utf8');
+
+  // requestApproval should only be reachable via resolveToolCall now, so the
+  // policy cannot be bypassed by adding a branch that prompts directly.
+  const direct = [...main.matchAll(/await requestApproval\(/g)].length;
+  assert.equal(direct, 1, 'requestApproval should have exactly one caller: resolveToolCall');
+  assert.match(main, /async function resolveToolCall\(/);
+  assert.match(main, /decideAutonomy\(policy, \{/);
+  assert.match(main, /deferredCalls\.push\(/, 'a deferred call must be recorded for review');
+});

@@ -177,7 +177,27 @@ function policyForLegacyAutoApprove(autoApprove) {
   return autoApprove ? 'trusted' : 'supervised';
 }
 
+// Custom policies live beside mcp.json, in the same spirit: a plain file the
+// user owns, surfaced by a slash command rather than buried in a settings pane.
+function loadCustomPolicies(userDataDir) {
+  const fs = require('fs');
+  const path = require('path');
+  const configPath = path.join(userDataDir, 'autonomy.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const policies = parsed?.policies && typeof parsed.policies === 'object' ? parsed.policies : {};
+    // Built-ins are not overridable: their whole value is that they mean the
+    // same thing in every install.
+    for (const id of Object.keys(BUILT_IN)) delete policies[id];
+    return { policies, configPath, error: '' };
+  } catch (error) {
+    const missing = error?.code === 'ENOENT';
+    return { policies: {}, configPath, error: missing ? '' : String(error.message || error) };
+  }
+}
+
 module.exports = {
+  loadCustomPolicies,
   decide,
   checkPreconditions,
   normalizePolicy,

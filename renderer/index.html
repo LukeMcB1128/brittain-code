@@ -29,9 +29,9 @@
       <input type="checkbox" id="online-research" />
       <span>ONLINE</span>
     </label>
-    <label class="toggle code-only" title="When on, file writes and shell commands run without asking">
-      <input type="checkbox" id="auto-approve" />
-      <span>AUTO-APPROVE</span>
+    <label class="toggle code-only" id="autonomy-control" title="How much this run may do without asking">
+      <span>AUTONOMY</span>
+      <select id="autonomy-select"></select>
     </label>
     <label class="toggle code-only" title="When on, agents work on an auto-created brittain/ git branch instead of your current branch — merge or discard after review">
       <input type="checkbox" id="auto-branch" />
@@ -233,7 +233,6 @@
           <label class="check-row"><input id="setting-code-think" type="checkbox" /> Think in Code</label>
           <label class="check-row"><input id="setting-chat-think" type="checkbox" /> Think in Chat</label>
           <label class="check-row"><input id="setting-sidebar-open" type="checkbox" /> History sidebar open</label>
-          <label class="check-row"><input id="setting-auto-approve" type="checkbox" /> Auto-approve in Code</label>
           <label class="check-row"><input id="setting-auto-branch" type="checkbox" /> Auto-branch in Code</label>
           <label class="check-row"><input id="setting-review-mode" type="checkbox" /> Review mode in Code</label>
           <p class="setting-help">Online always starts off for privacy.</p>

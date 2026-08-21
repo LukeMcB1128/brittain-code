@@ -6,7 +6,53 @@ const input = $('input');
 const sendBtn = $('send-btn');
 const stopBtn = $('stop-btn');
 const modelSelect = $('model-select');
-const autoApprove = $('auto-approve');
+const autonomySelect = $('autonomy-select');
+
+// Autonomy replaced the AUTO-APPROVE checkbox: one control for one concept,
+// because two overlapping supervision controls is how an unsupervised write
+// happens that nobody intended.
+let autonomyPolicy = 'supervised';
+let autonomyPolicies = [];
+const autonomyDescription = (id) => autonomyPolicies.find((entry) => entry.id === id)?.description || '';
+// Anything other than the two attended stops runs risky tools without asking.
+const runsUnattended = () => autonomyPolicy !== 'supervised' && autonomyPolicy !== 'guarded';
+
+async function loadAutonomy() {
+  const state = await window.api.autonomyState();
+  if (!state?.ok) return;
+  autonomyPolicies = state.policies;
+  autonomyPolicy = state.current;
+  autonomySelect.innerHTML = '';
+  for (const policy of state.policies) {
+    const option = document.createElement('option');
+    option.value = policy.id;
+    option.textContent = policy.label;
+    option.title = policy.description;
+    autonomySelect.appendChild(option);
+  }
+  autonomySelect.value = autonomyPolicy;
+  document.body.dataset.autonomy = runsUnattended() ? 'unattended' : 'attended';
+  $('autonomy-control').title = autonomyDescription(autonomyPolicy) || 'How much this run may do without asking';
+}
+
+autonomySelect.addEventListener('change', async () => {
+  const wanted = autonomySelect.value;
+  const previous = autonomyPolicy;
+  // Selecting an unattended policy for the first time in a project should be a
+  // deliberate act, not a stray click on a dropdown.
+  if (wanted !== previous && wanted !== 'supervised' && wanted !== 'guarded') {
+    const confirmed = await confirmDialog(
+      `Switch autonomy to "${autonomyPolicies.find((entry) => entry.id === wanted)?.label || wanted}"?\n\n`
+      + `${autonomyDescription(wanted)}\n\n`
+      + 'Risky tool calls will run without asking. Destructive operations, sensitive reads, and external MCP tools still require approval.',
+      { okLabel: 'SWITCH', danger: true }
+    );
+    if (!confirmed) { autonomySelect.value = previous; return; }
+  }
+  const res = await window.api.autonomySet(wanted);
+  if (!res.ok) { autonomySelect.value = previous; return addError(res.error); }
+  await loadAutonomy();
+});
 const chatList = $('chat-list');
 const sidebar = $('sidebar');
 const thinkToggle = $('think-toggle');
@@ -45,6 +91,8 @@ setAppMode(appMode, false, false);
     if (appSettings.defaultMode !== 'last') appMode = appSettings.defaultMode;
     setAppMode(appMode, false, false);
   }
+
+  await loadAutonomy();
 
   const models = await reloadModels(defaultModelForMode(appMode));
 
@@ -275,7 +323,7 @@ $('onboarding-ollama').addEventListener('click', () => window.api.openOllamaSite
 
 function applySessionDefaults() {
   thinkToggle.checked = appSettings ? !!appSettings[appMode === 'chat' ? 'chatThink' : 'codeThink'] : localStorage.getItem('think') === '1';
-  autoApprove.checked = appSettings ? !!appSettings.autoApprove : localStorage.getItem('autoApprove') === '1';
+  
   autoBranchToggle.checked = appSettings ? !!appSettings.autoBranch : localStorage.getItem('autoBranch') === '1';
   reviewToggle.checked = appSettings ? !!appSettings.reviewMode : localStorage.getItem('reviewMode') === '1';
   sidebar.classList.toggle('hidden', appSettings ? !appSettings.sidebarOpen : false);
@@ -285,7 +333,7 @@ function applySessionDefaults() {
 }
 
 thinkToggle.addEventListener('change', () => localStorage.setItem('think', thinkToggle.checked ? '1' : '0'));
-autoApprove.addEventListener('change', () => localStorage.setItem('autoApprove', autoApprove.checked ? '1' : '0'));
+
 autoBranchToggle.addEventListener('change', () => localStorage.setItem('autoBranch', autoBranchToggle.checked ? '1' : '0'));
 reviewToggle.addEventListener('change', () => localStorage.setItem('reviewMode', reviewToggle.checked ? '1' : '0'));
 onlineResearchToggle.addEventListener('change', async () => {
@@ -575,7 +623,7 @@ async function saveChat() {
       mode: appMode,
       cwd: appMode === 'code' ? cwd || '' : '',
       think: thinkToggle.checked,
-      autoApprove: autoApprove.checked,
+      autoApprove: runsUnattended(),
       autoBranch: autoBranchToggle.checked,
       onlineResearch: onlineResearchToggle.checked,
       subModel,
@@ -631,10 +679,7 @@ async function loadChat(chatId) {
     thinkToggle.checked = !!saved.think;
     localStorage.setItem('think', saved.think ? '1' : '0');
   }
-  if ('autoApprove' in saved) {
-    autoApprove.checked = !!saved.autoApprove;
-    localStorage.setItem('autoApprove', saved.autoApprove ? '1' : '0');
-  }
+
 
   loadChatHistory(); // refresh active highlight
   if (!cwdChanged) refreshGit();
@@ -858,7 +903,7 @@ async function send() {
     text,
     mode: appMode,
     cwd: appMode === 'code' ? cwd : null,
-    autoApprove: appMode === 'code' && autoApprove.checked,
+    autoApprove: appMode === 'code' && runsUnattended(),
     autoBranch: appMode === 'code' && autoBranchToggle.checked,
     onlineResearch: onlineResearchToggle.checked,
     think: thinkToggle.checked,
@@ -1336,7 +1381,7 @@ async function runApprovedPlan(plan) {
       subModel,
       goal: draft.goal,
       cwd: draft.cwd,
-      autoApprove: autoApprove.checked,
+      autoApprove: runsUnattended(),
       onlineResearch: draft.onlineResearch,
       think: thinkToggle.checked,
       plan,
@@ -1650,7 +1695,6 @@ function fillSettingsForm(settings) {
   $('setting-code-think').checked = !!settings.codeThink;
   $('setting-chat-think').checked = !!settings.chatThink;
   $('setting-sidebar-open').checked = !!settings.sidebarOpen;
-  $('setting-auto-approve').checked = !!settings.autoApprove;
   $('setting-auto-branch').checked = !!settings.autoBranch;
   $('setting-review-mode').checked = !!settings.reviewMode;
   $('setting-mcp-auto-approve').checked = !!settings.mcpAutoApprove;
@@ -1681,7 +1725,6 @@ function settingsFromForm() {
     codeThink: $('setting-code-think').checked,
     chatThink: $('setting-chat-think').checked,
     sidebarOpen: $('setting-sidebar-open').checked,
-    autoApprove: $('setting-auto-approve').checked,
     autoBranch: $('setting-auto-branch').checked,
     reviewMode: $('setting-review-mode').checked,
     mcpAutoApprove: $('setting-mcp-auto-approve').checked,
@@ -1857,7 +1900,7 @@ async function handleSlash(raw) {
       const m = goal.match(/^(\d+)\s+([\s\S]+)/);
       if (m) { iterations = parseInt(m[1], 10); goal = m[2].trim(); }
       if (!goal) return addError('Usage: /loop [iterations] <goal> — e.g. /loop 10 make all tests pass');
-      if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the loop will pause for every risky tool call. Turn it on for unattended runs.');
+      if (!runsUnattended()) addInfo('Heads up: autonomy is set to ' + (autonomyPolicies.find((entry) => entry.id === autonomyPolicy)?.label || autonomyPolicy) + ', so the loop will pause for approval. Pick a less supervised policy for unattended runs.');
 
       addMessage('user', `LOOP (max ${iterations}): ${goal}`);
       startRun();
@@ -1867,7 +1910,7 @@ async function handleSlash(raw) {
           subModel,
           goal,
           cwd,
-          autoApprove: autoApprove.checked,
+          autoApprove: runsUnattended(),
           autoBranch: autoBranchToggle.checked,
           onlineResearch: onlineResearchToggle.checked,
           think: thinkToggle.checked,
@@ -1949,7 +1992,7 @@ async function handleSlash(raw) {
               coderModel,
               cwd: reviewCwd,
               findings: selected.map((finding) => ({ ...finding, suggested_fix: finding.suggestedFix })),
-              autoApprove: autoApprove.checked,
+              autoApprove: runsUnattended(),
               autoBranch: autoBranchToggle.checked,
               think: thinkToggle.checked,
             });
@@ -1976,7 +2019,7 @@ async function handleSlash(raw) {
       if (!coderModel) return addError('No coder model selected. Use /coder <name>.');
       if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
       if (!arg) return addError('Usage: /orchestrate <goal>');
-      if (!autoApprove.checked) addInfo('AUTO-APPROVE is off. The coding worker will pause for file writes and commands; online requests always require separate approval.');
+      if (!runsUnattended()) addInfo('Autonomy is supervised, so the coding worker will pause for file writes and commands; online requests always require separate approval.');
 
       addMessage('user', `ORCHESTRATE: ${arg}`);
       startRun();
@@ -1988,7 +2031,7 @@ async function handleSlash(raw) {
           subModel,
           goal: arg,
           cwd,
-          autoApprove: autoApprove.checked,
+          autoApprove: runsUnattended(),
           onlineResearch: onlineResearchToggle.checked,
           think: thinkToggle.checked,
         });
@@ -2024,7 +2067,7 @@ async function handleSlash(raw) {
           const res = await window.api.missionResume({
             cwd,
             chatId: currentChatId,
-            autoApprove: autoApprove.checked,
+            autoApprove: runsUnattended(),
             onlineResearch: onlineResearchToggle.checked,
             think: thinkToggle.checked,
           });
@@ -2046,7 +2089,7 @@ async function handleSlash(raw) {
       const match = goal.match(/^(\d+)\s+([\s\S]+)/);
       if (match) { iterations = parseInt(match[1], 10); goal = match[2].trim(); }
       if (!goal) return addError('Usage: /mission [iterations] <goal> — e.g. /mission 12 add CSV export and verify it');
-      if (!autoApprove.checked) addInfo('Heads up: AUTO-APPROVE is off, so the mission will pause for every risky tool call. Turn it on for unattended runs.');
+      if (!runsUnattended()) addInfo('Heads up: autonomy is set to ' + (autonomyPolicies.find((entry) => entry.id === autonomyPolicy)?.label || autonomyPolicy) + ', so the mission will pause for approval. Pick a less supervised policy for unattended runs.');
 
       // A mission belongs to the chat that started it, not every chat in its
       // project. Allocate an ID now because a new chat is normally saved only
@@ -2061,7 +2104,7 @@ async function handleSlash(raw) {
           subModel,
           goal,
           cwd,
-          autoApprove: autoApprove.checked,
+          autoApprove: runsUnattended(),
           autoBranch: autoBranchToggle.checked,
           onlineResearch: onlineResearchToggle.checked,
           think: thinkToggle.checked,

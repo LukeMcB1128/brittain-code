@@ -20,6 +20,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   chatThink: false,
   sidebarOpen: true,
   autoApprove: false,
+  // Which named autonomy policy a run uses. Empty means "derive it from
+  // autoApprove", which is how an existing install keeps its behaviour on
+  // upgrade: checked lands on trusted, unchecked on supervised.
+  autonomyPolicy: '',
   autoBranch: false,
   reviewMode: false,
   mcpAutoApprove: false,
@@ -82,6 +86,7 @@ function normalizeSettings(input = {}) {
     chatThink: !!merged.chatThink,
     sidebarOpen: !!merged.sidebarOpen,
     autoApprove: !!merged.autoApprove,
+    autonomyPolicy: cleanText(merged.autonomyPolicy, 80),
     autoBranch: !!merged.autoBranch,
     reviewMode: !!merged.reviewMode,
     mcpAutoApprove: !!merged.mcpAutoApprove,

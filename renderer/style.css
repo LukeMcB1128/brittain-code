@@ -1160,3 +1160,31 @@ button.mini:disabled {
   #history-btn { margin-left: auto; }
   #statusbar { flex-wrap: wrap; }
 }
+
+
+/* The autonomy dial replaces a checkbox, so it borrows the toggle's shape but
+   needs room for a policy name. */
+#autonomy-control {
+  gap: 6px;
+}
+
+#autonomy-select {
+  font: inherit;
+  font-size: 11px;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 1px 4px;
+  max-width: 140px;
+}
+
+/* An unattended run should be recognisable without reading the dropdown. */
+body[data-autonomy="unattended"] #autonomy-control {
+  color: #d98b2b;
+  font-weight: 600;
+}
+
+body[data-autonomy="unattended"] #autonomy-select {
+  border-color: #d98b2b;
+}

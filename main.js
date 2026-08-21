@@ -17,6 +17,7 @@ const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore } = require('./src/main/history-store');
 const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
+const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies } = require('./src/main/autonomy');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
@@ -51,6 +52,7 @@ const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user mess
 // OLLAMA_KV_CACHE_TYPE=q8_0 via launchctl setenv); drop to 32_768 without it.
 const NUM_CTX_CAP = 131_072; // sized for heavy use
 let runtimeSettings = { ...DEFAULT_SETTINGS };
+let customPolicies = { policies: {}, configPath: '', error: '' };
 let settingsUserDataDir = '';
 
 function inferenceEndpoint() {
@@ -341,6 +343,7 @@ const modelInstaller = createModelInstallService({
 app.whenReady().then(() => {
   settingsUserDataDir = app.getPath('userData');
   runtimeSettings = loadSettings(settingsUserDataDir);
+  customPolicies = loadCustomPolicies(settingsUserDataDir);
   recoverMission();
   initTools(settingsUserDataDir);
   // MCP servers connect in the background; status via /mcp
@@ -474,6 +477,57 @@ function requestApproval(info) {
     pendingApprovals.set(id, resolve);
     win.webContents.send('approval:request', { id, ...info });
   });
+}
+
+// Classifying a call once, in one place, is what lets the policy answer the
+// same question the approval chain used to answer inline six times over.
+function classifyToolCall(name, args) {
+  return {
+    name,
+    network: NETWORK_TOOLS.has(name),
+    destructive: DESTRUCTIVE_TOOLS.has(name)
+      || (name === 'run_command' && isDestructiveCommand(args?.command)),
+    mcp: mcp.owns(name),
+    sensitive: isSensitiveToolCall(name, args),
+    risky: RISKY_TOOLS.has(name),
+  };
+}
+
+// Records what an unattended run wanted to do but was not permitted to. This is
+// the tray a person reads when they come back, and the raw material for tuning
+// a policy: a defer that keeps recurring harmlessly is a candidate to allow.
+let deferredCalls = [];
+
+function activePolicy(autoApprove) {
+  // Until the dial replaces it everywhere, an explicit policy wins and the old
+  // checkbox maps onto the stop that preserves its behaviour.
+  const id = runtimeSettings.autonomyPolicy || policyForLegacyAutoApprove(!!autoApprove);
+  return { id, policy: getPolicy(id, customPolicies.policies) };
+}
+
+// Resolves one tool call to an executable decision. `attended` is what makes
+// this different from the boolean it replaces: with nobody watching, a call
+// that would have prompted is recorded and skipped instead of hanging.
+async function resolveToolCall(name, args, { autoApprove, onlineResearch, attended = true, promptKind = {} }) {
+  const { id, policy } = activePolicy(autoApprove);
+  const call = classifyToolCall(name, args);
+  const decision = decideAutonomy(policy, {
+    ...call,
+    attended,
+    onlineResearch,
+    toolCalls: usage.metrics.toolCalls,
+  });
+
+  if (decision.verdict === 'allow') return { approved: true, ...decision, policyId: id };
+  if (decision.verdict === 'ask') {
+    const approved = await requestApproval({ name, args, ...promptKind });
+    return { approved, ...decision, policyId: id };
+  }
+  if (decision.verdict === 'defer') {
+    deferredCalls.push({ name, args, reason: decision.reason, at: new Date().toISOString() });
+    sink.emit('stream:info', `Deferred ${name} — ${decision.reason}. Recorded for review.`);
+  }
+  return { approved: false, ...decision, policyId: id };
 }
 
 function isSensitiveToolCall(name, args) {
@@ -1034,7 +1088,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
             result = 'Online research is disabled. Do not retry this tool; continue offline or ask the user to enable ONLINE RESEARCH.';
             sink.emit('stream:toolresult', { name, result: preview(result), denied: true });
           } else {
-            const approved = await requestApproval({ name, args, network: true });
+            const { approved } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { network: true } });
             result = approved
               ? await safeExecute(name, args, cwd)
               : 'The user denied this online request. Do not retry it unless the user explicitly changes direction.';
@@ -1045,15 +1099,15 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
             result = await safeExecute(name, args, cwd);
             sink.emit('stream:toolresult', { name, result: preview(result) });
           } else {
-            const approved = await requestApproval({ name, args, destructive: true });
+            const { approved } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { destructive: true } });
             result = approved
               ? await safeExecute(name, args, cwd)
               : 'The user denied this destructive operation. Do not retry it unless the user explicitly asks.';
             sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(destructive operation denied by user)', denied: !approved });
           }
         } else if (name === 'run_command' && isDestructiveCommand(args.command)) {
-          // destructive shell patterns bypass AUTO-APPROVE — always ask
-          const approved = await requestApproval({ name, args, destructive: true });
+          // destructive shell patterns are never automatic, whatever the policy says
+          const { approved } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { destructive: true } });
           result = approved
             ? await safeExecute(name, args, cwd)
             : 'The user denied this destructive command. Do not retry it or any variation of it unless the user explicitly asks.';
@@ -1064,7 +1118,8 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           // mcpAutoApprove setting is the ONLY thing that waives that prompt —
           // opt-in, off by default, and gated behind a disclaimer in Settings.
           const autoApproved = !!runtimeSettings.mcpAutoApprove;
-          const approved = autoApproved || await requestApproval({ name, args, mcp: true });
+          const approved = autoApproved
+            || (await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { mcp: true } })).approved;
           if (approved) {
             const callResult = await mcp.call(name, args);
             result = autoApproved ? '[MCP auto-approved] ' + callResult : callResult;
@@ -1073,7 +1128,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           }
           sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(MCP call denied by user)', denied: !approved });
         } else if (isSensitiveToolCall(name, args)) {
-          const approved = await requestApproval({ name, args, sensitive: true });
+          const { approved } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { sensitive: true } });
           result = approved
             ? await safeExecute(name, args, cwd)
             : 'The user denied this sensitive read. Do not retry it unless the user explicitly asks.';
@@ -1081,12 +1136,14 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
         } else if (name === 'apply_patch' && args.dry_run !== false) {
           result = await safeExecute(name, args, cwd);
           sink.emit('stream:toolresult', { name, result: preview(result) });
-        } else if (RISKY_TOOLS.has(name) && !autoApprove) {
-          const approved = await requestApproval({ name, args });
+        } else if (RISKY_TOOLS.has(name)) {
+          const { approved, verdict } = await resolveToolCall(name, args, { autoApprove, onlineResearch });
           result = approved
             ? await safeExecute(name, args, cwd)
-            : 'The user denied this tool call. Ask before retrying, or try another approach.';
-          if (!approved) sink.emit('stream:toolresult', { name, result: '(denied by user)', denied: true });
+            : verdict === 'defer'
+              ? 'This tool call was not permitted for an unattended run and has been recorded for review. Continue without it.'
+              : 'The user denied this tool call. Ask before retrying, or try another approach.';
+          if (!approved) sink.emit('stream:toolresult', { name, result: `(${verdict === 'defer' ? 'deferred by policy' : 'denied by user'})`, denied: true });
           else sink.emit('stream:toolresult', { name, result: preview(result) });
         } else {
           result = await safeExecute(name, args, cwd);
@@ -1633,28 +1690,28 @@ async function compactScopedMessages(model, msgs, numCtx, role, usageBucket, con
 }
 
 async function executeWithApproval(name, args, cwd, autoApprove, onlineResearch) {
-  if (NETWORK_TOOLS.has(name)) {
-    if (!onlineResearch) return 'Online research is disabled. Continue using only local project evidence.';
-    const approved = await requestApproval({ name, args, network: true });
-    return approved
-      ? safeExecute(name, args, cwd)
-      : 'The user denied this online request. Do not retry it.';
-  }
-  if (DESTRUCTIVE_TOOLS.has(name)) {
-    if (args.dry_run !== false) return safeExecute(name, args, cwd);
-    const approved = await requestApproval({ name, args, destructive: true });
-    return approved ? safeExecute(name, args, cwd) : 'The user denied this destructive operation.';
-  }
-  if (isSensitiveToolCall(name, args)) {
-    const approved = await requestApproval({ name, args, sensitive: true });
-    return approved ? safeExecute(name, args, cwd) : 'The user denied this sensitive read.';
-  }
+  // Previews never write, so they never need a decision.
+  if (DESTRUCTIVE_TOOLS.has(name) && args.dry_run !== false) return safeExecute(name, args, cwd);
   if (name === 'apply_patch' && args.dry_run !== false) return safeExecute(name, args, cwd);
-  if (RISKY_TOOLS.has(name) && !autoApprove) {
-    const approved = await requestApproval({ name, args });
-    return approved ? safeExecute(name, args, cwd) : 'The user denied this tool call.';
+
+  const promptKind = NETWORK_TOOLS.has(name) ? { network: true }
+    : DESTRUCTIVE_TOOLS.has(name) ? { destructive: true }
+    : isSensitiveToolCall(name, args) ? { sensitive: true }
+    : {};
+  const { approved, verdict } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind });
+  if (approved) return safeExecute(name, args, cwd);
+
+  if (verdict === 'defer') {
+    return 'This tool call was not permitted for an unattended run and has been recorded for review. Continue without it.';
   }
-  return safeExecute(name, args, cwd);
+  if (NETWORK_TOOLS.has(name)) {
+    return onlineResearch
+      ? 'The user denied this online request. Do not retry it.'
+      : 'Online research is disabled. Continue using only local project evidence.';
+  }
+  if (DESTRUCTIVE_TOOLS.has(name)) return 'The user denied this destructive operation.';
+  if (isSensitiveToolCall(name, args)) return 'The user denied this sensitive read.';
+  return 'The user denied this tool call.';
 }
 
 function orchestratorSystemPrompt(cwd, onlineResearch, taskBudget = 0) {
@@ -2819,6 +2876,37 @@ ipcMain.handle('chat:reset', () => {
 });
 
 ipcMain.handle('usage:get', () => usage);
+
+// The dial's contents, plus anything an unattended run wanted to do and was not
+// permitted to — the tray that makes a policy tunable rather than guesswork.
+ipcMain.handle('autonomy:state', () => {
+  const all = listPolicies(customPolicies.policies);
+  return {
+    ok: true,
+    current: runtimeSettings.autonomyPolicy || policyForLegacyAutoApprove(!!runtimeSettings.autoApprove),
+    configPath: customPolicies.configPath,
+    configError: customPolicies.error,
+    policies: Object.entries(all).map(([id, policy]) => ({
+      id,
+      label: policy.label || id,
+      description: policy.description || '',
+      builtIn: Object.prototype.hasOwnProperty.call(require('./src/main/autonomy').BUILT_IN, id),
+    })),
+    deferred: deferredCalls.map((entry) => ({ name: entry.name, reason: entry.reason, at: entry.at })),
+  };
+});
+
+ipcMain.handle('autonomy:set', (_e, id) => {
+  const wanted = String(id || '');
+  if (!getPolicy(wanted, customPolicies.policies)) return { ok: false, error: `No autonomy policy named "${wanted}".` };
+  runtimeSettings = saveSettings(settingsUserDataDir, normalizeSettings({
+    ...runtimeSettings,
+    autonomyPolicy: wanted,
+    // Keep the legacy flag consistent so anything still reading it agrees.
+    autoApprove: wanted === 'trusted',
+  }));
+  return { ok: true, current: wanted };
+});
 
 // What this session did, read off the live conversation plus every ledger
 // already written out by a compaction. Live and stored are shown separately

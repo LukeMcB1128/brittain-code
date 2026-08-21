@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('api', {
   gitCommit: (cwd, message) => ipcRenderer.invoke('git:commit', cwd, message),
   memoryGet: (cwd) => ipcRenderer.invoke('memory:get', cwd),
   ledgerGet: () => ipcRenderer.invoke('ledger:get'),
+  autonomyState: () => ipcRenderer.invoke('autonomy:state'),
+  autonomySet: (id) => ipcRenderer.invoke('autonomy:set', id),
   usageGet: () => ipcRenderer.invoke('usage:get'),
   mcpStatus: () => ipcRenderer.invoke('mcp:status'),
   mcpToggle: (name, on) => ipcRenderer.invoke('mcp:toggle', name, on),
