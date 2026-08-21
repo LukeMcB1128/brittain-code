@@ -1601,6 +1601,28 @@ $('history-btn').addEventListener('click', () => {
   sidebar.classList.toggle('hidden');
 });
 
+const compactOptions = $('compact-options');
+const compactOptionsButton = $('compact-options-btn');
+const compactOptionsMenu = $('compact-options-menu');
+function setCompactOptionsOpen(open) {
+  compactOptions.classList.toggle('open', open);
+  compactOptionsButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) {
+    const bounds = compactOptionsButton.getBoundingClientRect();
+    compactOptionsMenu.style.top = `${Math.round(bounds.bottom + 6)}px`;
+    compactOptionsMenu.style.right = `${Math.round(window.innerWidth - bounds.right)}px`;
+  }
+}
+compactOptionsButton.addEventListener('click', (event) => {
+  event.stopPropagation();
+  setCompactOptionsOpen(!compactOptions.classList.contains('open'));
+});
+document.addEventListener('click', (event) => {
+  if (!compactOptions.contains(event.target)) {
+    setCompactOptionsOpen(false);
+  }
+});
+
 async function newSession() {
   if (busy) return;
   await window.api.reset();

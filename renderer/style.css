@@ -32,6 +32,8 @@ body { display: flex; flex-direction: column; }
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  position: relative;
+  z-index: 200;
   gap: 10px;
   padding: 8px 12px;
   background: var(--bg-panel);
@@ -69,6 +71,7 @@ body { display: flex; flex-direction: column; }
 }
 
 body[data-mode="chat"] .code-only { display: none !important; }
+body[data-mode="chat"] #compact-options { display: none !important; }
 
 .spacer { flex: 1; }
 
@@ -97,6 +100,12 @@ select:hover, button:hover { border-color: var(--text-dim); }
 button:active { background: var(--border); }
 
 #cwd-label { color: var(--accent); }
+
+/* Keep the full-width controls in the document flow. At normal window widths
+   this group changes into an explicit options menu instead of wrapping. */
+#compact-options { display: flex; align-items: center; }
+#compact-options-btn { display: none; }
+#compact-options-menu { display: flex; align-items: center; gap: 10px; }
 
 .toggle {
   display: flex;
@@ -1159,6 +1168,72 @@ button.mini:disabled {
   .spacer { display: none; }
   #history-btn { margin-left: auto; }
   #statusbar { flex-wrap: wrap; }
+}
+
+/* Full-screen has room for all labels. Most windowed layouts do not, so keep
+   the primary controls on one line and place the secondary group in MORE. */
+@media (max-width: 2850px) {
+  #topbar {
+    flex-wrap: nowrap;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .brand { letter-spacing: 1px; }
+  .dev-tag { display: none; }
+  #model-select { flex: 0 1 360px; min-width: 180px; }
+  #cwd-btn {
+    flex: 1 1 360px;
+    min-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #cwd-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #history-btn { font-size: 0; padding: 5px 9px; }
+  #history-btn::before { content: "◷"; font-size: 16px; line-height: 12px; }
+  #topbar > .toggle { gap: 5px; }
+  #topbar #autonomy-select { max-width: 120px; }
+  .spacer { flex: 0 1 8px; }
+
+  #compact-options {
+    display: block;
+    flex: 0 0 auto;
+  }
+  #compact-options-btn {
+    display: block;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .5px;
+    padding: 5px 8px;
+  }
+  #compact-options-btn::after { content: " ▾"; color: var(--text-dim); }
+  #compact-options.open #compact-options-btn { border-color: var(--accent); }
+  #compact-options-menu {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    width: max-content;
+    min-width: 180px;
+    padding: 8px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, .35);
+  }
+  #compact-options.open #compact-options-menu { display: grid; gap: 8px; }
+  #compact-options-menu .toggle { padding: 4px 2px; }
+}
+
+@media (max-width: 1250px) {
+  #topbar { overflow-x: auto; }
+  #mode-switch .mode-btn { padding-inline: 7px; }
+  #model-select { max-width: 220px; }
+  #cwd-btn { flex-basis: 180px; max-width: 280px; }
+  #history-btn { display: none; }
 }
 
 
