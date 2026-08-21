@@ -10,7 +10,7 @@
   },
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "node scripts/start.js",
     "test": "node scripts/run-tests.js",
     "dist": "electron-builder --mac dmg zip",
     "deploy": "electron-builder --mac dir && rm -rf '/Applications/Brittain Code.app' && cp -R 'dist/mac-arm64/Brittain Code.app' /Applications/ && echo 'Deployed to /Applications'",
@@ -66,7 +66,7 @@
   },
   "devDependencies": {
     "dompurify": "^3.4.11",
-    "electron": "^31.0.0",
+    "electron": "^43.4.0",
     "electron-builder": "^24.13.3",
     "marked": "^18.0.5"
   },
