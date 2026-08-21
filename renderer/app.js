@@ -2253,8 +2253,12 @@ async function handleSlash(raw) {
     case 'context': {
       const res = await window.api.contextInspect({ model: modelSelect.value, cwd, mode: appMode, onlineResearch: onlineResearchToggle.checked });
       if (!res.ok) return addError(res.error);
+      const toolLabel = res.toolCount
+        ? `TOOL SCHEMAS  — ${res.toolTokens.toLocaleString()} tok (${res.toolCount} definitions${res.mcpToolCount ? `, ${res.mcpToolCount} from MCP` : ''})`
+        : 'TOOL SCHEMAS  — 0 tok (no tools sent in this mode)';
       const lines = [
         `SYSTEM PROMPT — ${res.systemTokens.toLocaleString()} tok`,
+        toolLabel,
         '',
         `${res.messageCount} message(s) in conversation:`,
       ];

@@ -966,17 +966,25 @@ function systemPrompt(cwd, model = '', onlineResearch = false) {
 
 // One full agent turn: stream → tools → repeat until the model stops calling
 // tools or a cap is hit. Shared by chat:send and chat:loop.
-async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineResearch = false, mode = 'code') {
-  const chatMode = mode === 'chat';
-  const prompt = chatMode ? chatSystemPrompt(onlineResearch) : systemPrompt(cwd, model, onlineResearch);
-  const messages = () => [{ role: 'system', content: prompt }, ...modelReadyMessages(conversation)];
+// Single source of truth for the tool payload actually sent with a request.
+// The context inspector calls this too, so "what will actually be sent" cannot
+// silently drift from what runAgentTurn sends — the exact bug that made /context
+// under-report by the whole tool schema.
+function activeToolDefs(chatMode, onlineResearch) {
   const modeTools = chatMode ? CHAT_TOOLS : TOOL_DEFS;
   const activeTools = chatMode
     ? (onlineResearch ? modeTools : null)
     : (onlineResearch ? modeTools : modeTools.filter((definition) => !NETWORK_TOOLS.has(definition.function.name)));
-  // external MCP tools go for all
   const mcpDefs = mcp.toolDefs();
-  const agentTools = activeTools ? activeTools.concat(mcpDefs) : activeTools;
+  return activeTools ? activeTools.concat(mcpDefs) : activeTools;
+}
+
+async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineResearch = false, mode = 'code') {
+  const chatMode = mode === 'chat';
+  const prompt = chatMode ? chatSystemPrompt(onlineResearch) : systemPrompt(cwd, model, onlineResearch);
+  const messages = () => [{ role: 'system', content: prompt }, ...modelReadyMessages(conversation)];
+  // external MCP tools go for all
+  const agentTools = activeToolDefs(chatMode, onlineResearch);
   const activeToolNames = new Set((agentTools || []).map((definition) => definition.function.name));
   // report the window we actually run with, not the model's theoretical max
   const contextLength = await effectiveContext(model);
@@ -3280,12 +3288,20 @@ ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch 
     });
 
     const systemTokens = estimateTokens({ role: 'system', content: prompt });
-    const totalTokens = systemTokens + rows.reduce((sum, r) => sum + r.tokens, 0);
+    // Tool schemas are part of every request and are usually the largest single
+    // component in code mode, so they belong in the total the inspector reports.
+    const toolDefs = activeToolDefs(chatMode, onlineResearch) || [];
+    const mcpCount = mcp.toolDefs().length;
+    const toolTokens = toolDefs.length ? estimateTokens(toolDefs) : 0;
+    const totalTokens = systemTokens + toolTokens + rows.reduce((sum, r) => sum + r.tokens, 0);
 
     return {
       ok: true,
       systemPrompt: prompt,
       systemTokens,
+      toolTokens,
+      toolCount: toolDefs.length,
+      mcpToolCount: mcpCount,
       rows,
       totalTokens,
       contextLength,
