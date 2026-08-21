@@ -1831,7 +1831,9 @@ async function handleSlash(raw) {
       renderConversation(await window.api.getConversation());
       updateContextBar(res.approxTokens, res.contextLength);
       compactWarned = false; // re-arm the 80% warning for the fresh window
-      addInfo('Conversation compacted. The model will continue from the summary above.');
+      addInfo(res.degraded
+        ? `Compacted, but the model could not produce a usable summary — only the most recent turns were kept. ${res.description}`
+        : `Conversation compacted. ${res.description}`);
       return saveChat();
     }
 

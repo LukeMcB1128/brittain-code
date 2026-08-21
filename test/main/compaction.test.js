@@ -8,6 +8,7 @@ const {
   selectVerbatimTail,
   minimumSummaryTokens,
   validateSummary,
+  describeCompaction,
 } = require('../../src/main/compaction');
 
 const user = (content) => ({ role: 'user', content });
@@ -135,4 +136,30 @@ test('a substantial summary is accepted', () => {
 test('a short summary of a short conversation is accepted', () => {
   const result = validateSummary('word '.repeat(200), { sourceTokens: 900 });
   assert.equal(result.ok, true);
+});
+
+test('a compaction is described with what was reclaimed and what survived', () => {
+  const line = describeCompaction({
+    ok: true, before: 131_000, after: 8_200, summaryTokens: 1_400, tailTurns: 3, retries: 0,
+  });
+  assert.match(line, /131000 → 8200 tokens/);
+  assert.match(line, /summary 1400 tok/);
+  assert.match(line, /3 recent turns kept verbatim/);
+  assert.doesNotMatch(line, /retr/);
+});
+
+test('a degraded compaction says so instead of reporting a summary size', () => {
+  const line = describeCompaction({
+    ok: true, before: 99_000, after: 5_000, degraded: true, tailTurns: 1, retries: 1,
+  });
+  assert.match(line, /no usable summary/);
+  assert.match(line, /1 recent turn kept verbatim/);
+  assert.match(line, /1 retry/);
+  assert.doesNotMatch(line, /summary \d+ tok/);
+});
+
+test('a failed compaction is described as nothing at all', () => {
+  assert.equal(describeCompaction({ ok: false, error: 'boom' }), '');
+  assert.equal(describeCompaction(null), '');
+  assert.equal(describeCompaction(undefined), '');
 });

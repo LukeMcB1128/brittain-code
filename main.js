@@ -18,6 +18,7 @@ const { createHistoryStore } = require('./src/main/history-store');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
+const { retainedBudget, tailBudget, summaryBudget, selectVerbatimTail, validateSummary, retryInstruction, describeCompaction } = require('./src/main/compaction');
 const { createCheckpointService } = require('./src/main/checkpoint-service');
 const { createDiffService } = require('./src/main/diff-service');
 const { normalizeCodeReview, SUBMIT_CODE_REVIEW_TOOL } = require('./src/main/code-review');
@@ -915,7 +916,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           break;
         }
         win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
-        win.webContents.send('stream:info', 'Context compacted — retrying this turn once with a clean slate.');
+        win.webContents.send('stream:info', `Context compacted (${c.description}) — retrying this turn once.`);
         continue;
       }
 
@@ -1099,8 +1100,12 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           win.webContents.send('stream:info', `Context past ${compactPercent()}% — auto-compacting…`);
           win.webContents.send('stream:state', 'compacting');
           const c = await compactConversation(model);
-          if (c.ok) win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
-          else win.webContents.send('stream:info', 'Auto-compact failed (' + c.error + ') — continuing.');
+          if (c.ok) {
+            win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+            win.webContents.send('stream:info', `Compacted: ${c.description}`);
+          } else {
+            win.webContents.send('stream:info', 'Auto-compact failed (' + c.error + ') — continuing.');
+          }
         }
       }
     }
@@ -1180,6 +1185,7 @@ async function maybePrecompact(model) {
   const c = await compactConversation(model);
   if (c.ok) {
     win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+    win.webContents.send('stream:info', `Compacted: ${c.description}`);
   } else {
     win.webContents.send('stream:info', 'Pre-send compact failed (' + c.error + ') — sending anyway; the oldest messages may be invisible to the model.');
   }
@@ -2304,6 +2310,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
         const c = await compactConversation(model);
         if (c.ok) {
           win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+          info(`Compacted: ${c.description}`);
         } else {
           info('Auto-compact failed (' + c.error + ') — continuing without it.');
         }
@@ -3033,69 +3040,134 @@ ipcMain.handle('memory:get', (_e, cwd) => {
 async function compactConversation(model, signal = currentAbort?.signal) {
   if (conversation.length < 2) return { ok: false, error: 'Nothing to compact yet.' };
   try {
-    // drop images and bulky tool outputs from what the summarizer sees, then
-    // hard-fit to the window — the summarizer must not context-shift itself
-    const windowBudget = Math.floor((await effectiveContext(model)) * 0.8);
+    const contextLength = await effectiveContext(model);
+    const before = estimateTokens(modelReadyMessages(conversation));
+
     const pinnedConversation = conversation
       .filter((message) => message?.pinned && (message.role === 'user' || message.role === 'assistant'))
       .map(({ tool_calls, ...message }) => ({ ...message }));
     const unpinnedConversation = conversation.filter((message) => !message?.pinned);
     const pinnedContext = pinnedMessagesPrompt(pinnedConversation);
     const pinnedReady = pinnedContext ? [{ role: 'user', content: pinnedContext }] : [];
-    let recentReady = modelReadyMessages(unpinnedConversation)
+    const pinnedCost = estimateTokens(pinnedReady);
+
+    // Keep the most recent complete turns verbatim. They are the most relevant
+    // part of the conversation and the cheapest fidelity available, and the
+    // summarizer is then only responsible for what came before them.
+    const { tail, head, turns: tailTurns, tokens: tailTokens } =
+      selectVerbatimTail(unpinnedConversation, tailBudget(contextLength), estimateTokens);
+
+    // drop images and bulky tool outputs from what the summarizer sees, then
+    // hard-fit to the window — the summarizer must not context-shift itself
+    const windowBudget = Math.floor(contextLength * 0.8);
+    let summarizerInput = modelReadyMessages(head)
       .map((m) =>
         m.role === 'tool' && String(m.content).length > 1500
           ? { ...m, content: String(m.content).slice(0, 1500) + '…[truncated]' }
           : m
       );
-    const pinnedCost = estimateTokens(pinnedReady);
-    recentReady = fitToWindow(recentReady, Math.max(1200, windowBudget - pinnedCost));
-    const msgs = [...pinnedReady, ...recentReady];
+    summarizerInput = fitToWindow(summarizerInput, Math.max(1200, windowBudget - pinnedCost));
+    const sourceTokens = estimateTokens(summarizerInput);
+    const summaryRoom = summaryBudget(contextLength, pinnedCost + tailTokens);
+
+    const msgs = [...pinnedReady, ...summarizerInput];
     msgs.push({
       role: 'user',
       content: 'Summarize this entire conversation so work can continue seamlessly in a fresh session: the goal, key decisions, files created or modified and their current state, and unresolved tasks. Output only the summary.',
     });
-    const data = await ollamaJson('/api/chat', {
-      model,
-      messages: msgs,
-      stream: false,
-      options: { num_ctx: await effectiveContext(model), temperature: runtimeSettings.codeTemperature },
-    }, signal);
-    const summary = (data.message?.content || '').trim();
-    if (!summary) return { ok: false, error: 'Model returned an empty summary.' };
 
+    let summary = '';
+    let check = { ok: false, reason: 'empty', tokens: 0, required: 0 };
+    let retries = 0;
+    // Generation length used to be left entirely to the model, which is how a
+    // long session came back as two sentences. Ask for the room the record can
+    // actually hold, and give one corrective retry when the answer is too thin.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const data = await ollamaJson('/api/chat', {
+        model,
+        messages: msgs,
+        stream: false,
+        options: {
+          num_ctx: contextLength,
+          temperature: 0.2,
+          num_predict: Math.max(512, summaryRoom),
+        },
+      }, signal);
+
+      if (data.prompt_eval_count || data.eval_count) {
+        recordUsage('main', {
+          promptTokens: data.prompt_eval_count,
+          evalTokens: data.eval_count,
+          loadMs: (data.load_duration || 0) / 1e6,
+          promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+          generationMs: (data.eval_duration || 0) / 1e6,
+          totalMs: (data.total_duration || 0) / 1e6,
+        });
+      }
+
+      summary = (data.message?.content || '').trim();
+      check = validateSummary(summary, { sourceTokens, estimateTokens });
+      if (check.ok) break;
+      if (attempt === 0) {
+        retries += 1;
+        msgs.push({ role: 'assistant', content: summary || '(empty response)' });
+        msgs.push({ role: 'user', content: retryInstruction(check.tokens, check.required) });
+      }
+    }
+
+    // Degrade toward raw text, never toward nothing. If the model will not
+    // produce a usable summary, keep a larger verbatim tail rather than
+    // compacting into a record that has lost the session.
+    const degraded = !check.ok;
+    const fallback = degraded
+      ? selectVerbatimTail(unpinnedConversation, Math.max(1200, retainedBudget(contextLength) - pinnedCost), estimateTokens)
+      : null;
+    if (degraded && !fallback.tail.length) {
+      return {
+        ok: false,
+        error: `The summary was ${check.reason} (${check.tokens} tokens, needed ${check.required}) and no complete turn fits the retained budget. The conversation was left unchanged.`,
+      };
+    }
+
+    const keptTail = degraded ? fallback.tail : tail;
     usage.metrics.compactions += 1;
 
-    // Record usage for the summarization step
-    if (data.prompt_eval_count || data.eval_count) {
-      recordUsage('main', {
-        promptTokens: data.prompt_eval_count,
-        evalTokens: data.eval_count,
-        loadMs: (data.load_duration || 0) / 1e6,
-        promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
-        generationMs: (data.eval_duration || 0) / 1e6,
-        totalMs: (data.total_duration || 0) / 1e6,
-      });
-    }
+    const notice = degraded
+      ? 'Compaction could not produce a usable summary, so the earlier conversation was dropped and only the most recent turns below were kept. Re-read anything you need from earlier work rather than assuming it.'
+      : 'This conversation was compacted to save context. Continue from the summary below; the most recent turns that follow it are intact.';
 
     conversation = [
       ...pinnedConversation,
       {
         role: 'user',
-        content: 'This conversation was compacted to save context. Continue from the summary below.'
+        content: notice
           + (/devstral/i.test(model)
             ? ' REMINDER: act only via tool calls (write_file/edit_file/read_file/run_command) — markdown code blocks in replies do nothing.'
             : ''),
       },
-      { role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary },
+      ...(degraded ? [] : [{ role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary }]),
+      ...keptTail,
     ];
 
     // Update the central usage object in main process
     const approxTokens = estimateTokens(modelReadyMessages(conversation));
-    const contextLength = await effectiveContext(model);
     usage.context = { tokens: approxTokens, limit: contextLength };
 
-    return { ok: true, approxTokens, contextLength };
+    const result = {
+      ok: true,
+      approxTokens,
+      contextLength,
+      before,
+      after: approxTokens,
+      summaryTokens: degraded ? 0 : check.tokens,
+      tailTurns: degraded ? fallback.turns : tailTurns,
+      tailTokens: degraded ? fallback.tokens : tailTokens,
+      retries,
+      degraded,
+    };
+    // Described once here so every caller — renderer included, where this module
+    // is not loadable — reports compaction the same way.
+    return { ...result, description: describeCompaction(result) };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }

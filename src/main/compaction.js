@@ -99,6 +99,26 @@ function retryInstruction(tokens, required) {
   ].join(' ');
 }
 
+function formatCount(value) {
+  return String(Math.max(0, Math.round(Number(value) || 0)));
+}
+
+// One actionable line: how much room was reclaimed, what survived verbatim, and
+// whether the summarizer had to be corrected. Compaction used to report nothing
+// but a token count, which is how a session could collapse unnoticed.
+function describeCompaction(result) {
+  if (!result || !result.ok) return '';
+  const parts = [`${formatCount(result.before)} \u2192 ${formatCount(result.after)} tokens`];
+  parts.push(result.degraded
+    ? 'no usable summary \u2014 recent turns only'
+    : `summary ${formatCount(result.summaryTokens)} tok`);
+  const turns = Math.max(0, Math.round(Number(result.tailTurns) || 0));
+  parts.push(`${turns} recent ${turns === 1 ? 'turn' : 'turns'} kept verbatim`);
+  const retries = Math.max(0, Math.round(Number(result.retries) || 0));
+  if (retries) parts.push(`${retries} ${retries === 1 ? 'retry' : 'retries'}`);
+  return parts.join(' \u00b7 ');
+}
+
 module.exports = {
   estimateTokensDefault,
   retainedBudget,
@@ -109,5 +129,6 @@ module.exports = {
   minimumSummaryTokens,
   validateSummary,
   retryInstruction,
+  describeCompaction,
   TAIL_SHARE,
 };
