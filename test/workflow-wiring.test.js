@@ -57,8 +57,11 @@ test('missions wrap the bounded coder loop with persisted status and explicit st
   assert.match(preload, /missionStart: \(payload\) => ipcRenderer\.invoke\('mission:start'/);
   assert.match(preload, /missionStop: \(\) => ipcRenderer\.invoke\('mission:stop'/);
   assert.match(preload, /missionResume: \(payload\) => ipcRenderer\.invoke\('mission:resume'/);
-  assert.match(main, /ipcMain\.handle\('mission:start',[\s\S]*chatId/);
-  assert.match(main, /chatId,\n\s*startedAt/);
+  // Starting a mission is callable without IPC, so a trigger or a queue can do
+  // it; the handler is a wrapper that records who asked.
+  assert.match(main, /async function startMission\(\{[\s\S]*origin = 'ui',/);
+  assert.match(main, /ipcMain\.handle\('mission:start', async \(_e, payload = \{\}\) => startMission\(\{ \.\.\.payload, origin: 'ui' \}\)\)/);
+  assert.match(main, /chatId,\n\s*origin,\n\s*startedAt/);
   assert.match(main, /runCoderGoalLoop\(\{/);
   assert.match(main, /ipcMain\.handle\('mission:stop'/);
   assert.match(main, /ipcMain\.handle\('mission:resume'/);

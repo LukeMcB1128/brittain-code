@@ -2445,7 +2445,13 @@ async function runActiveMission({ model, coderModel, subModel, goal, cwd, autoAp
   }
 }
 
-ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch, chatId }) => {
+// Starting a mission is separable from the IPC call that asks for it: a
+// trigger, a queue, or a test can call this directly. `origin` records who
+// asked, which matters once something other than a person can.
+async function startMission({
+  model, coderModel, subModel, goal, cwd, autoApprove, think,
+  onlineResearch, maxIterations, autoBranch, chatId, origin = 'ui',
+}) {
   if (activeMission?.status === 'running') return { ok: false, error: 'A mission is already running. Use /mission status or /mission stop.' };
   if (!model) return { ok: false, error: 'Select a model first.' };
   if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
@@ -2461,6 +2467,7 @@ ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, 
     goal: goal.trim(),
     projectPath: cwd,
     chatId,
+    origin,
     startedAt,
     endedAt: null,
     maxIterations: max,
@@ -2491,8 +2498,15 @@ ipcMain.handle('mission:start', async (_e, { model, coderModel, subModel, goal, 
     return { ok: false, error: message };
   }
 
-  return runActiveMission({ model, coderModel, subModel, goal: goal.trim(), cwd: activeMission.projectPath, autoApprove, think, onlineResearch, max });
-});
+  return runActiveMission({
+    model, coderModel, subModel,
+    goal: goal.trim(),
+    cwd: activeMission.projectPath,
+    autoApprove, think, onlineResearch, max,
+  });
+}
+
+ipcMain.handle('mission:start', async (_e, payload = {}) => startMission({ ...payload, origin: 'ui' }));
 
 ipcMain.handle('mission:get', () => ({ ok: true, mission: activeMission }));
 
