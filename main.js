@@ -15,6 +15,7 @@ const { readActiveMission, writeActiveMission, interruptRunningMission } = requi
 const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore } = require('./src/main/history-store');
+const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
@@ -126,6 +127,13 @@ function fitToWindow(msgs, maxTokens) {
 
 let win = null;
 let activeMission = null;
+// Identifies the stretch of work whose ledgers belong together. Reset whenever
+// the conversation is cleared or replaced, so one file covers one session.
+let sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+function newSessionId() {
+  sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return sessionId;
+}
 let updateService = null;
 
 function publishMission() {
@@ -2783,6 +2791,7 @@ ipcMain.on('chat:stop', () => {
 });
 
 ipcMain.handle('chat:reset', () => {
+  newSessionId();
   conversation = [];
   contextState = normalizeContextState();
   usage = freshUsage();
@@ -2790,6 +2799,29 @@ ipcMain.handle('chat:reset', () => {
 });
 
 ipcMain.handle('usage:get', () => usage);
+
+// What this session did, read off the live conversation plus every ledger
+// already written out by a compaction. Live and stored are shown separately
+// because the stored ones cover work the conversation no longer contains.
+ipcMain.handle('ledger:get', () => {
+  const live = buildLedger(conversation);
+  const stored = ledgerStore.read(sessionId);
+  return {
+    ok: true,
+    sessionId,
+    path: ledgerStore.filePath(sessionId),
+    live: isEmptyLedger(live) ? '' : renderLedger(live),
+    snapshots: (stored?.snapshots || []).map((snapshot) => ({
+      at: snapshot.at,
+      before: snapshot.before,
+      after: snapshot.after,
+      degraded: !!snapshot.degraded,
+      changed: (snapshot.ledger?.changed || []).length,
+      commands: (snapshot.ledger?.commands || []).length,
+      errors: (snapshot.ledger?.errors || []).length,
+    })),
+  };
+});
 
 ipcMain.handle('mcp:status', () => ({ servers: mcp.status(), configPath: mcp.configPath }));
 ipcMain.handle('mcp:toggle', (_e, name, on) => (mcp.setEnabled(name, on) ? { ok: true } : { ok: false, error: 'No MCP server named "' + name + '"' }));
@@ -2959,6 +2991,7 @@ ipcMain.handle('context:control', (_e, payload = {}) => {
 });
 
 ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextState) => {
+  newSessionId();
   conversation = Array.isArray(msgs) ? msgs : [];
   contextState = normalizeContextState(savedContextState);
   usage = restoreUsage(savedUsage);
@@ -2978,6 +3011,12 @@ ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextStat
 const historyStore = createHistoryStore({
   userDataDir: () => app.getPath('userData'),
   runtimeMetadata,
+});
+
+// Compaction is where a session stops being recoverable from the conversation
+// itself, so each ledger is written out at that moment.
+const ledgerStore = createLedgerStore({
+  userDataDir: () => settingsUserDataDir || app.getPath('userData'),
 });
 
 ipcMain.handle('history:list', () => historyStore.list());
@@ -3197,6 +3236,12 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     const approxTokens = estimateTokens(modelReadyMessages(conversation));
     usage.context = { tokens: approxTokens, limit: contextLength };
 
+    // Written before returning: this is the last moment the tool record exists
+    // in the conversation, and a failed write must not fail the compaction.
+    const stored = isEmptyLedger(ledger)
+      ? null
+      : ledgerStore.append(sessionId, ledger, { before, after: approxTokens, degraded, model });
+
     const result = {
       ok: true,
       approxTokens,
@@ -3212,6 +3257,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
       ledgerEntries: isEmptyLedger(ledger)
         ? 0
         : ledger.changed.length + ledger.commands.length + ledger.checks.length + ledger.errors.length,
+      ledgerPath: stored?.ok ? stored.path : '',
     };
     // Described once here so every caller — renderer included, where this module
     // is not loadable — reports compaction the same way.

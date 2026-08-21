@@ -1776,6 +1776,7 @@ const SLASH_HELP = [
   '/recs — compare installed models for this computer',
   '/auto <request> — select the best compatible installed model and run the request',
   '/memory — view what the agent has remembered',
+  '/ledger — view what this session changed, ran, and failed at (kept across compaction)',
   '/export — save this chat as a markdown file',
   '/tools — list all available tools',
 ].join('\n');
@@ -1802,7 +1803,7 @@ async function handleSlash(raw) {
   const [cmd, ...rest] = raw.slice(1).split(' ');
   const arg = rest.join(' ').trim();
   const normalizedCmd = cmd.toLowerCase();
-  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'review', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory']);
+  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'review', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory', 'ledger']);
   if (appMode === 'chat' && codeOnlyCommands.has(normalizedCmd)) {
     return addError(`/${normalizedCmd} is only available in Code mode.`);
   }
@@ -2280,6 +2281,23 @@ async function handleSlash(raw) {
         content += `\n\nLEGACY UNIVERSAL MEMORY (not injected)\n${res.legacyPath}\n\n${res.legacyContent.trim()}`;
       }
       return showOverlay('PROJECT MEMORY — ' + res.path, content);
+    }
+
+    case 'ledger': {
+      const res = await window.api.ledgerGet();
+      if (!res.ok) return addError(res.error || 'Could not read the session ledger.');
+      const parts = [];
+      parts.push(res.live || '(no tool activity in the current conversation yet)');
+      if (res.snapshots.length) {
+        parts.push('', `EARLIER, SAVED AT COMPACTION (${res.path}):`);
+        for (const snapshot of res.snapshots) {
+          const when = snapshot.at ? new Date(snapshot.at).toLocaleString() : 'unknown time';
+          parts.push(`- ${when} — ${snapshot.before} → ${snapshot.after} tokens · `
+            + `${snapshot.changed} files changed · ${snapshot.commands} commands · ${snapshot.errors} errors`
+            + (snapshot.degraded ? ' · no usable summary' : ''));
+        }
+      }
+      return showOverlay('SESSION LEDGER — ' + res.sessionId, parts.join('\n'));
     }
 
     case 'export': {

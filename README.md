@@ -51,7 +51,9 @@ Compacting a conversation summarizes the older half and keeps the most recent co
 
 The summary itself is checked before anything is thrown away. One that is too thin for the conversation it covers earns a single retry naming the length it missed, and the old messages are not replaced until a summary passes. If none does, compaction keeps a larger stretch of raw conversation and says so, rather than continuing from a record that lost the session — and if not even one complete turn fits, it declines and changes nothing.
 
-Every compaction reports tokens before and after, the summary size, how many turns survived intact, and whether a retry was needed.
+Alongside the summary, compaction carries a **session ledger** read directly off the tool record: files changed, commands run and their outcomes, project checks, unresolved errors, and anything you denied. Those facts are extracted mechanically rather than recalled, so a denied write is never reported as work done and the file list cannot quietly go missing. The summary itself is requested by section — goal, constraints, decisions, state, next steps — with a minimum length, and one retry when it arrives thin or unlabelled.
+
+Each ledger is also written to `runs/` in the app's data directory as it is produced, so the record outlives the compaction that created it. `/ledger` shows what the current session has done and lists the snapshots saved so far. Every compaction reports tokens before and after, the summary size, ledger entries, how many turns survived intact, and whether a retry was needed.
 
 ### Undoing a run
 
@@ -112,6 +114,7 @@ Type these in the message box:
 | `/auto <request>` | Select the best compatible installed model for the current mode and attachments, then run the request |
 | `/mcp [on\|off <server>]` | External MCP tool servers: status, enable, disable |
 | `/memory` | View what the agent has remembered for the selected project |
+| `/ledger` | View what this session changed, ran, and failed at (survives compaction) |
 | `/export` | Save the chat as a markdown file |
 | `/tools` | List available tools and their risky, sensitive, or network classification |
 
