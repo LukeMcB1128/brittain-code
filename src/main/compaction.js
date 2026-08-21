@@ -158,6 +158,81 @@ function retryInstruction(check) {
   ].join(' ');
 }
 
+// Chunking exists because the old path hard-fit the transcript to the window by
+// dropping the oldest messages first — which meant the summarizer was asked to
+// summarize a conversation whose opening, including the goal, it had never been
+// shown. Splitting chronologically and summarizing each part instead means no
+// segment goes silently missing.
+const MAX_CHUNKS = 6;
+
+function planChunks(messages, { budget, maxChunks = MAX_CHUNKS, estimateTokens = estimateTokensDefault } = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  if (!list.length) return [];
+  const total = estimateTokens(list);
+  if (!(budget > 0) || total <= budget) return [list];
+
+  // Spread the content evenly rather than packing early chunks to the brim, so
+  // the last chunk is not a sliver, and never exceed the chunk ceiling.
+  const wanted = Math.min(maxChunks, Math.ceil(total / budget));
+  const target = Math.ceil(total / wanted);
+
+  const chunks = [];
+  let current = [];
+  let currentTokens = 0;
+  for (const message of list) {
+    const cost = estimateTokens(message);
+    // Break at turn boundaries where possible so a chunk does not open with a
+    // tool result whose call sits in the previous chunk.
+    const wouldOverflow = currentTokens + cost > target && current.length > 0;
+    if (wouldOverflow && (isTurnStart(message) || chunks.length + 1 >= wanted)) {
+      chunks.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(message);
+    currentTokens += cost;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+// Instruction for one chunk of a chronologically split transcript.
+function chunkInstruction(index, total) {
+  return [
+    `This is part ${index + 1} of ${total} of a longer conversation, in chronological order.`,
+    'Record what happens in this part only: decisions taken and why, files created or modified and their state,',
+    'commands run and their outcomes, errors, and anything the user asked for or ruled out.',
+    'Do not speculate about the other parts. Output only the record.',
+  ].join(' ');
+}
+
+// Instruction for folding the per-chunk records into one.
+function reduceInstruction(count, minimumTokens) {
+  return [
+    `Below are ${count} records covering one conversation in chronological order.`,
+    'Merge them into a single record. Later parts override earlier ones where they conflict —',
+    'a file changed twice should read as its latest state, and a resolved error should not appear as open.',
+    '',
+    'Use exactly these five headings, in this order:',
+    ...SUMMARY_SECTIONS.map((section) => `${section.name}: ${section.hint}`),
+    '',
+    minimumTokens ? `Write at least ${minimumTokens} tokens.` : '',
+    'Output only the merged record.',
+  ].filter((line, index, all) => line !== '' || all[index - 1] !== '').join('\n');
+}
+
+// A conversation that has already been compacted carries its previous record.
+// Labelling it keeps facts from the first compaction alive through the third,
+// instead of degrading a little on every pass.
+function priorRecordPreamble(record) {
+  return [
+    'PRIOR RECORD — the state carried forward from an earlier compaction of this same session.',
+    'Treat these as established facts and carry them into your summary unless the transcript below contradicts them.',
+    '',
+    String(record || '').trim(),
+  ].join('\n');
+}
+
 function formatCount(value) {
   return String(Math.max(0, Math.round(Number(value) || 0)));
 }
@@ -173,6 +248,9 @@ function describeCompaction(result) {
     : `summary ${formatCount(result.summaryTokens)} tok${result.unstructured ? ' (unstructured)' : ''}`);
   const entries = Math.max(0, Math.round(Number(result.ledgerEntries) || 0));
   if (entries) parts.push(`${entries} ledger ${entries === 1 ? 'entry' : 'entries'}`);
+  const chunks = Math.max(0, Math.round(Number(result.chunks) || 0));
+  if (chunks > 1) parts.push(`summarized in ${chunks} parts`);
+  if (result.carriedPriorRecord) parts.push('carried prior record');
   const turns = Math.max(0, Math.round(Number(result.tailTurns) || 0));
   parts.push(`${turns} recent ${turns === 1 ? 'turn' : 'turns'} kept verbatim`);
   const retries = Math.max(0, Math.round(Number(result.retries) || 0));
@@ -191,6 +269,11 @@ module.exports = {
   validateSummary,
   retryInstruction,
   summaryInstruction,
+  planChunks,
+  chunkInstruction,
+  reduceInstruction,
+  priorRecordPreamble,
+  MAX_CHUNKS,
   SUMMARY_SECTIONS,
   missingSections,
   describeCompaction,

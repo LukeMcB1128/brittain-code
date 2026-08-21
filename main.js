@@ -20,7 +20,7 @@ const { createRecommendationsService } = require('./src/main/recommendations-ser
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
 const { outcomeOf, buildLedger, renderLedger, isEmptyLedger } = require('./src/main/ledger');
-const { retainedBudget, tailBudget, summaryBudget, selectVerbatimTail, validateSummary, retryInstruction, summaryInstruction, minimumSummaryTokens, describeCompaction } = require('./src/main/compaction');
+const { retainedBudget, tailBudget, summaryBudget, selectVerbatimTail, validateSummary, retryInstruction, summaryInstruction, minimumSummaryTokens, describeCompaction, planChunks, chunkInstruction, reduceInstruction, priorRecordPreamble } = require('./src/main/compaction');
 const { createCheckpointService } = require('./src/main/checkpoint-service');
 const { createDiffService } = require('./src/main/diff-service');
 const { normalizeCodeReview, SUBMIT_CODE_REVIEW_TOOL } = require('./src/main/code-review');
@@ -101,7 +101,7 @@ function stripOldImages(msgs) {
 }
 
 function modelReadyMessages(msgs) {
-  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, pinned, excludedFromInference, ...message }) => {
+  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, pinned, excludedFromInference, compactionRecord, ...message }) => {
     if (excludedFromInference && message.role === 'tool') {
       return { ...message, content: '[Tool result content excluded from inference by the user.]' };
     }
@@ -3108,6 +3108,18 @@ ipcMain.handle('memory:get', (_e, cwd) => {
 });
 
 // ---------- conversation compaction ----------
+function recordCompactionUsage(data) {
+  if (!data?.prompt_eval_count && !data?.eval_count) return;
+  recordUsage('main', {
+    promptTokens: data.prompt_eval_count,
+    evalTokens: data.eval_count,
+    loadMs: (data.load_duration || 0) / 1e6,
+    promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
+    generationMs: (data.eval_duration || 0) / 1e6,
+    totalMs: (data.total_duration || 0) / 1e6,
+  });
+}
+
 async function compactConversation(model, signal = currentAbort?.signal) {
   if (conversation.length < 2) return { ok: false, error: 'Nothing to compact yet.' };
   try {
@@ -3128,32 +3140,78 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     const { tail, head, turns: tailTurns, tokens: tailTokens } =
       selectVerbatimTail(unpinnedConversation, tailBudget(contextLength), estimateTokens);
 
-    // drop images and bulky tool outputs from what the summarizer sees, then
-    // hard-fit to the window — the summarizer must not context-shift itself
+    // Facts established by an earlier compaction of this same session. Carrying
+    // them forward explicitly is what stops the record thinning a little on
+    // every pass.
+    const priorRecord = [...head].reverse().find((message) => message?.compactionRecord)?.content || '';
+    const transcript = head.filter((message) => !message?.compactionRecord);
+
+    // drop images and bulky tool outputs from what the summarizer sees — the
+    // summarizer must not context-shift itself
     const windowBudget = Math.floor(contextLength * 0.8);
-    let summarizerInput = modelReadyMessages(head)
+    const summarizerInput = modelReadyMessages(transcript)
       .map((m) =>
         m.role === 'tool' && String(m.content).length > 1500
           ? { ...m, content: String(m.content).slice(0, 1500) + '…[truncated]' }
           : m
       );
-    summarizerInput = fitToWindow(summarizerInput, Math.max(1200, windowBudget - pinnedCost));
     const sourceTokens = estimateTokens(summarizerInput);
     const summaryRoom = summaryBudget(contextLength, pinnedCost + tailTokens);
+    const chunkBudget = Math.max(1200, windowBudget - pinnedCost - estimateTokens(priorRecord) - 600);
 
     // What the session did is read off the tool record rather than left to the
     // summarizer, which is why the file list used to be the first thing lost.
     const ledger = buildLedger(head);
     const ledgerText = renderLedger(ledger);
 
-    const msgs = [...pinnedReady, ...summarizerInput];
-    msgs.push({
-      role: 'user',
-      content: summaryInstruction({
-        tailTurns: tail.length ? tailTurns : 0,
-        minimumTokens: minimumSummaryTokens(sourceTokens),
-      }),
-    });
+    const minimumTokens = minimumSummaryTokens(sourceTokens);
+    const priorReady = priorRecord ? [{ role: 'user', content: priorRecordPreamble(priorRecord) }] : [];
+
+    // A transcript too large for one pass is split chronologically and folded
+    // back together, rather than having its oldest half deleted to make it fit.
+    const chunks = planChunks(summarizerInput, { budget: chunkBudget, estimateTokens });
+    let msgs;
+    if (chunks.length > 1) {
+      const partials = [];
+      for (let index = 0; index < chunks.length; index++) {
+        win.webContents.send('stream:state', `compacting (part ${index + 1}/${chunks.length})…`);
+        // With the chunk ceiling reached, a single part can still overrun the
+        // window. Trimming inside one part is bounded harm — every part is
+        // still represented, which is the property the old hard fit lacked.
+        const part = fitToWindow(chunks[index], chunkBudget);
+        const data = await ollamaJson('/api/chat', {
+          model,
+          messages: [
+            ...pinnedReady,
+            ...part,
+            { role: 'user', content: chunkInstruction(index, chunks.length) },
+          ],
+          stream: false,
+          options: { num_ctx: contextLength, temperature: 0.2, num_predict: Math.max(512, Math.floor(summaryRoom / 2)) },
+        }, signal);
+        recordCompactionUsage(data);
+        partials.push(`PART ${index + 1} OF ${chunks.length}:\n${(data.message?.content || '').trim()}`);
+      }
+      msgs = [
+        ...pinnedReady,
+        ...priorReady,
+        { role: 'user', content: partials.join('\n\n') },
+        { role: 'user', content: reduceInstruction(chunks.length, minimumTokens) },
+      ];
+    } else {
+      msgs = [
+        ...pinnedReady,
+        ...priorReady,
+        ...summarizerInput,
+        {
+          role: 'user',
+          content: summaryInstruction({
+            tailTurns: tail.length ? tailTurns : 0,
+            minimumTokens,
+          }),
+        },
+      ];
+    }
 
     let summary = '';
     let check = { ok: false, reason: 'empty', tokens: 0, required: 0 };
@@ -3173,16 +3231,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
         },
       }, signal);
 
-      if (data.prompt_eval_count || data.eval_count) {
-        recordUsage('main', {
-          promptTokens: data.prompt_eval_count,
-          evalTokens: data.eval_count,
-          loadMs: (data.load_duration || 0) / 1e6,
-          promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
-          generationMs: (data.eval_duration || 0) / 1e6,
-          totalMs: (data.total_duration || 0) / 1e6,
-        });
-      }
+      recordCompactionUsage(data);
 
       summary = (data.message?.content || '').trim();
       check = validateSummary(summary, { sourceTokens, estimateTokens });
@@ -3228,7 +3277,11 @@ async function compactConversation(model, signal = currentAbort?.signal) {
             : ''),
       },
       ...(ledgerText ? [{ role: 'assistant', content: ledgerText }] : []),
-      ...(degraded ? [] : [{ role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary }]),
+      ...(degraded ? [] : [{
+        role: 'assistant',
+        content: 'Summary of the conversation so far:\n\n' + summary,
+        compactionRecord: true,
+      }]),
       ...keptTail,
     ];
 
@@ -3258,6 +3311,8 @@ async function compactConversation(model, signal = currentAbort?.signal) {
         ? 0
         : ledger.changed.length + ledger.commands.length + ledger.checks.length + ledger.errors.length,
       ledgerPath: stored?.ok ? stored.path : '',
+      chunks: chunks.length,
+      carriedPriorRecord: !!priorRecord,
     };
     // Described once here so every caller — renderer included, where this module
     // is not loadable — reports compaction the same way.

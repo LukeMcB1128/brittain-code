@@ -13,6 +13,11 @@ const {
   missingSections,
   retryInstruction,
   SUMMARY_SECTIONS,
+  planChunks,
+  chunkInstruction,
+  reduceInstruction,
+  priorRecordPreamble,
+  MAX_CHUNKS,
 } = require('../../src/main/compaction');
 
 const user = (content) => ({ role: 'user', content });
@@ -232,4 +237,95 @@ test('the description flags an unstructured summary and counts ledger entries', 
   });
   assert.match(line, /\(unstructured\)/);
   assert.match(line, /12 ledger entries/);
+});
+
+function longConversation(turns, size = 300) {
+  const messages = [];
+  for (let i = 0; i < turns; i++) {
+    messages.push(user(`question ${i} ${'x'.repeat(size)}`));
+    messages.push(assistant(`answer ${i} ${'y'.repeat(size)}`));
+  }
+  return messages;
+}
+
+test('a transcript that fits the budget is not chunked at all', () => {
+  const messages = longConversation(3);
+  const chunks = planChunks(messages, { budget: 1_000_000 });
+  assert.equal(chunks.length, 1);
+  assert.deepEqual(chunks[0], messages);
+});
+
+test('an oversized transcript is split rather than having its opening dropped', () => {
+  const messages = longConversation(40);
+  const chunks = planChunks(messages, { budget: 2_000 });
+  assert.ok(chunks.length > 1);
+  // The old path evicted oldest-first, losing the goal. Nothing may go missing.
+  assert.deepEqual(chunks.flat(), messages);
+  assert.deepEqual(chunks[0][0], messages[0], 'the opening of the conversation is still present');
+});
+
+test('chunks are split at turn boundaries', () => {
+  const chunks = planChunks(longConversation(40), { budget: 2_000 });
+  for (const chunk of chunks) assert.equal(chunk[0].role, 'user');
+});
+
+test('chunk count is capped so compaction cannot fan out without bound', () => {
+  const chunks = planChunks(longConversation(400), { budget: 500 });
+  assert.ok(chunks.length <= MAX_CHUNKS, `expected at most ${MAX_CHUNKS}, got ${chunks.length}`);
+  assert.deepEqual(chunks.flat(), longConversation(400));
+});
+
+test('chunks are evenly sized rather than leaving a sliver at the end', () => {
+  const messages = longConversation(40);
+  const chunks = planChunks(messages, { budget: 2_000 });
+  const sizes = chunks.map((chunk) => JSON.stringify(chunk).length);
+  const largest = Math.max(...sizes);
+  const smallest = Math.min(...sizes);
+  assert.ok(smallest > largest / 3, `chunk sizes were uneven: ${sizes.join(', ')}`);
+});
+
+test('chunking tolerates empty and malformed input', () => {
+  assert.deepEqual(planChunks([], { budget: 100 }), []);
+  assert.deepEqual(planChunks(undefined, { budget: 100 }), []);
+  assert.equal(planChunks(longConversation(2), { budget: 0 }).length, 1, 'no budget means no split');
+});
+
+test('a chunk record is asked for its own part only', () => {
+  const text = chunkInstruction(1, 4);
+  assert.match(text, /part 2 of 4/);
+  assert.match(text, /this part only/);
+  assert.match(text, /Do not speculate about the other parts/);
+});
+
+test('the reduce step is told later parts win and asked for the five sections', () => {
+  const text = reduceInstruction(4, 900);
+  assert.match(text, /4 records/);
+  assert.match(text, /Later parts override earlier ones/);
+  for (const section of SUMMARY_SECTIONS) assert.match(text, new RegExp(section.name));
+  assert.match(text, /at least 900 tokens/);
+});
+
+test('a prior record is labelled as established fact that the transcript may override', () => {
+  const text = priorRecordPreamble('GOAL: ship the parser');
+  assert.match(text, /PRIOR RECORD/);
+  assert.match(text, /established facts/);
+  assert.match(text, /unless the transcript below contradicts them/);
+  assert.match(text, /GOAL: ship the parser/);
+});
+
+test('the description reports chunking and a carried prior record', () => {
+  const line = describeCompaction({
+    ok: true, before: 260_000, after: 16_000, summaryTokens: 1_800,
+    tailTurns: 4, retries: 0, ledgerEntries: 22, chunks: 4, carriedPriorRecord: true,
+  });
+  assert.match(line, /summarized in 4 parts/);
+  assert.match(line, /carried prior record/);
+});
+
+test('a single-pass compaction says nothing about parts', () => {
+  const line = describeCompaction({
+    ok: true, before: 30_000, after: 8_000, summaryTokens: 900, tailTurns: 2, chunks: 1,
+  });
+  assert.doesNotMatch(line, /parts/);
+  assert.doesNotMatch(line, /prior record/);
 });
