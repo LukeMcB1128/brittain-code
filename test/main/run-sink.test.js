@@ -148,3 +148,29 @@ test('no run channel bypasses the sink in main.js', () => {
     'approval:request', 'checkpoint:state', 'mission:update', 'question:request', 'updates:state',
   ]);
 });
+
+test('a run can add a file transcript and give it back when it finishes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-sink-'));
+  try {
+    const win = fakeWindow();
+    const sink = createRunSink({ window: win });
+    const transcriptPath = path.join(dir, 'run.log');
+
+    sink.info('before the run');
+    assert.equal(fs.existsSync(transcriptPath), false);
+
+    sink.configure({ targets: ['renderer', 'file'], transcriptPath });
+    sink.info('during the run');
+    assert.match(fs.readFileSync(transcriptPath, 'utf8'), /during the run/);
+
+    sink.reset();
+    sink.info('after the run');
+    const text = fs.readFileSync(transcriptPath, 'utf8');
+    assert.doesNotMatch(text, /after the run/, 'a finished run must stop writing to its own transcript');
+    assert.equal(sink.transcriptPath(), '');
+    // The renderer saw all three either way.
+    assert.equal(win.sent.length, 3);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

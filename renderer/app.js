@@ -1095,6 +1095,60 @@ function addInfo(text) {
   scrollDown();
 }
 
+// Decision J: the log renders inline as one foldable block per run rather than
+// as a panel. It costs far less UI, sits next to the run it describes, and
+// survives a history reload for free.
+function addDecisionLog({ runId, policy, decisions = [], deferred = [], reportPath, transcriptPath }) {
+  const counts = decisions.reduce((totals, entry) => {
+    totals[entry.verdict] = (totals[entry.verdict] || 0) + 1;
+    return totals;
+  }, {});
+  const summary = Object.entries(counts).map(([verdict, count]) => `${count} ${verdict}`).join(' · ') || 'no tool calls';
+
+  const details = document.createElement('details');
+  details.className = 'msg info decision-log';
+  const heading = document.createElement('summary');
+  heading.textContent = `AGENT RUN — ${policy} — ${summary}`
+    + (deferred.length ? ` — ${deferred.length} needs review` : '');
+  details.appendChild(heading);
+
+  const body = document.createElement('div');
+  if (deferred.length) {
+    const tray = document.createElement('div');
+    tray.className = 'needs-review';
+    tray.textContent = 'Not permitted for this unattended run:';
+    const list = document.createElement('ul');
+    for (const entry of deferred) {
+      const item = document.createElement('li');
+      item.textContent = `${entry.name}${entry.target ? ` on ${entry.target}` : ''} — ${entry.reason}`;
+      list.appendChild(item);
+    }
+    tray.appendChild(list);
+    body.appendChild(tray);
+  }
+
+  const log = document.createElement('pre');
+  log.textContent = decisions
+    .map((entry) => `${entry.verdict.padEnd(9)} ${entry.name}${entry.target ? ` ${entry.target}` : ''}`)
+    .join('\n') || '(no tool calls)';
+  body.appendChild(log);
+
+  for (const [label, value] of [['Report', reportPath], ['Transcript', transcriptPath]]) {
+    if (!value) continue;
+    const line = document.createElement('div');
+    line.className = 'decision-log-path';
+    line.textContent = `${label}: ${value}`;
+    body.appendChild(line);
+  }
+
+  details.appendChild(body);
+  details.dataset.runId = runId;
+  chat.appendChild(details);
+  scrollDown();
+}
+
+window.api.onRunDecisions(addDecisionLog);
+
 function scrollDown() {
   chat.scrollTop = chat.scrollHeight;
 }
@@ -1840,6 +1894,7 @@ const SLASH_HELP = [
   '/include <n> — restore an excluded tool result to inference',
   '/recs — compare installed models for this computer',
   '/auto <request> — select the best compatible installed model and run the request',
+  '/agent [--policy <name>] <goal> — run unattended: always branched, always checkpointed, always reported',
   '/memory — view what the agent has remembered',
   '/ledger — view what this session changed, ran, and failed at (kept across compaction)',
   '/export — save this chat as a markdown file',
@@ -1868,7 +1923,7 @@ async function handleSlash(raw) {
   const [cmd, ...rest] = raw.slice(1).split(' ');
   const arg = rest.join(' ').trim();
   const normalizedCmd = cmd.toLowerCase();
-  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'review', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory', 'ledger']);
+  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'review', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory', 'ledger', 'agent']);
   if (appMode === 'chat' && codeOnlyCommands.has(normalizedCmd)) {
     return addError(`/${normalizedCmd} is only available in Code mode.`);
   }
@@ -2346,6 +2401,43 @@ async function handleSlash(raw) {
         content += `\n\nLEGACY UNIVERSAL MEMORY (not injected)\n${res.legacyPath}\n\n${res.legacyContent.trim()}`;
       }
       return showOverlay('PROJECT MEMORY — ' + res.path, content);
+    }
+
+    case 'agent': {
+      if (busy) return;
+      if (!modelSelect.value) return addError('No model selected.');
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+
+      let goal = arg;
+      let policy = '';
+      const flagged = goal.match(/^--policy\s+(\S+)\s+([\s\S]+)/);
+      if (flagged) { policy = flagged[1]; goal = flagged[2].trim(); }
+      if (!goal) return addError('Usage: /agent [--policy <name>] <goal> — runs unattended, always on a branch, always reported.');
+
+      const coder = coderModel || modelSelect.value;
+      addMessage('user', `AGENT: ${goal}`);
+      startRun();
+      let res;
+      try {
+        res = await window.api.agentRun({
+          model: modelSelect.value,
+          coderModel: coder,
+          subModel: subModel || 'qwen3:8b',
+          goal,
+          cwd,
+          policy,
+          think: thinkToggle.checked,
+          onlineResearch: onlineResearchToggle.checked,
+          maxIterations: appSettings?.defaultLoopIterations || 8,
+          chatId: currentChatId,
+        });
+      } catch (err) {
+        res = { ok: false, error: err.message || String(err) };
+      } finally {
+        endRun();
+      }
+      if (!res.ok) return addError(res.error);
+      return saveChat();
     }
 
     case 'ledger': {

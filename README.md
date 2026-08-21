@@ -55,6 +55,14 @@ Alongside the summary, compaction carries a **session ledger** read directly off
 
 Each ledger is also written to `runs/` in the app's data directory as it is produced, so the record outlives the compaction that created it. `/ledger` shows what the current session has done and lists the snapshots saved so far. Every compaction reports tokens before and after, the summary size, ledger entries, how many turns survived intact, and whether a retry was needed.
 
+### Unattended runs
+
+`/agent <goal>` runs a mission with nobody watching. It is a commitment rather than a setting: it always moves work onto a generated branch, always takes a checkpoint, and always writes a report, however the toggles happen to sit. `--policy <name>` picks an autonomy policy for that run alone without changing your default.
+
+Because nobody is there to answer, a call that would normally prompt is *deferred*: it does not run, it is recorded, and the run carries on rather than stalling until morning. When the run ends you get a foldable decision log in the chat listing every verdict, with the deferred calls separated out as the ones that need you. A run without a Git repository is refused outright — there is no undo without one.
+
+Each run leaves a timestamped transcript and a markdown report in `runs/` in the application-data directory, and raises a notification when it finishes.
+
 ### Undoing a run
 
 Before every Code-mode run in a Git repo, the app takes a silent checkpoint of the working tree, so **UNDO RUN** restores it even if you never committed. UNDO itself snapshots first, so it is also undoable. Optional **auto-branch** moves work onto a generated `brittain/<slug>` branch before the agent touches anything, keeping your current branch clean.
@@ -114,6 +122,7 @@ Type these in the message box:
 | `/auto <request>` | Select the best compatible installed model for the current mode and attachments, then run the request |
 | `/mcp [on\|off <server>]` | External MCP tool servers: status, enable, disable |
 | `/memory` | View what the agent has remembered for the selected project |
+| `/agent [--policy <name>] <goal>` | Run unattended: always branched, checkpointed, and reported |
 | `/ledger` | View what this session changed, ran, and failed at (survives compaction) |
 | `/export` | Save the chat as a markdown file |
 | `/tools` | List available tools and their risky, sensitive, or network classification |

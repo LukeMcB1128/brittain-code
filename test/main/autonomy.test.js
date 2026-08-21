@@ -169,5 +169,6 @@ test('every approval path in main.js goes through the policy', () => {
   assert.equal(direct, 1, 'requestApproval should have exactly one caller: resolveToolCall');
   assert.match(main, /async function resolveToolCall\(/);
   assert.match(main, /decideAutonomy\(policy, \{/);
-  assert.match(main, /deferredCalls\.push\(/, 'a deferred call must be recorded for review');
+  assert.match(main, /recordDecision\(\{ name, verdict: decision\.verdict/, 'every verdict is recorded, not only the denials');
+  assert.match(main, /function deferredFrom\(run\)/, 'the deferred subset is the tray a person reads afterwards');
 });

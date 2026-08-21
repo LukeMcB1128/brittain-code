@@ -29,6 +29,7 @@ const RUN_CHANNELS = new Set([
   'stream:stats',
   'stream:done',
   'run:report',
+  'run:decisions',
 ]);
 
 // Only these read as prose in a transcript. Tokens and stats are far too noisy
@@ -57,7 +58,9 @@ function summarizeArgs(args) {
 }
 
 function createRunSink({ window, targets = ['renderer'], transcriptPath = '', now = () => new Date() } = {}) {
-  const active = new Set(targets);
+  let active = new Set(targets);
+  let currentTranscript = transcriptPath;
+  const defaults = { targets: [...targets], transcriptPath };
   let written = 0;
   let dropped = 0;
 
@@ -74,12 +77,12 @@ function createRunSink({ window, targets = ['renderer'], transcriptPath = '', no
 
   function toTranscript(channel, payload) {
     const render = TRANSCRIPT_CHANNELS.get(channel);
-    if (!render || !transcriptPath) return;
+    if (!render || !currentTranscript) return;
     try {
       const line = render(payload);
       if (!line?.trim()) return;
-      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
-      fs.appendFileSync(transcriptPath, `[${now().toISOString()}] ${line}\n`, 'utf8');
+      fs.mkdirSync(path.dirname(currentTranscript), { recursive: true });
+      fs.appendFileSync(currentTranscript, `[${now().toISOString()}] ${line}\n`, 'utf8');
       written += 1;
     } catch {
       // A transcript that cannot be written must not take the run down with it.
@@ -93,6 +96,18 @@ function createRunSink({ window, targets = ['renderer'], transcriptPath = '', no
   }
 
   return {
+    // A run decides where its own output goes: an unattended run adds a file
+    // transcript, an ordinary one does not. Reset returns to the defaults so a
+    // finished run cannot keep writing into its own transcript.
+    configure({ targets: wanted, transcriptPath: transcript } = {}) {
+      if (wanted) active = new Set(wanted);
+      if (transcript !== undefined) currentTranscript = transcript;
+    },
+    reset() {
+      active = new Set(defaults.targets);
+      currentTranscript = defaults.transcriptPath;
+    },
+    transcriptPath: () => currentTranscript,
     emit,
     state: (text) => emit('stream:state', text),
     info: (text) => emit('stream:info', text),

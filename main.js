@@ -1,7 +1,7 @@
 // Brittain Code — Electron main process.
 // Owns the agent loop: talks to Ollama, executes tools, streams results to the UI.
 
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -17,7 +17,7 @@ const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore } = require('./src/main/history-store');
 const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
-const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies } = require('./src/main/autonomy');
+const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies, checkPreconditions } = require('./src/main/autonomy');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
@@ -493,10 +493,44 @@ function classifyToolCall(name, args) {
   };
 }
 
-// Records what an unattended run wanted to do but was not permitted to. This is
-// the tray a person reads when they come back, and the raw material for tuning
-// a policy: a defer that keeps recurring harmlessly is a candidate to allow.
-let deferredCalls = [];
+// One run's decision record. Every verdict the policy reached, in order, plus
+// the subset that was deferred — what an unattended run wanted to do and was
+// not permitted to. The deferred list is the tray a person reads when they come
+// back, and the raw material for tuning a policy: a defer that keeps recurring
+// harmlessly is a candidate to promote into the allow list.
+let currentRun = null;
+// The last run's record outlives it, so the tray is still readable afterwards.
+let lastFinishedRun = null;
+
+function beginRun({ attended = true, transcriptPath = '', label = '' } = {}) {
+  currentRun = {
+    id: `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    label,
+    attended,
+    startedAt: new Date().toISOString(),
+    decisions: [],
+    transcriptPath,
+  };
+  if (transcriptPath) sink.configure({ targets: ['renderer', 'file'], transcriptPath });
+  return currentRun;
+}
+
+function endRun() {
+  const finished = currentRun;
+  sink.reset();
+  lastFinishedRun = finished || lastFinishedRun;
+  currentRun = null;
+  return finished;
+}
+
+function deferredFrom(run) {
+  return (run?.decisions || []).filter((entry) => entry.verdict === 'defer');
+}
+
+function recordDecision(entry) {
+  if (!currentRun) return;
+  currentRun.decisions.push(entry);
+}
 
 function activePolicy(autoApprove) {
   // Until the dial replaces it everywhere, an explicit policy wins and the old
@@ -518,16 +552,26 @@ async function resolveToolCall(name, args, { autoApprove, onlineResearch, attend
     toolCalls: usage.metrics.toolCalls,
   });
 
-  if (decision.verdict === 'allow') return { approved: true, ...decision, policyId: id };
+  const at = new Date().toISOString();
+  if (decision.verdict === 'allow') {
+    recordDecision({ name, verdict: 'allow', reason: decision.reason, at });
+    return { approved: true, ...decision, policyId: id };
+  }
   if (decision.verdict === 'ask') {
     const approved = await requestApproval({ name, args, ...promptKind });
+    recordDecision({ name, verdict: approved ? 'approved' : 'denied', reason: decision.reason, at });
     return { approved, ...decision, policyId: id };
   }
+  recordDecision({ name, verdict: decision.verdict, reason: decision.reason, target: describeCallTarget(name, args), at });
   if (decision.verdict === 'defer') {
-    deferredCalls.push({ name, args, reason: decision.reason, at: new Date().toISOString() });
     sink.emit('stream:info', `Deferred ${name} — ${decision.reason}. Recorded for review.`);
   }
   return { approved: false, ...decision, policyId: id };
+}
+
+function describeCallTarget(name, args) {
+  if (name === 'run_command') return String(args?.command || '').slice(0, 120);
+  return String(args?.path || args?.destination || args?.check || '').slice(0, 120);
 }
 
 function isSensitiveToolCall(name, args) {
@@ -2565,6 +2609,113 @@ async function startMission({
 
 ipcMain.handle('mission:start', async (_e, payload = {}) => startMission({ ...payload, origin: 'ui' }));
 
+// An unattended run's report, written where it can be read after the fact.
+function runReportPath(runId) {
+  return path.join(settingsUserDataDir || app.getPath('userData'), 'runs', `${runId}.md`);
+}
+
+function renderRunReport(run, mission) {
+  const decisions = run?.decisions || [];
+  const deferred = deferredFrom(run);
+  const counts = decisions.reduce((totals, entry) => {
+    totals[entry.verdict] = (totals[entry.verdict] || 0) + 1;
+    return totals;
+  }, {});
+  const lines = [
+    `# Agent run ${run?.id || ''}`,
+    '',
+    `- **Goal:** ${mission?.goal || ''}`,
+    `- **Project:** ${mission?.projectPath || ''}`,
+    `- **Started:** ${run?.startedAt || ''}`,
+    `- **Finished:** ${new Date().toISOString()}`,
+    `- **Status:** ${mission?.status || 'unknown'}`,
+    `- **Decisions:** ${Object.entries(counts).map(([verdict, count]) => `${count} ${verdict}`).join(', ') || 'none'}`,
+    '',
+  ];
+  if (deferred.length) {
+    lines.push('## Needs review', '',
+      'These calls were not permitted for an unattended run:', '');
+    for (const entry of deferred) {
+      lines.push(`- \`${entry.name}\`${entry.target ? ` on \`${entry.target}\`` : ''} — ${entry.reason}`);
+    }
+    lines.push('');
+  }
+  if (mission?.finalReport) lines.push('## Result', '', String(mission.finalReport), '');
+  if (run?.transcriptPath) lines.push('## Transcript', '', `\`${run.transcriptPath}\``, '');
+  return lines.join('\n');
+}
+
+function notifyRunFinished(mission, reportPath) {
+  try {
+    if (!Notification.isSupported()) return;
+    const notification = new Notification({
+      title: `Brittain Code — mission ${mission?.status || 'finished'}`,
+      body: String(mission?.goal || '').slice(0, 120),
+    });
+    notification.on('click', () => shell.showItemInFolder(reportPath));
+    notification.show();
+  } catch {
+    // A notification that cannot be shown is not worth failing a run over.
+  }
+}
+
+// /agent is a commitment rather than a setting: it always auto-branches, always
+// checkpoints, and always writes a report, however the toggles happen to sit.
+// Typing it is an explicit statement that nobody will be watching.
+ipcMain.handle('agent:run', async (_e, payload = {}) => {
+  if (activeMission?.status === 'running') return { ok: false, error: 'A mission is already running. Use /mission status or /mission stop.' };
+
+  const policyId = String(payload.policy || '') || runtimeSettings.autonomyPolicy
+    || policyForLegacyAutoApprove(!!runtimeSettings.autoApprove);
+  const policy = getPolicy(policyId, customPolicies.policies);
+  if (!policy) return { ok: false, error: `No autonomy policy named "${policyId}".` };
+
+  const cwd = payload.cwd;
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+
+  // Unattended runs depend on the branch and checkpoint for undo, so the
+  // preconditions are checked before anything is started, not after.
+  const branch = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+  const preconditions = checkPreconditions(policy, {
+    attended: false,
+    isGitRepo: branch.ok,
+    onBranch: branch.ok ? branch.out.trim() : '',
+  });
+  if (!preconditions.ok) return { ok: false, error: preconditions.error };
+
+  const previousPolicy = runtimeSettings.autonomyPolicy;
+  runtimeSettings = { ...runtimeSettings, autonomyPolicy: policyId };
+  const run = beginRun({ attended: false, label: 'agent' });
+  run.transcriptPath = path.join(settingsUserDataDir || app.getPath('userData'), 'runs', `${run.id}.log`);
+  sink.configure({ targets: ['renderer', 'file'], transcriptPath: run.transcriptPath });
+  sink.emit('stream:info', `Agent run ${run.id} starting unattended under "${policy.label || policyId}". Transcript: ${run.transcriptPath}`);
+
+  let result;
+  try {
+    result = await startMission({ ...payload, autoBranch: true, autoApprove: false, origin: 'agent' });
+  } finally {
+    runtimeSettings = { ...runtimeSettings, autonomyPolicy: previousPolicy };
+    const finished = endRun();
+    const reportPath = runReportPath(finished.id);
+    try {
+      fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+      fs.writeFileSync(reportPath, renderRunReport(finished, activeMission), 'utf8');
+    } catch {
+      // A report that cannot be written must not mask the run's own outcome.
+    }
+    sink.emit('run:decisions', {
+      runId: finished.id,
+      policy: policyId,
+      decisions: finished.decisions,
+      deferred: deferredFrom(finished),
+      reportPath,
+      transcriptPath: finished.transcriptPath,
+    });
+    notifyRunFinished(activeMission, reportPath);
+  }
+  return result;
+});
+
 ipcMain.handle('mission:get', () => ({ ok: true, mission: activeMission }));
 
 ipcMain.handle('mission:stop', () => {
@@ -2892,7 +3043,7 @@ ipcMain.handle('autonomy:state', () => {
       description: policy.description || '',
       builtIn: Object.prototype.hasOwnProperty.call(require('./src/main/autonomy').BUILT_IN, id),
     })),
-    deferred: deferredCalls.map((entry) => ({ name: entry.name, reason: entry.reason, at: entry.at })),
+    deferred: deferredFrom(currentRun || lastFinishedRun).map((entry) => ({ name: entry.name, target: entry.target, reason: entry.reason, at: entry.at })),
   };
 });
 
