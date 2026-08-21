@@ -16,6 +16,7 @@ const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore } = require('./src/main/history-store');
 const { createLedgerStore } = require('./src/main/ledger-store');
+const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
@@ -127,6 +128,11 @@ function fitToWindow(msgs, maxTokens) {
 
 let win = null;
 let activeMission = null;
+// Where run output goes. The window is resolved at send time rather than
+// captured, so a window that appears, disappears, or never exists at all is an
+// ordinary condition for a run rather than a crash inside a loop.
+const sink = createRunSink({ window: () => win });
+
 // Identifies the stretch of work whose ledgers belong together. Reset whenever
 // the conversation is cleared or replaced, so one file covers one session.
 let sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -267,7 +273,7 @@ function publishContextStats(stats, contextLength, scope = 'conversation') {
     usage.metrics.peakContextLimit = contextLength;
   }
   if (scope === 'conversation') usage.context = { tokens: contextTokens, limit: contextLength };
-  win.webContents.send('stream:stats', {
+  sink.emit('stream:stats', {
     contextTokens,
     contextLength,
     tokPerSec: stats.tokPerSec || 0,
@@ -279,7 +285,7 @@ async function publishPersistedConversationContext(model) {
   const contextLength = await effectiveContext(model);
   const contextTokens = estimateTokens(modelReadyMessages(conversation));
   usage.context = { tokens: contextTokens, limit: contextLength };
-  win.webContents.send('stream:stats', {
+  sink.emit('stream:stats', {
     contextTokens,
     contextLength,
     tokPerSec: 0,
@@ -570,7 +576,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
       const msg = chunk.message || {};
       if (msg.thinking) {
         thinking += msg.thinking;
-        if (!silent) win.webContents.send('stream:thinking', msg.thinking);
+        if (!silent) sink.emit('stream:thinking', msg.thinking);
         const thinkHit = scanThinkingForPsychosis(thinking, thinkingState);
         if (thinkHit) {
           try { await reader.cancel(); } catch {}
@@ -579,7 +585,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
       }
       if (msg.content) {
         content += msg.content;
-        if (!silent) win.webContents.send('stream:token', msg.content);
+        if (!silent) sink.emit('stream:token', msg.content);
         const hit = scanContentForPsychosis(content, repetitionState);
         if (hit) {
           try { await reader.cancel(); } catch {}
@@ -894,14 +900,14 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       } catch (err) {
         if (err.name !== 'PsychosisDetectedError') throw err;
         usage.metrics.psychosisDetections = (usage.metrics.psychosisDetections || 0) + 1;
-        win.webContents.send('stream:info', `⚠ LIVE GUARD: ${err.message} — excerpt: "${err.excerpt}"\nGeneration stopped immediately.`);
+        sink.emit('stream:info', `⚠ LIVE GUARD: ${err.message} — excerpt: "${err.excerpt}"\nGeneration stopped immediately.`);
 
         // A deliberation loop is not context corruption — the model is simply
         // dithering, so compacting would throw away good context and change
         // nothing. Tell it to commit and act instead.
         if (err.recovery === 'directive') {
           if (deliberationNudges >= 2) {
-            win.webContents.send('stream:info', 'Still looping after 2 nudges — stopping this turn. Try a smaller, more concrete request, or a different model.');
+            sink.emit('stream:info', 'Still looping after 2 nudges — stopping this turn. Try a smaller, more concrete request, or a different model.');
             break;
           }
           deliberationNudges++;
@@ -909,23 +915,23 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
             role: 'user',
             content: 'You are planning in circles instead of acting. Stop deliberating now. Do not re-evaluate your approach again. Take the single smallest concrete action that tests your current best hypothesis — call one tool (read the actual file rather than reasoning about it, or make one minimal edit) — then reassess from the real result.',
           });
-          win.webContents.send('stream:info', `Injected a commit-and-act directive (${deliberationNudges}/2) and retrying.`);
+          sink.emit('stream:info', `Injected a commit-and-act directive (${deliberationNudges}/2) and retrying.`);
           continue;
         }
 
         if (psychosisRetried) {
-          win.webContents.send('stream:info', 'Detected again after recovery — stopping this turn. Consider switching models or starting a new session.');
+          sink.emit('stream:info', 'Detected again after recovery — stopping this turn. Consider switching models or starting a new session.');
           break;
         }
         psychosisRetried = true;
-        win.webContents.send('stream:state', 'auto-compacting (recovering)…');
+        sink.emit('stream:state', 'auto-compacting (recovering)…');
         const c = await compactConversation(model);
         if (!c.ok) {
-          win.webContents.send('stream:info', 'Recovery compact failed (' + c.error + ') — stopping this turn.');
+          sink.emit('stream:info', 'Recovery compact failed (' + c.error + ') — stopping this turn.');
           break;
         }
-        win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
-        win.webContents.send('stream:info', `Context compacted (${c.description}) — retrying this turn once.`);
+        sink.emit('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+        sink.emit('stream:info', `Context compacted (${c.description}) — retrying this turn once.`);
         continue;
       }
 
@@ -937,7 +943,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           toolCalls = recovered.calls;
           content = recovered.cleaned;
           // the raw markup already streamed to the UI — replace it with the cleaned text
-          win.webContents.send('stream:cleancontent', content);
+          sink.emit('stream:cleancontent', content);
         }
       }
 
@@ -963,7 +969,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
         const stalled = !content || !content.trim();
         if (stalled && emptyNudges < 2) {
           emptyNudges++;
-          win.webContents.send('stream:info', `Model stopped without output or a tool call — nudging it to continue (${emptyNudges}/2)…`);
+          sink.emit('stream:info', `Model stopped without output or a tool call — nudging it to continue (${emptyNudges}/2)…`);
           conversation.push({
             role: 'user',
             content: 'You stopped without any visible output or tool call. Continue the task now: make your next tool call, or write your final summary if the task is complete.',
@@ -971,7 +977,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           continue;
         }
         if (stalled) {
-          win.webContents.send('stream:info', 'Model produced no output after 2 nudges — giving up on this turn. Send a message to continue.');
+          sink.emit('stream:info', 'Model produced no output after 2 nudges — giving up on this turn. Send a message to continue.');
         }
         break;
       }
@@ -981,14 +987,14 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
         let args = tc.function?.arguments || {};
         if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
 
-        win.webContents.send('stream:toolcall', { name, args });
+        sink.emit('stream:toolcall', { name, args });
 
         let result;
         if (!activeToolNames.has(name)) {
           result = chatMode
             ? `Error: Tool unavailable in Chat mode: ${name}. Continue without local file, shell, Git, or project access.`
             : `Error: Tool unavailable for this turn: ${name}. Continue without it.`;
-          win.webContents.send('stream:toolresult', { name, result: preview(result), denied: true });
+          sink.emit('stream:toolresult', { name, result: preview(result), denied: true });
         } else if (stopRequested) {
           result = 'Cancelled by user.';
         } else if (name === 'ask_user') {
@@ -1014,7 +1020,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
               ? 'The user answered:\n' + qs.map((q, i) => `Q: ${q.question}\nA: ${answers[i]}`).join('\n')
               : 'The user cancelled the question. Stop and wait for further instructions.';
           }
-          win.webContents.send('stream:toolresult', { name, result: preview(result) });
+          sink.emit('stream:toolresult', { name, result: preview(result) });
         } else if (name === 'run_subagent') {
           const task = String(args.task || '').trim();
           if (!task) {
@@ -1022,28 +1028,28 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           } else {
             result = await runSubagent(task, String(args.model || subModel || 'qwen3:8b'), cwd);
           }
-          win.webContents.send('stream:toolresult', { name, result: preview(result) });
+          sink.emit('stream:toolresult', { name, result: preview(result) });
         } else if (NETWORK_TOOLS.has(name)) {
           if (!onlineResearch) {
             result = 'Online research is disabled. Do not retry this tool; continue offline or ask the user to enable ONLINE RESEARCH.';
-            win.webContents.send('stream:toolresult', { name, result: preview(result), denied: true });
+            sink.emit('stream:toolresult', { name, result: preview(result), denied: true });
           } else {
             const approved = await requestApproval({ name, args, network: true });
             result = approved
               ? await safeExecute(name, args, cwd)
               : 'The user denied this online request. Do not retry it unless the user explicitly changes direction.';
-            win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(online request denied by user)', denied: !approved });
+            sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(online request denied by user)', denied: !approved });
           }
         } else if (DESTRUCTIVE_TOOLS.has(name)) {
           if (args.dry_run !== false) {
             result = await safeExecute(name, args, cwd);
-            win.webContents.send('stream:toolresult', { name, result: preview(result) });
+            sink.emit('stream:toolresult', { name, result: preview(result) });
           } else {
             const approved = await requestApproval({ name, args, destructive: true });
             result = approved
               ? await safeExecute(name, args, cwd)
               : 'The user denied this destructive operation. Do not retry it unless the user explicitly asks.';
-            win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(destructive operation denied by user)', denied: !approved });
+            sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(destructive operation denied by user)', denied: !approved });
           }
         } else if (name === 'run_command' && isDestructiveCommand(args.command)) {
           // destructive shell patterns bypass AUTO-APPROVE — always ask
@@ -1051,7 +1057,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           result = approved
             ? await safeExecute(name, args, cwd)
             : 'The user denied this destructive command. Do not retry it or any variation of it unless the user explicitly asks.';
-          win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(destructive command denied by user)', denied: !approved });
+          sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(destructive command denied by user)', denied: !approved });
         } else if (mcp.owns(name)) {
           // MCP tools are third-party and untrusted, so they normally require
           // approval even under the code-mode AUTO-APPROVE. The dedicated
@@ -1065,26 +1071,26 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           } else {
             result = 'The user denied this external MCP tool call. Do not retry it unless the user explicitly asks.';
           }
-          win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(MCP call denied by user)', denied: !approved });
+          sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(MCP call denied by user)', denied: !approved });
         } else if (isSensitiveToolCall(name, args)) {
           const approved = await requestApproval({ name, args, sensitive: true });
           result = approved
             ? await safeExecute(name, args, cwd)
             : 'The user denied this sensitive read. Do not retry it unless the user explicitly asks.';
-          win.webContents.send('stream:toolresult', { name, result: approved ? preview(result) : '(sensitive read denied by user)', denied: !approved });
+          sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(sensitive read denied by user)', denied: !approved });
         } else if (name === 'apply_patch' && args.dry_run !== false) {
           result = await safeExecute(name, args, cwd);
-          win.webContents.send('stream:toolresult', { name, result: preview(result) });
+          sink.emit('stream:toolresult', { name, result: preview(result) });
         } else if (RISKY_TOOLS.has(name) && !autoApprove) {
           const approved = await requestApproval({ name, args });
           result = approved
             ? await safeExecute(name, args, cwd)
             : 'The user denied this tool call. Ask before retrying, or try another approach.';
-          if (!approved) win.webContents.send('stream:toolresult', { name, result: '(denied by user)', denied: true });
-          else win.webContents.send('stream:toolresult', { name, result: preview(result) });
+          if (!approved) sink.emit('stream:toolresult', { name, result: '(denied by user)', denied: true });
+          else sink.emit('stream:toolresult', { name, result: preview(result) });
         } else {
           result = await safeExecute(name, args, cwd);
-          win.webContents.send('stream:toolresult', { name, result: preview(result) });
+          sink.emit('stream:toolresult', { name, result: preview(result) });
         }
 
         // "denied by user" is the label the UI shows, never text the tool result
@@ -1110,21 +1116,21 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       if (lastStats && contextLength) {
         const used = lastStats.promptTokens + lastStats.evalTokens;
         if (shouldAutoCompact(used, contextLength)) {
-          win.webContents.send('stream:info', `Context past ${compactPercent()}% — auto-compacting…`);
-          win.webContents.send('stream:state', 'compacting');
+          sink.emit('stream:info', `Context past ${compactPercent()}% — auto-compacting…`);
+          sink.emit('stream:state', 'compacting');
           const c = await compactConversation(model);
           if (c.ok) {
-            win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
-            win.webContents.send('stream:info', `Compacted: ${c.description}`);
+            sink.emit('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+            sink.emit('stream:info', `Compacted: ${c.description}`);
           } else {
-            win.webContents.send('stream:info', 'Auto-compact failed (' + c.error + ') — continuing.');
+            sink.emit('stream:info', 'Auto-compact failed (' + c.error + ') — continuing.');
           }
         }
       }
     }
   }
   if (exhaustedWithToolCalls && !stopRequested) {
-    win.webContents.send('stream:info', `Agent stopped after reaching the ${maxAgentSteps}-step safety cap.`);
+    sink.emit('stream:info', `Agent stopped after reaching the ${maxAgentSteps}-step safety cap.`);
   }
   return { lastContent, lastStats, contextLength, runLog };
 }
@@ -1156,7 +1162,7 @@ async function maybeAutoBranch(cwd, taskText, enabled) {
     name += '-' + d.getHours() + d.getMinutes();
     made = await gitRun(['checkout', '-b', name], cwd);
   }
-  win.webContents.send('stream:info', made.ok
+  sink.emit('stream:info', made.ok
     ? `BRANCH: created and switched to ${name} — your previous branch is untouched. Merge or discard it when you review.`
     : 'BRANCH is on but branch creation failed: ' + (made.err || 'unknown error'));
 }
@@ -1181,8 +1187,8 @@ async function emitRunReport(cwd, runLog) {
   }
   lines.push(runLog.verified ? '\u2713 a verification command was run' : '\u26a0 NOT VERIFIED \u2014 no test/check command ran this turn');
   if (runLog.mutations.size) lines.push('UNDO is available in the status bar.');
-  win.webContents.send('stream:info', lines.join('\n'));
-  win.webContents.send('run:report', { cwd, mutations: runLog.mutations.size });
+  sink.emit('stream:info', lines.join('\n'));
+  sink.emit('run:report', { cwd, mutations: runLog.mutations.size });
 }
 
 // If the conversation is already over the threshold BEFORE we send (e.g. it
@@ -1193,14 +1199,14 @@ async function maybePrecompact(model) {
   const contextLength = await effectiveContext(model);
   const estimated = estimateTokens(modelReadyMessages(conversation));
   if (!shouldAutoCompact(estimated, contextLength)) return;
-  win.webContents.send('stream:info', `Context is ~${Math.round((estimated / contextLength) * 100)}% full before sending — auto-compacting first…`);
-  win.webContents.send('stream:state', 'auto-compacting…');
+  sink.emit('stream:info', `Context is ~${Math.round((estimated / contextLength) * 100)}% full before sending — auto-compacting first…`);
+  sink.emit('stream:state', 'auto-compacting…');
   const c = await compactConversation(model);
   if (c.ok) {
-    win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
-    win.webContents.send('stream:info', `Compacted: ${c.description}`);
+    sink.emit('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+    sink.emit('stream:info', `Compacted: ${c.description}`);
   } else {
-    win.webContents.send('stream:info', 'Pre-send compact failed (' + c.error + ') — sending anyway; the oldest messages may be invisible to the model.');
+    sink.emit('stream:info', 'Pre-send compact failed (' + c.error + ') — sending anyway; the oldest messages may be invisible to the model.');
   }
 }
 
@@ -1283,7 +1289,7 @@ ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, th
   } finally {
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     currentAbort = null;
-    win.webContents.send('stream:done');
+    sink.done();
   }
 });
 
@@ -1340,7 +1346,7 @@ async function runSubagent(task, subModel, cwd) {
     : AbortSignal.timeout(SUBAGENT_TIMEOUT_MS);
   const timedOut = () => signal.aborted && !stopRequested;
 
-  win.webContents.send('stream:subagent', { phase: 'start', task, model: subModel });
+  sink.emit('stream:subagent', { phase: 'start', task, model: subModel });
   try {
     usage.subagent.runs += 1;
     for (let step = 0; step < SUBAGENT_MAX_STEPS; step++) {
@@ -1368,7 +1374,7 @@ async function runSubagent(task, subModel, cwd) {
         let args = tc.function?.arguments || {};
         if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
         steps++;
-        win.webContents.send('stream:subagent', { phase: 'tool', name, args });
+        sink.emit('stream:subagent', { phase: 'tool', name, args });
         const result = SUBAGENT_TOOL_NAMES.has(name)
           ? await safeExecute(name, args, cwd)
           : `Error: tool "${name}" is not available to subagents. Use your read-only exploration tools.`;
@@ -1405,7 +1411,7 @@ async function runSubagent(task, subModel, cwd) {
   }
 
   const report = (finalContent || '(subagent finished without producing findings)').slice(0, SUBAGENT_REPORT_CAP);
-  win.webContents.send('stream:subagent', { phase: 'done', report, steps });
+  sink.emit('stream:subagent', { phase: 'done', report, steps });
   return `Subagent report (${subModel}, ${steps} tool calls):\n${report}`;
 }
 
@@ -1612,7 +1618,7 @@ async function compactScopedMessages(model, msgs, numCtx, role, usageBucket, con
     );
     const approxTokens = estimateTokens(msgs);
     if (role === 'planner') {
-      win.webContents.send('stream:stats', {
+      sink.emit('stream:stats', {
         contextTokens: approxTokens,
         contextLength: numCtx,
         tokPerSec: 0,
@@ -1709,7 +1715,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
       const used = Math.max((stats?.promptTokens || 0) + (stats?.evalTokens || 0), estimateTokens(msgs));
       if (shouldAutoCompact(used, numCtx) && compactions < SCOPED_MAX_COMPACTIONS) {
         compactions++;
-        win.webContents.send('stream:state', `compacting planner ${compactions}/${SCOPED_MAX_COMPACTIONS}`);
+        sink.emit('stream:state', `compacting planner ${compactions}/${SCOPED_MAX_COMPACTIONS}`);
         const compacted = await compactScopedMessages(
           model,
           msgs,
@@ -1718,7 +1724,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
           'main',
           'Continue inspecting only if necessary, then call submit_implementation_plan with the complete ordered plan.',
         );
-        win.webContents.send('stream:info', compacted.ok
+        sink.emit('stream:info', compacted.ok
           ? `Planner context checkpointed at ${compactPercent()}% (${compactions}/${SCOPED_MAX_COMPACTIONS}).`
           : `Planner checkpoint failed (${compacted.error}); continuing with the existing context.`);
       }
@@ -1735,7 +1741,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
       }
 
       let result;
-      win.webContents.send('stream:state', `planner: ${name}`);
+      sink.emit('stream:state', `planner: ${name}`);
       if (name === 'run_subagent') {
         const task = String(args.task || '').trim();
         result = task
@@ -1752,7 +1758,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
     const used = Math.max((stats?.promptTokens || 0) + (stats?.evalTokens || 0), estimateTokens(msgs));
     if (shouldAutoCompact(used, numCtx) && compactions < SCOPED_MAX_COMPACTIONS) {
       compactions++;
-      win.webContents.send('stream:state', `compacting planner ${compactions}/${SCOPED_MAX_COMPACTIONS}`);
+      sink.emit('stream:state', `compacting planner ${compactions}/${SCOPED_MAX_COMPACTIONS}`);
       const compacted = await compactScopedMessages(
         model,
         msgs,
@@ -1761,13 +1767,13 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
         'main',
         'Continue from the checkpoint. Inspect only what is still missing, then call submit_implementation_plan.',
       );
-      win.webContents.send('stream:info', compacted.ok
+      sink.emit('stream:info', compacted.ok
         ? `Planner context checkpointed at ${compactPercent()}% (${compactions}/${SCOPED_MAX_COMPACTIONS}).`
         : `Planner checkpoint failed (${compacted.error}); continuing with the existing context.`);
     }
   }
 
-  win.webContents.send('stream:info', 'Planner did not submit a structured plan before its step cap; using a safe single-task fallback.');
+  sink.emit('stream:info', 'Planner did not submit a structured plan before its step cap; using a safe single-task fallback.');
   return normalizeImplementationPlan({
     summary: lastContent || 'The planner reached its step cap.',
     tasks: [{
@@ -1845,7 +1851,7 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
   let finalContent = '';
   let steps = 0;
   const label = repairFeedback ? `${task.title} (repair)` : task.title;
-  win.webContents.send('stream:subagent', { phase: 'start', role: 'CODER', task: label, model: coderModel });
+  sink.emit('stream:subagent', { phase: 'start', role: 'CODER', task: label, model: coderModel });
   usage.coder.runs += 1;
 
   try {
@@ -1872,7 +1878,7 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
         let args = tc.function?.arguments || {};
         if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
         steps++;
-        win.webContents.send('stream:subagent', { phase: 'tool', role: 'CODER', name, args });
+        sink.emit('stream:subagent', { phase: 'tool', role: 'CODER', name, args });
         const result = CODER_TOOL_NAMES.has(name)
           ? await executeWithApproval(name, args, cwd, autoApprove, false)
           : `Error: tool "${name}" is not available to the coding worker.`;
@@ -1883,11 +1889,11 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
       const used = Math.max((stats?.promptTokens || 0) + (stats?.evalTokens || 0), estimateTokens(msgs));
       const reachedToolCap = step + 1 >= CODER_MAX_STEPS;
       if (reachedToolCap || shouldAutoCompact(used, numCtx)) {
-        win.webContents.send('stream:state', 'wrapping up coder context');
+        sink.emit('stream:state', 'wrapping up coder context');
         const reason = reachedToolCap
           ? `Coder reached its ${CODER_MAX_STEPS}-step cap`
           : `Coder context reached ${compactPercent()}%`;
-        win.webContents.send('stream:info', `${reason}; requesting a handoff report instead of continuing broad exploration.`);
+        sink.emit('stream:info', `${reason}; requesting a handoff report instead of continuing broad exploration.`);
         finalContent = await forceCoderWrapUp(coderModel, msgs, currentAbort.signal, useThink, numCtx);
         break;
       }
@@ -1898,7 +1904,7 @@ async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFee
   }
 
   const report = (finalContent || '(coder stopped without a final report)').slice(0, 8000);
-  win.webContents.send('stream:subagent', { phase: 'done', role: 'CODER', report, steps });
+  sink.emit('stream:subagent', { phase: 'done', role: 'CODER', report, steps });
   return { report, evidence, steps };
 }
 
@@ -2138,8 +2144,8 @@ function wholeGoalVerificationTask(goal, plan) {
 }
 
 async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, max, loopLog, iterationOffset = 0, onProgress = () => {} }) {
-  const info = (text) => win.webContents.send('stream:info', text);
-  const state = (text) => win.webContents.send('stream:state', text);
+  const info = (text) => sink.emit('stream:info', text);
+  const state = (text) => sink.emit('stream:state', text);
   const verifierModel = subModel || 'qwen3:8b';
   const baseline = await gitRun(['status', '--porcelain', '--untracked-files=normal', '--', '.'], cwd);
   const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
@@ -2291,8 +2297,8 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
   const runStartedAt = Date.now();
   let runOutcome = 'ok';
   const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
-  const info = (t) => win.webContents.send('stream:info', t);
-  const state = (t) => win.webContents.send('stream:state', t);
+  const info = (t) => sink.emit('stream:info', t);
+  const state = (t) => sink.emit('stream:state', t);
   const loopLog = { mutations: new Set(), commands: [], verified: false };
 
   // Drifting models (seen with devstral) obey the system prompt early, then
@@ -2349,7 +2355,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
         state('auto-compacting…');
         const c = await compactConversation(model);
         if (c.ok) {
-          win.webContents.send('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
+          sink.emit('stream:stats', { contextTokens: c.approxTokens, contextLength: c.contextLength, tokPerSec: 0 });
           info(`Compacted: ${c.description}`);
         } else {
           info('Auto-compact failed (' + c.error + ') — continuing without it.');
@@ -2366,7 +2372,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
     currentAbort = null;
-    win.webContents.send('stream:done');
+    sink.done();
   }
 });
 
@@ -2435,7 +2441,7 @@ async function runActiveMission({ model, coderModel, subModel, goal, cwd, autoAp
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
     currentAbort = null;
-    win.webContents.send('stream:done');
+    sink.done();
   }
 }
 
@@ -2550,8 +2556,8 @@ ipcMain.handle('chat:plan', async (_e, { model, subModel, goal, cwd, think, onli
   const baselineStatus = baseline.ok ? baseline.out.trim() || '(clean)' : '(not a Git repository)';
 
   try {
-    win.webContents.send('stream:state', `planning (${model})`);
-    win.webContents.send('stream:info', `Planner ${model} is inspecting the project. No files will be changed.`);
+    sink.emit('stream:state', `planning (${model})`);
+    sink.emit('stream:info', `Planner ${model} is inspecting the project. No files will be changed.`);
     const plan = await runOrchestratorPlan(
       model,
       goal.trim(),
@@ -2573,7 +2579,7 @@ ipcMain.handle('chat:plan', async (_e, { model, subModel, goal, cwd, think, onli
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
     currentAbort = null;
-    win.webContents.send('stream:done');
+    sink.done();
   }
 });
 
@@ -2585,8 +2591,8 @@ ipcMain.handle('chat:review', async (_e, { model, cwd, base }) => {
   const runStartedAt = Date.now();
   let runOutcome = 'ok';
   try {
-    win.webContents.send('stream:state', `reviewing (${model})`);
-    win.webContents.send('stream:info', `Reviewer ${model} is inspecting changes relative to ${base || 'HEAD'}. No files will be changed.`);
+    sink.emit('stream:state', `reviewing (${model})`);
+    sink.emit('stream:info', `Reviewer ${model} is inspecting changes relative to ${base || 'HEAD'}. No files will be changed.`);
     const review = await runStructuredReview(model, cwd, base);
     return { ok: true, review };
   } catch (error) {
@@ -2596,7 +2602,7 @@ ipcMain.handle('chat:review', async (_e, { model, cwd, base }) => {
   } finally {
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     currentAbort = null;
-    win.webContents.send('stream:done');
+    sink.done();
   }
 });
 
@@ -2631,7 +2637,7 @@ ipcMain.handle('chat:reviewFix', async (_e, { coderModel, cwd, findings, autoApp
   } finally {
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     currentAbort = null;
-    win.webContents.send('stream:done');
+    sink.done();
   }
 });
 
@@ -2655,33 +2661,33 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
     let plan;
     if (approvedPlan) {
       plan = normalizeImplementationPlan(approvedPlan, goal.trim());
-      win.webContents.send('stream:state', `starting approved plan (${coderModel})`);
-      win.webContents.send('stream:info', `Using the approved plan without running the planner again. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
+      sink.emit('stream:state', `starting approved plan (${coderModel})`);
+      sink.emit('stream:info', `Using the approved plan without running the planner again. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
     } else {
-      win.webContents.send('stream:state', `planning (${model})`);
-      win.webContents.send('stream:info', `Orchestrator ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
+      sink.emit('stream:state', `planning (${model})`);
+      sink.emit('stream:info', `Orchestrator ${model} is inspecting the project. Coder: ${coderModel}. Verifier: ${verifierModel}.`);
       plan = await runOrchestratorPlan(model, goal.trim(), cwd, verifierModel, !!onlineResearch, !!think, baselineStatus);
     }
-    win.webContents.send('stream:info', `Plan: ${plan.summary}\n${plan.tasks.map((task, i) => `${i + 1}. ${task.title}`).join('\n')}`);
+    sink.emit('stream:info', `Plan: ${plan.summary}\n${plan.tasks.map((task, i) => `${i + 1}. ${task.title}`).join('\n')}`);
 
     const results = [];
     for (let index = 0; index < plan.tasks.length; index++) {
       if (stopRequested) break;
       const task = plan.tasks[index];
-      win.webContents.send('stream:state', `coding ${index + 1}/${plan.tasks.length} (${coderModel})`);
-      win.webContents.send('stream:info', `━ Task ${index + 1}/${plan.tasks.length}: ${task.title} ━`);
+      sink.emit('stream:state', `coding ${index + 1}/${plan.tasks.length} (${coderModel})`);
+      sink.emit('stream:info', `━ Task ${index + 1}/${plan.tasks.length}: ${task.title} ━`);
 
       let coderResult = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think);
       let gitEvidence = await collectOrchestrationGitEvidence(cwd);
-      win.webContents.send('stream:state', `verifying ${index + 1}/${plan.tasks.length} (${verifierModel})`);
+      sink.emit('stream:state', `verifying ${index + 1}/${plan.tasks.length} (${verifierModel})`);
       let verdict = await runOrchestrationVerifier(verifierModel, goal.trim(), task, coderResult, gitEvidence, baselineStatus, currentAbort.signal);
       let repairs = 0;
 
       while (verdict.trim().toUpperCase() !== 'GOAL_COMPLETE' && repairs < ORCHESTRATOR_MAX_REPAIRS && !stopRequested) {
         repairs++;
         usage.metrics.repairs += 1;
-        win.webContents.send('stream:info', `Verifier requested a repair for “${task.title}”:\n${verdict.slice(0, 2000)}`);
-        win.webContents.send('stream:state', `repairing ${index + 1}/${plan.tasks.length} (${coderModel})`);
+        sink.emit('stream:info', `Verifier requested a repair for “${task.title}”:\n${verdict.slice(0, 2000)}`);
+        sink.emit('stream:state', `repairing ${index + 1}/${plan.tasks.length} (${coderModel})`);
         const repair = await runCoderTask(
           task,
           coderModel,
@@ -2697,16 +2703,16 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
           steps: coderResult.steps + repair.steps,
         };
         gitEvidence = await collectOrchestrationGitEvidence(cwd);
-        win.webContents.send('stream:state', `re-verifying ${index + 1}/${plan.tasks.length} (${verifierModel})`);
+        sink.emit('stream:state', `re-verifying ${index + 1}/${plan.tasks.length} (${verifierModel})`);
         verdict = await runOrchestrationVerifier(verifierModel, goal.trim(), task, coderResult, gitEvidence, baselineStatus, currentAbort.signal);
       }
 
       const complete = verdict.trim().toUpperCase() === 'GOAL_COMPLETE';
       results.push({ task, complete, repairs, verdict, coderResult });
       if (complete) {
-        win.webContents.send('stream:info', `✔ ${task.title}: verified complete.`);
+        sink.emit('stream:info', `✔ ${task.title}: verified complete.`);
       } else {
-        win.webContents.send('stream:info', `✖ ${task.title}: not verified after ${repairs} repair attempt${repairs === 1 ? '' : 's'}. Remaining work:\n${verdict.slice(0, 2000)}`);
+        sink.emit('stream:info', `✖ ${task.title}: not verified after ${repairs} repair attempt${repairs === 1 ? '' : 's'}. Remaining work:\n${verdict.slice(0, 2000)}`);
         break;
       }
     }
@@ -2716,7 +2722,7 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
     const finalEvidence = await collectOrchestrationGitEvidence(cwd);
     let finalVerdict = allComplete ? 'GOAL_COMPLETE' : 'One or more planned tasks remain incomplete.';
     if (allComplete) {
-      win.webContents.send('stream:state', `final verification (${verifierModel})`);
+      sink.emit('stream:state', `final verification (${verifierModel})`);
       const combined = {
         report: results.map((result) => `${result.task.title}:\n${result.coderResult.report}`).join('\n\n'),
         evidence: results.flatMap((result) => result.coderResult.evidence),
@@ -2733,7 +2739,7 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
       };
       finalVerdict = await runOrchestrationVerifier(verifierModel, goal.trim(), wholeGoalTask, combined, finalEvidence, baselineStatus, currentAbort.signal);
       allComplete = finalVerdict.trim().toUpperCase() === 'GOAL_COMPLETE';
-      win.webContents.send('stream:info', allComplete
+      sink.emit('stream:info', allComplete
         ? '✔ Final verifier: the complete orchestration goal is satisfied.'
         : `Final verifier found remaining whole-goal work:\n${finalVerdict.slice(0, 2000)}`);
     }
@@ -2762,7 +2768,7 @@ ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goa
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
     currentAbort = null;
-    win.webContents.send('stream:done');
+    sink.done();
   }
 });
 
@@ -3174,7 +3180,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     if (chunks.length > 1) {
       const partials = [];
       for (let index = 0; index < chunks.length; index++) {
-        win.webContents.send('stream:state', `compacting (part ${index + 1}/${chunks.length})…`);
+        sink.emit('stream:state', `compacting (part ${index + 1}/${chunks.length})…`);
         // With the chunk ceiling reached, a single part can still overrun the
         // window. Trimming inside one part is bounded harm — every part is
         // still represented, which is the property the old hard fit lacked.
