@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld('api', {
   stop: () => ipcRenderer.send('chat:stop'),
   reset: () => ipcRenderer.invoke('chat:reset'),
   getConversation: () => ipcRenderer.invoke('chat:get'),
-  loadConversation: (msgs, model, runMetrics, contextState) => ipcRenderer.invoke('chat:load', msgs, model, runMetrics, contextState),
+  loadConversation: (msgs, model, runMetrics, contextState, view) => ipcRenderer.invoke('chat:load', msgs, model, runMetrics, contextState, view),
   contextState: () => ipcRenderer.invoke('context:state'),
   contextControl: (payload) => ipcRenderer.invoke('context:control', payload),
   gitStatus: (cwd) => ipcRenderer.invoke('git:status', cwd),

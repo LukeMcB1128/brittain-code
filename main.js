@@ -979,6 +979,22 @@ function activeToolDefs(chatMode, onlineResearch) {
   return activeTools ? activeTools.concat(mcpDefs) : activeTools;
 }
 
+// The fixed per-request overhead: system prompt + tool schemas. Both are sent on
+// every request but live outside `conversation`, so any count derived only from
+// messages under-reports by thousands of tokens. Falls back to 0 rather than
+// throwing — a bad cwd must not stop a chat from opening.
+function fixedOverheadTokens(cwd, model, mode, onlineResearch) {
+  try {
+    const chatMode = mode === 'chat';
+    const prompt = chatMode ? chatSystemPrompt(onlineResearch) : systemPrompt(cwd, model, onlineResearch);
+    const toolDefs = activeToolDefs(chatMode, onlineResearch) || [];
+    return estimateTokens({ role: 'system', content: prompt })
+      + (toolDefs.length ? estimateTokens(toolDefs) : 0);
+  } catch {
+    return 0;
+  }
+}
+
 async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineResearch = false, mode = 'code') {
   const chatMode = mode === 'chat';
   const prompt = chatMode ? chatSystemPrompt(onlineResearch) : systemPrompt(cwd, model, onlineResearch);
@@ -3388,14 +3404,17 @@ ipcMain.handle('context:control', (_e, payload = {}) => {
   }
 });
 
-ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextState) => {
+ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextState, view = {}) => {
   newSessionId();
   conversation = Array.isArray(msgs) ? msgs : [];
   contextState = normalizeContextState(savedContextState);
   usage = restoreUsage(savedUsage);
   // estimate the loaded context so the bar and /usage aren't blank until the
-  // next message (Ollama reports the exact count on the next request)
-  const approxTokens = estimateTokens(modelReadyMessages(conversation));
+  // next message (Ollama reports the exact count on the next request). This must
+  // include the system prompt and tool schemas, or a reopened chat reads as a few
+  // dozen tokens when the real next request is already several thousand.
+  const approxTokens = fixedOverheadTokens(view.cwd, model, view.mode, !!view.onlineResearch)
+    + estimateTokens(modelReadyMessages(conversation));
   const contextLength = model ? await effectiveContext(model) : 0;
   usage.context = { tokens: approxTokens, limit: contextLength };
   usage.metrics.peakContextTokens = Math.max(usage.metrics.peakContextTokens || 0, approxTokens);

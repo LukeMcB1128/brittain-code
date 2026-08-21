@@ -651,7 +651,8 @@ async function loadChat(chatId) {
   setAppMode(saved.mode === 'chat' ? 'chat' : 'code');
 
   // Push the stored conversation into the main process so the model continues from it.
-  const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics, saved.contextState);
+  const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics, saved.contextState,
+    { cwd: saved.cwd || cwd, mode: saved.mode === 'chat' ? 'chat' : 'code', onlineResearch: false });
   renderConversation(saved.conversation);
   updateContextBar(lc.approxTokens, lc.contextLength);
   compactWarned = false; // fresh warning budget for this chat
