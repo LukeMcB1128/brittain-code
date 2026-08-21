@@ -3073,7 +3073,12 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     const msgs = [...pinnedReady, ...summarizerInput];
     msgs.push({
       role: 'user',
-      content: 'Summarize this entire conversation so work can continue seamlessly in a fresh session: the goal, key decisions, files created or modified and their current state, and unresolved tasks. Output only the summary.',
+      // The summarizer only sees the older half now, so say so — otherwise it
+      // spends its room restating turns that are being kept word for word.
+      content: (tail.length
+        ? `Summarize the conversation above so work can continue in a fresh session. The ${tailTurns} most recent ${tailTurns === 1 ? 'turn is' : 'turns are'} being kept word for word and are not shown here, so do not try to cover them — carry forward everything earlier that they would not tell you.`
+        : 'Summarize this entire conversation so work can continue seamlessly in a fresh session.')
+        + ' Include: the goal, key decisions and why they were taken, files created or modified and their current state, commands run and their outcomes, unresolved errors, and remaining tasks. Output only the summary.',
     });
 
     let summary = '';
