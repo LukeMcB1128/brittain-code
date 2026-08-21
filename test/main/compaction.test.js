@@ -9,6 +9,10 @@ const {
   minimumSummaryTokens,
   validateSummary,
   describeCompaction,
+  summaryInstruction,
+  missingSections,
+  retryInstruction,
+  SUMMARY_SECTIONS,
 } = require('../../src/main/compaction');
 
 const user = (content) => ({ role: 'user', content });
@@ -162,4 +166,70 @@ test('a failed compaction is described as nothing at all', () => {
   assert.equal(describeCompaction({ ok: false, error: 'boom' }), '');
   assert.equal(describeCompaction(null), '');
   assert.equal(describeCompaction(undefined), '');
+});
+
+const structured = (body = 'word '.repeat(2000)) => [
+  'GOAL: ship the parser', '', 'CONSTRAINTS: no new dependencies', '',
+  'DECISIONS: chose a hand-rolled lexer', '', 'STATE: half done', '',
+  'NEXT: finish the error paths', '', body,
+].join('\n');
+
+test('all five required sections are recognised however the model labels them', () => {
+  const labelled = ['# GOAL', '**CONSTRAINTS**', 'DECISIONS —  chose X', '## STATE:', 'NEXT - finish'].join('\n\n');
+  assert.deepEqual(missingSections(labelled), []);
+});
+
+test('a missing section is reported by name', () => {
+  const partial = 'GOAL: x\nSTATE: y\nNEXT: z';
+  assert.deepEqual(missingSections(partial).sort(), ['CONSTRAINTS', 'DECISIONS']);
+});
+
+test('a long summary missing headings is usable but not structured', () => {
+  const result = validateSummary('word '.repeat(3000), { sourceTokens: 130_000 });
+  assert.equal(result.ok, true, 'it must not be discarded — it is still far better than nothing');
+  assert.equal(result.structured, false);
+  assert.ok(result.missing.length === SUMMARY_SECTIONS.length);
+});
+
+test('a long summary with every heading is both usable and structured', () => {
+  const result = validateSummary(structured(), { sourceTokens: 130_000 });
+  assert.equal(result.ok, true);
+  assert.equal(result.structured, true);
+  assert.deepEqual(result.missing, []);
+});
+
+test('the summary instruction names the sections and the length it wants', () => {
+  const text = summaryInstruction({ tailTurns: 3, minimumTokens: 900 });
+  for (const section of SUMMARY_SECTIONS) assert.match(text, new RegExp(section.name));
+  assert.match(text, /3 most recent turns are being kept word for word/);
+  assert.match(text, /at least 900 tokens/);
+  assert.match(text, /Output only the summary/);
+});
+
+test('the instruction does not mention a tail when none is being kept', () => {
+  const text = summaryInstruction({ tailTurns: 0 });
+  assert.doesNotMatch(text, /kept word for word/);
+  assert.match(text, /this entire conversation/);
+});
+
+test('the retry names the specific problem it wants fixed', () => {
+  const short = retryInstruction({ reason: 'too short', tokens: 90, required: 900, missing: [] });
+  assert.match(short, /roughly 90 tokens/);
+  assert.match(short, /at least 900/);
+
+  const unstructured = retryInstruction({ reason: 'unstructured', tokens: 1200, required: 900, missing: ['DECISIONS', 'NEXT'] });
+  assert.match(unstructured, /DECISIONS, NEXT/);
+  assert.doesNotMatch(unstructured, /too thin/);
+
+  const empty = retryInstruction({ reason: 'empty', tokens: 0, required: 900, missing: [] });
+  assert.match(empty, /empty/);
+});
+
+test('the description flags an unstructured summary and counts ledger entries', () => {
+  const line = describeCompaction({
+    ok: true, before: 131_000, after: 9_200, summaryTokens: 1_400,
+    tailTurns: 3, retries: 1, unstructured: true, ledgerEntries: 12,
+  });
+  assert.match(line, /\(unstructured\)/);
+  assert.match(line, /12 ledger entries/);
 });

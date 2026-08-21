@@ -18,8 +18,8 @@ const { createHistoryStore } = require('./src/main/history-store');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
-const { outcomeOf } = require('./src/main/ledger');
-const { retainedBudget, tailBudget, summaryBudget, selectVerbatimTail, validateSummary, retryInstruction, describeCompaction } = require('./src/main/compaction');
+const { outcomeOf, buildLedger, renderLedger, isEmptyLedger } = require('./src/main/ledger');
+const { retainedBudget, tailBudget, summaryBudget, selectVerbatimTail, validateSummary, retryInstruction, summaryInstruction, minimumSummaryTokens, describeCompaction } = require('./src/main/compaction');
 const { createCheckpointService } = require('./src/main/checkpoint-service');
 const { createDiffService } = require('./src/main/diff-service');
 const { normalizeCodeReview, SUBMIT_CODE_REVIEW_TOOL } = require('./src/main/code-review');
@@ -3075,15 +3075,18 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     const sourceTokens = estimateTokens(summarizerInput);
     const summaryRoom = summaryBudget(contextLength, pinnedCost + tailTokens);
 
+    // What the session did is read off the tool record rather than left to the
+    // summarizer, which is why the file list used to be the first thing lost.
+    const ledger = buildLedger(head);
+    const ledgerText = renderLedger(ledger);
+
     const msgs = [...pinnedReady, ...summarizerInput];
     msgs.push({
       role: 'user',
-      // The summarizer only sees the older half now, so say so — otherwise it
-      // spends its room restating turns that are being kept word for word.
-      content: (tail.length
-        ? `Summarize the conversation above so work can continue in a fresh session. The ${tailTurns} most recent ${tailTurns === 1 ? 'turn is' : 'turns are'} being kept word for word and are not shown here, so do not try to cover them — carry forward everything earlier that they would not tell you.`
-        : 'Summarize this entire conversation so work can continue seamlessly in a fresh session.')
-        + ' Include: the goal, key decisions and why they were taken, files created or modified and their current state, commands run and their outcomes, unresolved errors, and remaining tasks. Output only the summary.',
+      content: summaryInstruction({
+        tailTurns: tail.length ? tailTurns : 0,
+        minimumTokens: minimumSummaryTokens(sourceTokens),
+      }),
     });
 
     let summary = '';
@@ -3117,11 +3120,14 @@ async function compactConversation(model, signal = currentAbort?.signal) {
 
       summary = (data.message?.content || '').trim();
       check = validateSummary(summary, { sourceTokens, estimateTokens });
-      if (check.ok) break;
+      // Retry for missing headings too, but only once — a long summary without
+      // them is still worth keeping, so a second unstructured answer is
+      // accepted rather than thrown away.
+      if (check.ok && check.structured) break;
       if (attempt === 0) {
         retries += 1;
         msgs.push({ role: 'assistant', content: summary || '(empty response)' });
-        msgs.push({ role: 'user', content: retryInstruction(check.tokens, check.required) });
+        msgs.push({ role: 'user', content: retryInstruction(check) });
       }
     }
 
@@ -3155,6 +3161,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
             ? ' REMINDER: act only via tool calls (write_file/edit_file/read_file/run_command) — markdown code blocks in replies do nothing.'
             : ''),
       },
+      ...(ledgerText ? [{ role: 'assistant', content: ledgerText }] : []),
       ...(degraded ? [] : [{ role: 'assistant', content: 'Summary of the conversation so far:\n\n' + summary }]),
       ...keptTail,
     ];
@@ -3174,6 +3181,10 @@ async function compactConversation(model, signal = currentAbort?.signal) {
       tailTokens: degraded ? fallback.tokens : tailTokens,
       retries,
       degraded,
+      unstructured: !degraded && !check.structured,
+      ledgerEntries: isEmptyLedger(ledger)
+        ? 0
+        : ledger.changed.length + ledger.commands.length + ledger.checks.length + ledger.errors.length,
     };
     // Described once here so every caller — renderer included, where this module
     // is not loadable — reports compaction the same way.

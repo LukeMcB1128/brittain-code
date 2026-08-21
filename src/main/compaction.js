@@ -81,20 +81,79 @@ function minimumSummaryTokens(sourceTokens) {
   return clamp(Math.round((Number(sourceTokens) || 0) * 0.02), 120, 900);
 }
 
-function validateSummary(summary, { sourceTokens = 0, estimateTokens = estimateTokensDefault } = {}) {
-  const text = String(summary || '').trim();
-  if (!text) return { ok: false, reason: 'empty', tokens: 0, required: 0 };
-  const tokens = estimateTokens(text);
-  const required = minimumSummaryTokens(sourceTokens);
-  if (tokens < required) return { ok: false, reason: 'too short', tokens, required };
-  return { ok: true, tokens, required };
+// The five things that are expensive to rederive after the transcript is gone.
+// Asking for them by name is what turns "summarize this" into a record.
+const SUMMARY_SECTIONS = [
+  { name: 'GOAL', hint: 'the original objective, in the user\'s own terms where possible' },
+  { name: 'CONSTRAINTS', hint: 'user corrections, rejected approaches, and stated preferences' },
+  { name: 'DECISIONS', hint: 'what was chosen and why — the part that costs most to work out twice' },
+  { name: 'STATE', hint: 'where the work actually stands right now' },
+  { name: 'NEXT', hint: 'the concrete remaining steps' },
+];
+
+function sectionPresent(text, name) {
+  // Models label sections in several ways: bare, as a markdown heading, bolded,
+  // or followed by a colon or dash. Accept all of them rather than retrying
+  // over formatting.
+  return new RegExp(`^\\s*(?:#{1,6}\\s*)?(?:\\*\\*)?${name}(?:\\*\\*)?\\s*[:\\-—]?\\s*$|^\\s*(?:#{1,6}\\s*)?(?:\\*\\*)?${name}(?:\\*\\*)?\\s*[:\\-—]\\s*\\S`, 'im')
+    .test(text);
 }
 
-function retryInstruction(tokens, required) {
+function missingSections(text) {
+  return SUMMARY_SECTIONS.map((section) => section.name).filter((name) => !sectionPresent(text, name));
+}
+
+// Two different questions, deliberately separated. `ok` means the summary is
+// usable at all; `structured` means it is fully compliant. A long, unstructured
+// summary is still far better than discarding the session, so the caller is
+// allowed to accept one while retrying for the other.
+function validateSummary(summary, { sourceTokens = 0, estimateTokens = estimateTokensDefault } = {}) {
+  const text = String(summary || '').trim();
+  const required = minimumSummaryTokens(sourceTokens);
+  if (!text) return { ok: false, structured: false, reason: 'empty', tokens: 0, required, missing: [] };
+  const tokens = estimateTokens(text);
+  const missing = missingSections(text);
+  if (tokens < required) {
+    return { ok: false, structured: missing.length === 0, reason: 'too short', tokens, required, missing };
+  }
+  return {
+    ok: true,
+    structured: missing.length === 0,
+    reason: missing.length ? 'unstructured' : '',
+    tokens,
+    required,
+    missing,
+  };
+}
+
+// The instruction that asks for a record rather than a paragraph.
+function summaryInstruction({ tailTurns = 0, minimumTokens = 0 } = {}) {
+  const scope = tailTurns
+    ? `Summarize the conversation above so work can continue in a fresh session. The ${tailTurns} most recent ${tailTurns === 1 ? 'turn is' : 'turns are'} being kept word for word and are not shown to you, so do not try to cover them — carry forward everything earlier that they would not reveal on their own.`
+    : 'Summarize this entire conversation so work can continue seamlessly in a fresh session.';
   return [
-    `That summary was roughly ${tokens} tokens — too thin to resume work from.`,
-    `Write a fuller one of at least ${required} tokens.`,
-    'Cover the original goal, the decisions taken and why, every file created or modified and its current state,',
+    scope,
+    '',
+    'Use exactly these five headings, in this order:',
+    ...SUMMARY_SECTIONS.map((section) => `${section.name}: ${section.hint}`),
+    '',
+    ...(minimumTokens ? [`Write at least ${minimumTokens} tokens. Detail that is expensive to rediscover is worth the room.`, ''] : []),
+    'Do not continue the work, call tools, or ask questions. Output only the summary.',
+  ].join('\n');
+}
+
+function retryInstruction(check) {
+  const problems = [];
+  if (check.reason === 'empty') problems.push('That response was empty.');
+  else if (check.reason === 'too short') {
+    problems.push(`That summary was roughly ${check.tokens} tokens — too thin to resume work from. Write at least ${check.required}.`);
+  }
+  if (check.missing?.length) {
+    problems.push(`These required headings were missing: ${check.missing.join(', ')}. Include all five.`);
+  }
+  return [
+    ...problems,
+    'Rewrite it in full. Cover the goal, the decisions taken and why, every file created or modified and its current state,',
     'commands run and their outcomes, unresolved errors, and the remaining work. Output only the summary.',
   ].join(' ');
 }
@@ -111,7 +170,9 @@ function describeCompaction(result) {
   const parts = [`${formatCount(result.before)} \u2192 ${formatCount(result.after)} tokens`];
   parts.push(result.degraded
     ? 'no usable summary \u2014 recent turns only'
-    : `summary ${formatCount(result.summaryTokens)} tok`);
+    : `summary ${formatCount(result.summaryTokens)} tok${result.unstructured ? ' (unstructured)' : ''}`);
+  const entries = Math.max(0, Math.round(Number(result.ledgerEntries) || 0));
+  if (entries) parts.push(`${entries} ledger ${entries === 1 ? 'entry' : 'entries'}`);
   const turns = Math.max(0, Math.round(Number(result.tailTurns) || 0));
   parts.push(`${turns} recent ${turns === 1 ? 'turn' : 'turns'} kept verbatim`);
   const retries = Math.max(0, Math.round(Number(result.retries) || 0));
@@ -129,6 +190,9 @@ module.exports = {
   minimumSummaryTokens,
   validateSummary,
   retryInstruction,
+  summaryInstruction,
+  SUMMARY_SECTIONS,
+  missingSections,
   describeCompaction,
   TAIL_SHARE,
 };
