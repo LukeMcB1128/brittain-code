@@ -1895,6 +1895,7 @@ const SLASH_HELP = [
   '/recs — compare installed models for this computer',
   '/auto <request> — select the best compatible installed model and run the request',
   '/agent [--policy <name>] <goal> — run unattended: always branched, always checkpointed, always reported',
+  '/agent trigger [list|new|run <id>] — scheduled unattended runs from triggers.json',
   '/memory — view what the agent has remembered',
   '/ledger — view what this session changed, ran, and failed at (kept across compaction)',
   '/export — save this chat as a markdown file',
@@ -2407,6 +2408,37 @@ async function handleSlash(raw) {
       if (busy) return;
       if (!modelSelect.value) return addError('No model selected.');
       if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+
+      // Triggers are authored in a file, the way mcp.json already is: entering
+      // agent mode there is a setup act, not a session act.
+      if (/^trigger\b/.test(arg)) {
+        const [, sub = 'list', id = ''] = arg.split(/\s+/);
+        if (sub === 'new' || sub === 'edit') {
+          const opened = await window.api.triggersOpenConfig();
+          return addInfo(`Edit triggers in ${opened.path}, then reload with /agent trigger list.`);
+        }
+        if (sub === 'run') {
+          if (!id) return addError('Usage: /agent trigger run <id>');
+          startRun();
+          let res;
+          try { res = await window.api.triggersRun(id); } finally { endRun(); }
+          return res.ok ? saveChat() : addError(res.error);
+        }
+        const state = await window.api.triggersState();
+        const lines = [`TRIGGERS — ${state.configPath}`];
+        if (state.error) lines.push(`(could not be read: ${state.error})`);
+        if (!state.triggers.length) lines.push('(none configured — /agent trigger new to create the file)');
+        for (const trigger of state.triggers) {
+          lines.push(`${trigger.enabled ? '[on] ' : '[off]'} ${trigger.id} — ${trigger.schedule} — ${trigger.goal}`
+            + (trigger.problem ? `  ⚠ ${trigger.problem}` : ''));
+        }
+        if (state.queued.length) {
+          lines.push('', 'WAITING TO RUN:');
+          for (const entry of state.queued) lines.push(`- ${entry.goal} (queued ${entry.enqueuedAt})`);
+        }
+        lines.push('', 'Triggers only fire while Brittain Code is open.');
+        return showOverlay('AGENT TRIGGERS', lines.join('\n'));
+      }
 
       let goal = arg;
       let policy = '';

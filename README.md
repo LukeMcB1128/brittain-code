@@ -63,6 +63,10 @@ Because nobody is there to answer, a call that would normally prompt is *deferre
 
 Each run leaves a timestamped transcript and a markdown report in `runs/` in the application-data directory, and raises a notification when it finishes.
 
+`/agent trigger` manages scheduled unattended runs, defined in `triggers.json` in the application-data directory using ordinary cron fields (`*`, `N`, `a-b`, `*/n`, and comma lists). `/agent trigger new` creates and reveals the file, `/agent trigger list` shows what is configured along with anything waiting to run, and `/agent trigger run <id>` fires one immediately, ignoring its schedule — the honest way to test the whole path with someone watching. A generated example is always created disabled, so nothing runs until you have edited it.
+
+Triggers only fire while Brittain Code is open. A trigger that fires while a mission is already running is queued rather than dropped: the same trigger replaces its own pending entry instead of stacking copies, entries expire rather than running hours late, and a queued run is branched and checkpointed when it starts rather than against the tree it was queued against.
+
 ### Undoing a run
 
 Before every Code-mode run in a Git repo, the app takes a silent checkpoint of the working tree, so **UNDO RUN** restores it even if you never committed. UNDO itself snapshots first, so it is also undoable. Optional **auto-branch** moves work onto a generated `brittain/<slug>` branch before the agent touches anything, keeping your current branch clean.
@@ -123,6 +127,7 @@ Type these in the message box:
 | `/mcp [on\|off <server>]` | External MCP tool servers: status, enable, disable |
 | `/memory` | View what the agent has remembered for the selected project |
 | `/agent [--policy <name>] <goal>` | Run unattended: always branched, checkpointed, and reported |
+| `/agent trigger [list\|new\|run <id>]` | Scheduled unattended runs from `triggers.json` |
 | `/ledger` | View what this session changed, ran, and failed at (survives compaction) |
 | `/export` | Save the chat as a markdown file |
 | `/tools` | List available tools and their risky, sensitive, or network classification |

@@ -8,11 +8,25 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 function agentHandler() {
   const main = read('main.js');
-  const start = main.indexOf("ipcMain.handle('agent:run'");
-  assert.ok(start > 0, 'agent:run should exist');
-  const end = main.indexOf('ipcMain.handle(', start + 20);
+  const start = main.indexOf('async function runAgentMission(');
+  assert.ok(start > 0, 'runAgentMission should exist');
+  const end = main.indexOf("ipcMain.handle('agent:run'", start);
+  assert.ok(end > start, 'the IPC handler should be a wrapper around it');
   return main.slice(start, end);
 }
+
+test('an agent run is callable without IPC, so a trigger can start one', () => {
+  const main = read('main.js');
+  assert.match(main, /async function runAgentMission\(payload = \{\}\) \{/);
+  assert.match(main, /ipcMain\.handle\('agent:run', async \(_e, payload = \{\}\) => runAgentMission\(payload\)\)/);
+});
+
+test('a request arriving mid-mission is queued rather than refused', () => {
+  const body = agentHandler();
+  assert.match(body, /enqueueRun\(settingsUserDataDir, payload\)/);
+  assert.doesNotMatch(body.slice(0, 400), /return \{ ok: false, error: 'A mission is already running/,
+    'decision A chose queueing over refusal');
+});
 
 test('/agent is a commitment, not a setting: it always branches and reports', () => {
   const body = agentHandler();

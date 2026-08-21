@@ -17,6 +17,8 @@ const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore } = require('./src/main/history-store');
 const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
+const { enqueue: enqueueRun, dequeue: dequeueRun, peek: peekQueue } = require('./src/main/run-queue');
+const { readTriggers, dueTriggers, validateTrigger, ensureConfig: ensureTriggerConfig, configPath: triggerConfigPath } = require('./src/main/triggers');
 const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies, checkPreconditions } = require('./src/main/autonomy');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
@@ -353,6 +355,7 @@ app.whenReady().then(() => {
     }
   });
   createWindow();
+  startTriggerScheduler();
   const packageMetadata = require('./package.json');
   updateService = createUpdateService({
     updater: autoUpdater,
@@ -2662,8 +2665,16 @@ function notifyRunFinished(mission, reportPath) {
 // /agent is a commitment rather than a setting: it always auto-branches, always
 // checkpoints, and always writes a report, however the toggles happen to sit.
 // Typing it is an explicit statement that nobody will be watching.
-ipcMain.handle('agent:run', async (_e, payload = {}) => {
-  if (activeMission?.status === 'running') return { ok: false, error: 'A mission is already running. Use /mission status or /mission stop.' };
+async function runAgentMission(payload = {}) {
+  // Decision A: a request arriving mid-mission is queued, not refused. It is
+  // re-checkpointed at dequeue rather than trusting the tree it was queued
+  // against, and it expires rather than running hours late.
+  if (activeMission?.status === 'running') {
+    const queued = enqueueRun(settingsUserDataDir, payload);
+    if (!queued.ok) return queued;
+    sink.emit('stream:info', `A mission is already running — queued "${payload.goal}" (${queued.depth} waiting).`);
+    return { ok: true, queued: true, depth: queued.depth };
+  }
 
   const policyId = String(payload.policy || '') || runtimeSettings.autonomyPolicy
     || policyForLegacyAutoApprove(!!runtimeSettings.autoApprove);
@@ -2714,6 +2725,118 @@ ipcMain.handle('agent:run', async (_e, payload = {}) => {
     notifyRunFinished(activeMission, reportPath);
   }
   return result;
+}
+
+ipcMain.handle('agent:run', async (_e, payload = {}) => runAgentMission(payload));
+
+// ---------- triggers ----------
+// A minute-resolution tick over triggers.json. Deliberately small: no
+// dependency, no daemon, and the whole surface fits in one file. It only fires
+// while the app is running (decision C).
+const triggerLastFired = Object.create(null);
+let triggerTimer = null;
+
+// Everything a trigger needs to become a run, with the models it did not name
+// filled in from current settings.
+function triggerToRequest(trigger) {
+  return {
+    goal: trigger.goal,
+    cwd: trigger.cwd,
+    policy: trigger.policy || '',
+    triggerId: trigger.id,
+    maxIterations: trigger.maxIterations || runtimeSettings.defaultLoopIterations,
+    model: trigger.model || runtimeSettings.codeModel,
+    coderModel: trigger.coderModel || runtimeSettings.coderModel,
+    subModel: trigger.subModel || runtimeSettings.scoutModel || 'qwen3:8b',
+    onlineResearch: false,
+    think: false,
+    chatId: `trigger-${trigger.id}`,
+    maxAgeMs: trigger.maxAgeMs,
+  };
+}
+
+async function fireDueTriggers(now = new Date()) {
+  const { triggers, error } = readTriggers(settingsUserDataDir);
+  if (error) {
+    sink.emit('stream:info', `triggers.json could not be read: ${error}`);
+    return;
+  }
+  for (const { trigger, minuteKey } of dueTriggers(triggers, now, triggerLastFired)) {
+    triggerLastFired[trigger.id] = minuteKey;
+    sink.emit('stream:info', `Trigger "${trigger.id}" fired.`);
+    try {
+      await runAgentMission(triggerToRequest(trigger));
+    } catch (err) {
+      sink.emit('stream:info', `Trigger "${trigger.id}" failed: ${String(err.message || err)}`);
+    }
+  }
+}
+
+// A queued run is checkpointed and branched at dequeue, inside runAgentMission,
+// rather than against the tree it was queued against hours earlier.
+async function drainRunQueue() {
+  if (activeMission?.status === 'running') return;
+  const { entry, expired } = dequeueRun(settingsUserDataDir);
+  for (const stale of expired) {
+    sink.emit('stream:info', `Skipped queued run "${stale.goal}" — it aged out before anything could run it.`);
+  }
+  if (!entry) return;
+  sink.emit('stream:info', `Starting queued run "${entry.goal}" (queued ${entry.enqueuedAt}).`);
+  try {
+    await runAgentMission(entry);
+  } catch (err) {
+    sink.emit('stream:info', `Queued run failed: ${String(err.message || err)}`);
+  }
+}
+
+function startTriggerScheduler() {
+  if (triggerTimer) return;
+  triggerTimer = setInterval(async () => {
+    try {
+      await drainRunQueue();
+      await fireDueTriggers();
+    } catch {
+      // A scheduler that throws would stop ticking for the rest of the session.
+    }
+  }, 60_000);
+}
+
+ipcMain.handle('triggers:state', () => {
+  const { triggers, error } = readTriggers(settingsUserDataDir);
+  return {
+    ok: true,
+    configPath: triggerConfigPath(settingsUserDataDir),
+    error,
+    triggers: triggers.map((trigger) => ({
+      id: trigger.id,
+      enabled: trigger.enabled !== false,
+      schedule: trigger.schedule,
+      goal: trigger.goal,
+      cwd: trigger.cwd,
+      policy: trigger.policy || '',
+      problem: validateTrigger(trigger),
+    })),
+    queued: peekQueue(settingsUserDataDir).map((entry) => ({
+      goal: entry.goal, triggerId: entry.triggerId || '', enqueuedAt: entry.enqueuedAt,
+    })),
+  };
+});
+
+ipcMain.handle('triggers:openConfig', () => {
+  const target = ensureTriggerConfig(settingsUserDataDir);
+  shell.showItemInFolder(target);
+  return { ok: true, path: target };
+});
+
+// Runs one trigger now, ignoring its schedule — the honest test of the whole
+// path, with a person present to watch it.
+ipcMain.handle('triggers:run', async (_e, id) => {
+  const { triggers } = readTriggers(settingsUserDataDir);
+  const trigger = triggers.find((entry) => entry.id === id);
+  if (!trigger) return { ok: false, error: `No trigger named "${id}".` };
+  const problem = validateTrigger(trigger);
+  if (problem) return { ok: false, error: problem };
+  return runAgentMission(triggerToRequest(trigger));
 });
 
 ipcMain.handle('mission:get', () => ({ ok: true, mission: activeMission }));
