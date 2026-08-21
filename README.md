@@ -45,6 +45,14 @@ If Ollama rejects malformed tool-call JSON, Brittain Code discards that call and
 
 Local models degrade before they fail loudly — glitch tokens, byte-fallback artifacts, self-talk leaking into written files, and runaway repetition. Brittain Code scans generated content and tool arguments for those signatures inside the streaming layer, so every caller (main agent, subagent, verifier, coder) is protected without per-call-site changes. A detected episode recovers with a context compaction — the "sanity reset" that empirically clears it — rather than silently writing corrupted code, and gives up honestly if it recurs.
 
+### What compaction keeps
+
+Compacting a conversation summarizes the older half and keeps the most recent complete turns verbatim, because those are both the most relevant part of the session and the cheapest to preserve. Tails always start at one of your messages, so a tool result is never separated from the call that produced it. Small context windows keep a proportionally larger share, since a flat percentage of 8K leaves too little to work from.
+
+The summary itself is checked before anything is thrown away. One that is too thin for the conversation it covers earns a single retry naming the length it missed, and the old messages are not replaced until a summary passes. If none does, compaction keeps a larger stretch of raw conversation and says so, rather than continuing from a record that lost the session — and if not even one complete turn fits, it declines and changes nothing.
+
+Every compaction reports tokens before and after, the summary size, how many turns survived intact, and whether a retry was needed.
+
 ### Undoing a run
 
 Before every Code-mode run in a Git repo, the app takes a silent checkpoint of the working tree, so **UNDO RUN** restores it even if you never committed. UNDO itself snapshots first, so it is also undoable. Optional **auto-branch** moves work onto a generated `brittain/<slug>` branch before the agent touches anything, keeping your current branch clean.
