@@ -12,7 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('node:child_process');
 const { McpManager } = require('./mcp');
-const { initTools, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
+const { initTools, setCommandSandbox, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
@@ -30,6 +30,7 @@ const pendingStore = require('./src/main/pending-store');
 const decisionsLog = require('./src/main/decisions-log');
 const projectTriggers = require('./src/main/project-triggers');
 const daemon = require('./src/main/daemon');
+const sandbox = require('./src/main/sandbox');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
@@ -2930,6 +2931,15 @@ async function runAgentTask(payload = {}) {
     ? `Agent run ${run.id} resuming under "${policy.label || policyId}".`
     : `Agent run ${run.id} starting unattended under "${policy.label || policyId}". Transcript: ${run.transcriptPath}`);
 
+  // OS-level containment for shell commands when the policy opts in. macOS
+  // only for now; a policy that asks for it elsewhere is told, not indulged
+  // silently — the run continues unconfined with the fact on the record.
+  if (policy.sandbox && sandbox.available()) {
+    setCommandSandbox((command, projectDir) => sandbox.wrapCommand(command, projectDir));
+    sink.emit('stream:info', 'Shell commands run inside an OS sandbox: writes confined to the project and temp directories.');
+  } else if (policy.sandbox) {
+    sink.emit('stream:info', 'This policy asks for sandboxing, but no OS sandbox is available on this platform — commands run unconfined.');
+  }
 
   // Where there is a repo, branch and checkpoint for undo; where there is not,
   // neither exists and the disclosure is the guard.
@@ -2964,6 +2974,7 @@ async function runAgentTask(payload = {}) {
     if (err?.name === 'AbortError') { outcome = 'stopped'; status = 'stopped'; }
     else { outcome = 'failed'; status = 'failed'; sink.emit('stream:info', `Agent run failed: ${String(err.message || err)}`); }
   } finally {
+    setCommandSandbox(null);
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : outcome);
     currentAbort = null;
     runtimeSettings = { ...runtimeSettings, autonomyPolicy: previousPolicy };

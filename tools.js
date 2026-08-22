@@ -30,6 +30,14 @@ function initTools(dir) {
   userDataDir = dir;
 }
 
+// OS-level containment for shell commands, set by main.js for the duration of
+// a sandboxed unattended run and cleared after (see src/main/sandbox.js).
+// null = run commands unconfined, exactly as before.
+let commandSandbox = null;
+function setCommandSandbox(wrapper) {
+  commandSandbox = typeof wrapper === 'function' ? wrapper : null;
+}
+
 // Background processes started by the agent are kept in an in-memory registry
 // so they can be polled and stopped without exposing general PID management.
 const managedProcesses = new Map();
@@ -1434,8 +1442,12 @@ async function executeTool(name, args, cwd) {
       return truncate(lines.join('\n'));
     }
     case 'run_command': {
+      const argv = commandSandbox ? commandSandbox(String(args.command), fs.realpathSync(cwd)) : null;
+      const execute = argv
+        ? (callback) => execFile(argv[0], argv.slice(1), { cwd, timeout: 60_000, maxBuffer: 4_000_000 }, callback)
+        : (callback) => exec(args.command, { cwd, timeout: 60_000, maxBuffer: 4_000_000 }, callback);
       return new Promise((resolve) => {
-        exec(args.command, { cwd, timeout: 60_000, maxBuffer: 4_000_000 }, (err, stdout, stderr) => {
+        execute((err, stdout, stderr) => {
           let out = '';
           if (stdout) out += stdout;
           if (stderr) out += (out ? '\n--- stderr ---\n' : '') + stderr;
@@ -2336,6 +2348,7 @@ const {
 
 module.exports = {
   initTools,
+  setCommandSandbox,
   TOOL_DEFS,
   RISKY_TOOLS,
   SUBAGENT_TOOLS,
