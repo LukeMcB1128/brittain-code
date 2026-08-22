@@ -57,7 +57,7 @@ Each ledger is also written to `runs/` in the app's data directory as it is prod
 
 ### Unattended runs
 
-`/agent <goal>` runs a mission with nobody watching. It is a commitment rather than a setting: it always moves work onto a generated branch, always takes a checkpoint, and always writes a report, however the toggles happen to sit. `--policy <name>` picks an autonomy policy for that run alone without changing your default.
+`/agent <goal>` runs a single agent loop with nobody watching — one model working the goal, free to spawn a subagent when it needs one. It is not the planner/coder/verifier mission pipeline; "check my emails" should not stand up three models. It is a commitment rather than a setting: where there is a repository it moves work onto a generated branch and checkpoints it, and it always writes a report, however the toggles happen to sit. `--policy <name>` picks an autonomy policy for that run alone without changing your default.
 
 Starting an unattended run shows a one-time-per-project disclosure: undo is the wrong safety model for a run that can act on the world, so it states plainly that the agent acts on its own — running commands, driving a browser, calling connected tools — and that some actions cannot be undone. A Git repository is no longer required; when there is one the run still branches and checkpoints for its file-level work, and when there is not, the disclosure is the guard and file-level undo simply does not apply. A policy can still opt into requiring a generated branch, which only applies inside a repository.
 

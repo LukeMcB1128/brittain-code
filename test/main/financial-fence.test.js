@@ -54,7 +54,8 @@ test('the financial classification is threaded through the policy, not just dete
   assert.match(main, /financial: looksFinancial\(name, args\)/, 'classifyToolCall must set financial');
   // classifyToolCall is spread straight into decide, so no separate wiring is
   // needed — assert the spread is intact.
-  assert.match(main, /const call = classifyToolCall\(name, args\);\s*const decision = decideAutonomy\(policy, \{\s*\.\.\.call,/);
+  assert.match(main, /const call = classifyToolCall\(name, args\);/);
+  assert.match(main, /decideAutonomy\(policy, \{\s*\.\.\.call,/, 'the whole classification, financial included, is spread into the decision');
   assert.match(main, /call\.financial \? \{ \.\.\.promptKind, financial: true \}/,
     'a financial call must be surfaced as such in the prompt');
 });

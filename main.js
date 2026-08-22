@@ -572,9 +572,14 @@ function activePolicy(autoApprove) {
 // Resolves one tool call to an executable decision. `attended` is what makes
 // this different from the boolean it replaces: with nobody watching, a call
 // that would have prompted is recorded and skipped instead of hanging.
-async function resolveToolCall(name, args, { autoApprove, onlineResearch, attended = true, promptKind = {} }) {
+async function resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind = {} }) {
   const { id, policy } = activePolicy(autoApprove);
   const call = classifyToolCall(name, args);
+  // Whether a human is watching is a property of the run, not of the call site.
+  // An unattended run turns every "ask" into a "defer" so it cannot hang on a
+  // prompt nobody will answer — so this must come from the run context, not a
+  // flag each of the six approval branches would have to remember to pass.
+  const attended = currentRun ? currentRun.attended : true;
   const decision = decideAutonomy(policy, {
     ...call,
     attended,
@@ -2735,14 +2740,19 @@ function notifyRunFinished(mission, reportPath) {
 // /agent is a commitment rather than a setting: it always auto-branches, always
 // checkpoints, and always writes a report, however the toggles happen to sit.
 // Typing it is an explicit statement that nobody will be watching.
-async function runAgentMission(payload = {}) {
-  // Decision A: a request arriving mid-mission is queued, not refused. It is
-  // re-checkpointed at dequeue rather than trusting the tree it was queued
-  // against, and it expires rather than running hours late.
-  if (activeMission?.status === 'running') {
+// /agent is a single unattended agent loop — one model working the goal, free
+// to spawn a subagent when it needs one. It is deliberately NOT the mission
+// pipeline: "check my emails" should not stand up a planner, coder, and
+// verifier. It runs the same ReAct loop as an ordinary Code turn, only with
+// nobody watching, so the autonomy policy governs every tool call.
+async function runAgentTask(payload = {}) {
+  // Decision A: a request arriving while something is already running is queued,
+  // not refused. It expires rather than running hours late, and is
+  // re-checkpointed when it actually starts.
+  if (currentAbort || activeMission?.status === 'running') {
     const queued = enqueueRun(settingsUserDataDir, payload);
     if (!queued.ok) return queued;
-    sink.emit('stream:info', `A mission is already running — queued "${payload.goal}" (${queued.depth} waiting).`);
+    sink.emit('stream:info', `Busy — queued "${payload.goal}" (${queued.depth} waiting).`);
     return { ok: true, queued: true, depth: queued.depth };
   }
 
@@ -2753,10 +2763,13 @@ async function runAgentMission(payload = {}) {
 
   const cwd = payload.cwd;
   if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  const model = payload.model;
+  if (!model) return { ok: false, error: 'Select a model first.' };
+  const goal = String(payload.goal || '').trim();
+  if (!goal) return { ok: false, error: 'An agent goal is required.' };
 
-  // A repository is no longer required — undo is the wrong safety model for a
-  // run that can act on the world, and the disclosure is the guard. The branch
-  // is still read so a policy that opts into requiring one can be checked.
+  // A repository is not required. The branch is read only so a policy that opts
+  // into requiring one can be checked.
   const branch = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
   const preconditions = checkPreconditions(policy, {
     attended: false,
@@ -2772,16 +2785,41 @@ async function runAgentMission(payload = {}) {
   sink.configure({ targets: ['renderer', 'file'], transcriptPath: run.transcriptPath });
   sink.emit('stream:info', `Agent run ${run.id} starting unattended under "${policy.label || policyId}". Transcript: ${run.transcriptPath}`);
 
-  let result;
+  // Where there is a repo, branch and checkpoint for undo; where there is not,
+  // neither exists and the disclosure is the guard.
+  await maybeAutoBranch(cwd, goal, true);
+  await createCheckpoint(cwd);
+
+  conversation.push({ role: 'user', content: goal, displayContent: goal });
+  stopRequested = false;
+  currentAbort = new AbortController();
+  const runStartedAt = Date.now();
+  let outcome = 'ok';
+  let status = 'completed';
+
   try {
-    result = await startMission({ ...payload, autoBranch: true, autoApprove: false, origin: 'agent' });
+    const { runLog } = await runAgentTurn(
+      model, cwd,
+      /* autoApprove (unused; the policy decides) */ false,
+      !!payload.think,
+      payload.subModel || 'qwen3:8b',
+      !!payload.onlineResearch,
+      'code',
+    );
+    await emitRunReport(cwd, runLog);
+  } catch (err) {
+    if (err?.name === 'AbortError') { outcome = 'stopped'; status = 'stopped'; }
+    else { outcome = 'failed'; status = 'failed'; sink.emit('stream:info', `Agent run failed: ${String(err.message || err)}`); }
   } finally {
+    finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : outcome);
+    currentAbort = null;
     runtimeSettings = { ...runtimeSettings, autonomyPolicy: previousPolicy };
     const finished = endRun();
+    const context = { goal, projectPath: cwd, status };
     const reportPath = runReportPath(finished.id);
     try {
       fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-      fs.writeFileSync(reportPath, renderRunReport(finished, activeMission), 'utf8');
+      fs.writeFileSync(reportPath, renderRunReport(finished, context), 'utf8');
     } catch {
       // A report that cannot be written must not mask the run's own outcome.
     }
@@ -2793,12 +2831,13 @@ async function runAgentMission(payload = {}) {
       reportPath,
       transcriptPath: finished.transcriptPath,
     });
-    notifyRunFinished(activeMission, reportPath);
+    notifyRunFinished(context, reportPath);
+    sink.done();
   }
-  return result;
+  return { ok: true, status };
 }
 
-ipcMain.handle('agent:run', async (_e, payload = {}) => runAgentMission(payload));
+ipcMain.handle('agent:run', async (_e, payload = {}) => runAgentTask(payload));
 
 // ---------- triggers ----------
 // A minute-resolution tick over triggers.json. Deliberately small: no
@@ -2836,14 +2875,14 @@ async function fireDueTriggers(now = new Date()) {
     triggerLastFired[trigger.id] = minuteKey;
     sink.emit('stream:info', `Trigger "${trigger.id}" fired.`);
     try {
-      await runAgentMission(triggerToRequest(trigger));
+      await runAgentTask(triggerToRequest(trigger));
     } catch (err) {
       sink.emit('stream:info', `Trigger "${trigger.id}" failed: ${String(err.message || err)}`);
     }
   }
 }
 
-// A queued run is checkpointed and branched at dequeue, inside runAgentMission,
+// A queued run is checkpointed and branched at dequeue, inside runAgentTask,
 // rather than against the tree it was queued against hours earlier.
 async function drainRunQueue() {
   if (activeMission?.status === 'running') return;
@@ -2854,7 +2893,7 @@ async function drainRunQueue() {
   if (!entry) return;
   sink.emit('stream:info', `Starting queued run "${entry.goal}" (queued ${entry.enqueuedAt}).`);
   try {
-    await runAgentMission(entry);
+    await runAgentTask(entry);
   } catch (err) {
     sink.emit('stream:info', `Queued run failed: ${String(err.message || err)}`);
   }
@@ -2907,7 +2946,7 @@ ipcMain.handle('triggers:run', async (_e, id) => {
   if (!trigger) return { ok: false, error: `No trigger named "${id}".` };
   const problem = validateTrigger(trigger);
   if (problem) return { ok: false, error: problem };
-  return runAgentMission(triggerToRequest(trigger));
+  return runAgentTask(triggerToRequest(trigger));
 });
 
 ipcMain.handle('mission:get', () => ({ ok: true, mission: activeMission }));

@@ -8,8 +8,8 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 function agentHandler() {
   const main = read('main.js');
-  const start = main.indexOf('async function runAgentMission(');
-  assert.ok(start > 0, 'runAgentMission should exist');
+  const start = main.indexOf('async function runAgentTask(');
+  assert.ok(start > 0, 'runAgentTask should exist');
   const end = main.indexOf("ipcMain.handle('agent:run'", start);
   assert.ok(end > start, 'the IPC handler should be a wrapper around it');
   return main.slice(start, end);
@@ -17,41 +17,58 @@ function agentHandler() {
 
 test('an agent run is callable without IPC, so a trigger can start one', () => {
   const main = read('main.js');
-  assert.match(main, /async function runAgentMission\(payload = \{\}\) \{/);
-  assert.match(main, /ipcMain\.handle\('agent:run', async \(_e, payload = \{\}\) => runAgentMission\(payload\)\)/);
+  assert.match(main, /async function runAgentTask\(payload = \{\}\) \{/);
+  assert.match(main, /ipcMain\.handle\('agent:run', async \(_e, payload = \{\}\) => runAgentTask\(payload\)\)/);
 });
 
-test('a request arriving mid-mission is queued rather than refused', () => {
+test('/agent is a single agent loop, not the mission pipeline', () => {
+  const body = agentHandler();
+  // "check my emails" must not stand up a planner/coder/verifier — it runs the
+  // ordinary single-agent ReAct loop with nobody watching.
+  assert.match(body, /await runAgentTurn\(/, 'the agent runs one loop');
+  assert.doesNotMatch(body, /startMission\(/, 'it must not route through the mission pipeline');
+});
+
+test('a request arriving while busy is queued rather than refused', () => {
   const body = agentHandler();
   assert.match(body, /enqueueRun\(settingsUserDataDir, payload\)/);
-  assert.doesNotMatch(body.slice(0, 400), /return \{ ok: false, error: 'A mission is already running/,
-    'decision A chose queueing over refusal');
+  assert.match(body, /if \(currentAbort \|\| activeMission\?\.status === 'running'\)/,
+    'busy means any run in flight, not only a mission');
 });
 
-test('/agent is a commitment, not a setting: it always branches and reports', () => {
+test('/agent always branches, checkpoints, and reports', () => {
   const body = agentHandler();
-  assert.match(body, /autoBranch: true/, 'an unattended run must be undoable');
+  assert.match(body, /maybeAutoBranch\(cwd, goal, true\)/, 'an unattended run branches for undo where it can');
+  assert.match(body, /await createCheckpoint\(cwd\)/);
   assert.match(body, /beginRun\(\{ attended: false/);
-  assert.match(body, /renderRunReport\(finished, activeMission\)/);
+  assert.match(body, /renderRunReport\(finished, context\)/);
   assert.match(body, /notifyRunFinished\(/);
   // The report and decision log are emitted from a finally block, so a run that
   // throws still leaves a record behind.
   assert.match(body, /\} finally \{[\s\S]*renderRunReport/);
 });
 
-test('preconditions are checked before anything is started', () => {
+test('the run is treated as unattended so an ask becomes a defer, not a hang', () => {
+  const main = read('main.js');
+  assert.match(main, /beginRun\(\{ attended: false/, 'the agent run declares itself unattended');
+  // resolveToolCall reads attended from the run context rather than a caller
+  // flag, so every tool call in the loop knows nobody is watching.
+  assert.match(main, /const attended = currentRun \? currentRun\.attended : true;/);
+});
+
+test('preconditions are checked before the loop starts', () => {
   const body = agentHandler();
   const check = body.indexOf('checkPreconditions(');
-  const started = body.indexOf('startMission(');
-  assert.ok(check > 0 && started > check, 'refusing after starting would leave a half-run mission');
+  const started = body.indexOf('runAgentTurn(');
+  assert.ok(check > 0 && started > check, 'refusing after starting would leave a half-run');
   assert.match(body, /rev-parse', '--abbrev-ref'/, 'the branch is read for the requireBranch check');
 });
 
 test('the policy override is scoped to the run and restored afterwards', () => {
   const body = agentHandler();
   assert.match(body, /const previousPolicy = runtimeSettings\.autonomyPolicy/);
-  assert.match(body, /\} finally \{\s*runtimeSettings = \{ \.\.\.runtimeSettings, autonomyPolicy: previousPolicy \}/,
-    'a --policy flag must not silently become the new default');
+  // Restored in the finally block so a --policy flag never becomes the default.
+  assert.match(body, /\} finally \{[\s\S]*autonomyPolicy: previousPolicy \}/);
 });
 
 test('an unattended run writes a transcript that stops when the run does', () => {
