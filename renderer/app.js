@@ -2471,6 +2471,29 @@ async function handleSlash(raw) {
 
       // Triggers are authored in a file, the way mcp.json already is: entering
       // agent mode there is a setup act, not a session act.
+      if (/^daemon\b/.test(arg)) {
+        const [, sub = 'status'] = arg.split(/\s+/);
+        if (sub === 'install') {
+          const res = await window.api.daemonInstall();
+          return res.ok
+            ? addInfo(`Daemon installed: ${res.plistPath}. It runs headless at login and owns the trigger scheduler; this window stops ticking triggers once it is alive.`)
+            : addError(res.error);
+        }
+        if (sub === 'uninstall') {
+          const res = await window.api.daemonUninstall();
+          return res.ok ? addInfo('Daemon uninstalled.') : addError(res.error);
+        }
+        const res = await window.api.daemonStatus();
+        return showOverlay('AGENT DAEMON', [
+          `Alive: ${res.alive ? 'yes' : 'no'}`,
+          `Socket: ${res.socketPath}`,
+          res.launchAgent ? `LaunchAgent: ${res.launchAgent} (${res.installed ? 'installed' : 'not installed'})` : 'LaunchAgent: macOS only',
+          '',
+          'The daemon is the headless runtime: triggers and heartbeats keep firing with every window closed.',
+          '/agent daemon install to set it up (opt-in; runs at login).',
+        ].join('\n'));
+      }
+
       if (/^trigger\b/.test(arg)) {
         const [, sub = 'list', id = ''] = arg.split(/\s+/);
         if (sub === 'new' || sub === 'edit') {

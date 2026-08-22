@@ -2,6 +2,11 @@
 // Owns the agent loop: talks to Ollama, executes tools, streams results to the UI.
 
 const { app, BrowserWindow, ipcMain, dialog, shell, Notification } = require('electron');
+
+// --headless runs the agent runtime — scheduler, queue, triggers, unattended
+// runs — with no window at all. The renderer becomes an optional client; the
+// run sink already treats an absent window as an ordinary condition.
+const HEADLESS = process.argv.includes('--headless');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -22,6 +27,7 @@ const { readTriggers, dueTriggers, validateTrigger, ensureConfig: ensureTriggerC
 const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies, checkPreconditions, ensureConfig: ensureAutonomyConfig, narrowPolicy, BUILT_IN: BUILT_IN_POLICIES } = require('./src/main/autonomy');
 const workspace = require('./src/main/workspace');
 const pendingStore = require('./src/main/pending-store');
+const daemon = require('./src/main/daemon');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
@@ -344,7 +350,10 @@ const modelInstaller = createModelInstallService({
   isLocalEndpoint,
 });
 
-app.whenReady().then(() => {
+let daemonServer = null;
+const daemonStartedAt = new Date().toISOString();
+
+app.whenReady().then(async () => {
   settingsUserDataDir = app.getPath('userData');
   runtimeSettings = loadSettings(settingsUserDataDir);
   customPolicies = loadCustomPolicies(settingsUserDataDir);
@@ -356,8 +365,35 @@ app.whenReady().then(() => {
       console.log(r.ok ? `MCP ${r.name}: connected (${r.tools} tools)` : `MCP ${r.name}: FAILED — ${r.error}`);
     }
   });
+
+  if (HEADLESS) {
+    // No window, no renderer: the daemon owns the scheduler and answers on a
+    // unix socket. The run sink already drops renderer sends harmlessly.
+    daemonServer = daemon.startServer(settingsUserDataDir, {
+      ping: () => ({ ok: true, pid: process.pid, startedAt: daemonStartedAt }),
+      run: (payload) => runAgentTask(payload),
+      status: () => ({ ok: true, mission: activeMission, queued: peekQueue(settingsUserDataDir).map((entry) => entry.goal) }),
+    });
+    // Attached clients get the run narrative. This taps sink.emit — the path
+    // every run-loop message goes through — leaving the sink itself unchanged.
+    const originalEmit = sink.emit;
+    sink.emit = (channel, payload) => {
+      originalEmit(channel, payload);
+      try { daemonServer.broadcast(channel, payload); } catch {}
+    };
+    startTriggerScheduler();
+    console.log(`Brittain Code daemon: headless, listening at ${daemonServer.socketPath}`);
+    return;
+  }
+
   createWindow();
-  startTriggerScheduler();
+  // Exactly one scheduler may tick. If a headless daemon is alive, it owns the
+  // triggers; a second scheduler here would double-fire every one of them.
+  if (await daemon.daemonAlive(settingsUserDataDir)) {
+    console.log('Brittain Code daemon is running — it owns the trigger scheduler; this window will not start one.');
+  } else {
+    startTriggerScheduler();
+  }
   const packageMetadata = require('./package.json');
   updateService = createUpdateService({
     updater: autoUpdater,
@@ -478,6 +514,10 @@ const pendingApprovals = new Map();
 
 function requestApproval(info) {
   return new Promise((resolve) => {
+    // No window means nobody to ask: an 'ask' with no possible answerer is a
+    // denial, not a hang. Unattended runs never reach here (they park or
+    // defer), so this only guards the truly odd states.
+    if (!win || win.isDestroyed?.()) return resolve(false);
     const id = Math.random().toString(36).slice(2);
     pendingApprovals.set(id, resolve);
     win.webContents.send('approval:request', { id, ...info });
@@ -682,6 +722,7 @@ const pendingQuestions = new Map();
 
 function requestAnswer(info) {
   return new Promise((resolve) => {
+    if (!win || win.isDestroyed?.()) return resolve(null);
     const id = Math.random().toString(36).slice(2);
     pendingQuestions.set(id, resolve);
     win.webContents.send('question:request', { id, ...info });
@@ -1371,7 +1412,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
 const checkpointService = createCheckpointService({
   gitRun,
   getTempDirectory: () => app.getPath('temp'),
-  publishState: (state) => win.webContents.send('checkpoint:state', state),
+  publishState: (state) => { if (win && !win.isDestroyed()) win.webContents.send('checkpoint:state', state); },
 });
 const createCheckpoint = checkpointService.create;
 
@@ -3852,6 +3893,55 @@ ipcMain.handle('memory:move', (_e, cwd) => {
     return { ok: false, error: String(err.message || err) };
   }
 });
+
+// ---------- daemon lifecycle ----------
+ipcMain.handle('daemon:status', async () => ({
+  ok: true,
+  alive: await daemon.daemonAlive(settingsUserDataDir),
+  socketPath: daemon.socketPath(settingsUserDataDir),
+  launchAgent: process.platform === 'darwin' ? daemon.launchAgentPath() : '',
+  installed: process.platform === 'darwin' && fs.existsSync(daemon.launchAgentPath()),
+}));
+
+// Opt-in only, from an explicit user command — never on app install. In a dev
+// checkout the LaunchAgent runs `electron <app> --headless`; packaged, the app
+// binary itself.
+ipcMain.handle('daemon:install', async () => {
+  if (process.platform !== 'darwin') {
+    return { ok: false, error: 'Daemon install is macOS-only for now (launchd). On Windows, run the app with --headless from a Scheduled Task.' };
+  }
+  try {
+    const plistPath = daemon.launchAgentPath();
+    const appPath = app.isPackaged ? '' : app.getAppPath();
+    fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+    fs.writeFileSync(plistPath, daemon.launchAgentPlist(process.execPath, appPath), 'utf8');
+    await new Promise((resolve) => {
+      const child = spawn('launchctl', ['load', '-w', plistPath], { stdio: 'ignore' });
+      child.on('close', resolve);
+      child.on('error', resolve);
+    });
+    return { ok: true, plistPath };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('daemon:uninstall', async () => {
+  if (process.platform !== 'darwin') return { ok: false, error: 'Daemon install is macOS-only for now.' };
+  try {
+    const plistPath = daemon.launchAgentPath();
+    await new Promise((resolve) => {
+      const child = spawn('launchctl', ['unload', '-w', plistPath], { stdio: 'ignore' });
+      child.on('close', resolve);
+      child.on('error', resolve);
+    });
+    try { fs.unlinkSync(plistPath); } catch {}
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
 // ---------- conversation compaction ----------
 function recordCompactionUsage(data) {
   if (!data?.prompt_eval_count && !data?.eval_count) return;
