@@ -98,8 +98,10 @@ test('the config is created disabled, so nothing runs until it is edited', () =>
     const created = ensureConfig(dir);
     assert.ok(fs.existsSync(created));
     const { triggers } = readTriggers(dir);
-    assert.equal(triggers.length, 1);
-    assert.equal(triggers[0].enabled, false, 'a generated example must never fire on its own');
+    assert.equal(triggers.length, 2, 'a cron example and a heartbeat example');
+    for (const trigger of triggers) {
+      assert.equal(trigger.enabled, false, 'a generated example must never fire on its own');
+    }
     assert.deepEqual(dueTriggers(triggers, at(2, 0)), []);
 
     // Writing again must not overwrite what the user has since edited.
@@ -139,13 +141,28 @@ test('a trigger becomes a run without inheriting interactive defaults', () => {
 test('/agent trigger is wired from the renderer through preload to main', () => {
   const root = path.join(__dirname, '..', '..');
   const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
-  assert.match(read('renderer/app.js'), /window\.api\.triggersState\(\)/);
+  assert.match(read('renderer/app.js'), /window\.api\.triggersState\(/);
   assert.match(read('renderer/app.js'), /window\.api\.triggersRun\(id\)/);
   assert.match(read('renderer/app.js'), /window\.api\.triggersOpenConfig\(\)/);
   assert.match(read('renderer/app.js'), /Triggers only fire while Brittain Code is open/,
     'the app-must-be-open limit should be stated where it is felt');
-  assert.match(read('preload.js'), /triggersState: \(\) => ipcRenderer\.invoke\('triggers:state'\)/);
+  assert.match(read('preload.js'), /triggersState: \(cwd\) => ipcRenderer\.invoke\('triggers:state', cwd\)/);
   for (const channel of ['triggers:state', 'triggers:run', 'triggers:openConfig']) {
     assert.match(read('main.js'), new RegExp(`ipcMain\\.handle\\('${channel}'`));
   }
+});
+
+test('a heartbeat trigger validates with no goal and no schedule — its pacing lives in HEARTBEAT.md', () => {
+  assert.equal(validateTrigger({ id: 'hb', type: 'heartbeat', cwd: '/tmp/project' }), '');
+  assert.notEqual(validateTrigger({ type: 'heartbeat', cwd: '/tmp/project' }), '');
+  assert.notEqual(validateTrigger({ id: 'hb', type: 'heartbeat' }), '');
+});
+
+test('heartbeat triggers never enter the cron matcher', () => {
+  const triggers = [
+    { id: 'hb', type: 'heartbeat', cwd: '/tmp/project' },
+    { id: 'cron', schedule: '30 14 * * *', goal: 'x', cwd: '/tmp/project' },
+  ];
+  const due = dueTriggers(triggers, new Date(2026, 0, 1, 14, 30));
+  assert.deepEqual(due.map((entry) => entry.trigger.id), ['cron']);
 });

@@ -85,6 +85,12 @@ function readTriggers(userDataDir) {
 
 function validateTrigger(trigger) {
   if (!trigger?.id) return 'a trigger needs an id';
+  // A heartbeat trigger has no goal and no cron schedule of its own: it asks a
+  // question instead of firing a fixed goal. What it evaluates, and how often,
+  // comes from .brittain/HEARTBEAT.md in its project (see workspace.js).
+  if (trigger.type === 'heartbeat') {
+    return trigger.cwd ? '' : 'a trigger needs a working directory';
+  }
   if (!trigger.goal?.trim()) return 'a trigger needs a goal';
   if (!trigger.cwd) return 'a trigger needs a working directory';
   if (!parseSchedule(trigger.schedule)) return `"${trigger.schedule}" is not a schedule this app understands`;
@@ -100,6 +106,9 @@ function dueTriggers(triggers, date, lastFired = {}) {
   for (const trigger of triggers) {
     if (trigger.enabled === false) continue;
     if (validateTrigger(trigger)) continue;
+    // Heartbeats pace themselves off HEARTBEAT.md and state.json, not the
+    // cron matcher — the scheduler tick asks workspace.heartbeatDue instead.
+    if (trigger.type === 'heartbeat') continue;
     if (lastFired[trigger.id] === minuteKey) continue;
     if (!matchesSchedule(parseSchedule(trigger.schedule), date)) continue;
     due.push({ trigger, minuteKey });
@@ -117,6 +126,12 @@ const EXAMPLE_CONFIG = {
       goal: 'Run the test suite. If anything fails, diagnose and report — do not fix.',
       policy: 'guarded',
       maxIterations: 6,
+    },
+    {
+      id: 'project-heartbeat',
+      enabled: false,
+      type: 'heartbeat',
+      cwd: '/absolute/path/to/your/project',
     },
   ],
 };

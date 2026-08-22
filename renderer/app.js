@@ -2507,13 +2507,34 @@ async function handleSlash(raw) {
           try { res = await window.api.triggersRun(id); } finally { endRun(); }
           return res.ok ? saveChat() : addError(res.error);
         }
-        const state = await window.api.triggersState();
+        if (sub === 'enable' || sub === 'disable') {
+          if (!id) return addError(`Usage: /agent trigger ${sub} <id> — acts on this project's .brittain/triggers.json entries.`);
+          const res = sub === 'enable'
+            ? await window.api.triggersEnableProject(cwd, id)
+            : await window.api.triggersDisableProject(cwd, id);
+          return res.ok
+            ? addInfo(sub === 'enable'
+              ? `Project trigger "${id}" enabled. It re-disables automatically if its definition changes (e.g. via git pull).`
+              : `Project trigger "${id}" disabled.`)
+            : addError(res.error);
+        }
+        const state = await window.api.triggersState(cwd);
         const lines = [`TRIGGERS — ${state.configPath}`];
         if (state.error) lines.push(`(could not be read: ${state.error})`);
         if (!state.triggers.length) lines.push('(none configured — /agent trigger new to create the file)');
         for (const trigger of state.triggers) {
-          lines.push(`${trigger.enabled ? '[on] ' : '[off]'} ${trigger.id} — ${trigger.schedule} — ${trigger.goal}`
+          lines.push(`${trigger.enabled ? '[on] ' : '[off]'} ${trigger.id} — ${trigger.type === 'heartbeat' ? 'heartbeat (paced by .brittain/HEARTBEAT.md)' : trigger.schedule + ' — ' + trigger.goal}`
             + (trigger.problem ? `  ⚠ ${trigger.problem}` : ''));
+        }
+        if (state.project?.length || state.projectError) {
+          lines.push('', `PROJECT TRIGGERS (.brittain/triggers.json) — disabled on arrival; /agent trigger enable <id>:`);
+          if (state.projectError) lines.push(`(could not be read: ${state.projectError})`);
+          for (const trigger of state.project || []) {
+            const mark = trigger.enablement === 'enabled' ? '[on] ' : trigger.enablement === 'changed' ? '[chg]' : '[off]';
+            lines.push(`${mark} ${trigger.id} — ${trigger.type === 'heartbeat' ? 'heartbeat' : trigger.schedule + ' — ' + trigger.goal}`
+              + (trigger.enablement === 'changed' ? '  ⚠ definition changed since enablement — re-enable to let it fire' : '')
+              + (trigger.problem ? `  ⚠ ${trigger.problem}` : ''));
+          }
         }
         if (state.queued.length) {
           lines.push('', 'WAITING TO RUN:');
