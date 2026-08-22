@@ -406,7 +406,7 @@ async function confirmAgentRun(projectPath, policyId) {
   const confirmed = await confirmDialog(
     'Start an UNATTENDED agent run in this project?\n\n'
     + `Autonomy policy: ${named}\n\n`
-    + 'With nobody watching, the agent acts on its own — it can run shell commands, '
+    + 'With nobody watching, the agent acts on its own: it can run shell commands, '
     + 'drive a browser, and call connected tools to do things on the web. Some of those '
     + 'actions cannot be undone, and a Git checkpoint only restores files, not anything '
     + 'that has left this machine.\n\n'
