@@ -17,6 +17,7 @@ test('a project without .brittain has no workspace; init creates one with starte
   assert.equal(workspace.hasWorkspace(dir), true);
   assert.ok(created.includes('.gitignore'));
   assert.ok(created.includes('HEARTBEAT.md'));
+  assert.ok(created.includes('triggers.json'));
   assert.ok(created.includes('MEMORY.md'));
   // The volatile half is ignored; the committed half is not.
   const gitignore = fs.readFileSync(path.join(dir, '.brittain', '.gitignore'), 'utf8');
@@ -99,4 +100,36 @@ test('the secret scan catches real key shapes, not the word "token"', () => {
   assert.equal(workspace.looksLikeSecret('ghp_' + 'a'.repeat(36)), true);
   assert.equal(workspace.looksLikeSecret('api_key = "sk4f8a9b2c1d0e3f4a5b6c7d8e9f0a1b"'), true);
   assert.equal(workspace.looksLikeSecret('-----BEGIN RSA PRIVATE KEY-----'), true);
+});
+
+test('the shipped heartbeat trigger is inert: no checklist, and gated by enablement', () => {
+  const dir = tempProject();
+  workspace.initWorkspace(dir);
+
+  // The starter checklist is empty, so enabling the trigger still does nothing
+  // until someone writes an item they actually want run.
+  assert.deepEqual(workspace.readHeartbeat(dir).items, []);
+  const due = workspace.heartbeatDue(dir, new Date());
+  assert.equal(due.due, false);
+  assert.match(due.reason, /checklist/);
+
+  // One gate, not two: the trigger carries no `enabled` field, because project
+  // triggers are held by the local enablement registry instead.
+  const shipped = JSON.parse(fs.readFileSync(workspace.triggersFile(dir), 'utf8'));
+  assert.deepEqual(shipped.triggers, [{ id: 'heartbeat', type: 'heartbeat' }]);
+  const projectTriggers = require('../../src/main/project-triggers');
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-ws-user-'));
+  assert.equal(projectTriggers.enablement(userDataDir, dir, shipped.triggers[0]), 'disabled');
+  assert.deepEqual(projectTriggers.firableProjectTriggers(userDataDir, [dir]).firable, []);
+});
+
+test('an item commented out is an item that does not run', () => {
+  const dir = tempProject();
+  workspace.initWorkspace(dir);
+  fs.writeFileSync(workspace.heartbeatFile(dir), [
+    '---', 'interval: 30m', '---', '',
+    '- [ ] live item',
+    '<!--', '- [ ] parked item', '-->',
+  ].join('\n'), 'utf8');
+  assert.deepEqual(workspace.readHeartbeat(dir).items, ['live item']);
 });

@@ -2461,7 +2461,7 @@ async function handleSlash(raw) {
         if (res.moved) lines.push(`Carried ${res.moved} remembered line(s) in from app data; the old copy is left as a backup.`);
         lines.push(
           'Project memory now lives in the repository, so it shows up in diffs — review it like any other change.',
-          `Edit ${res.heartbeatPath} to set up a heartbeat, then register a trigger of type "heartbeat" (/agent trigger new).`,
+          `A heartbeat trigger ships with it, inert: write a checklist item in ${res.heartbeatPath}, then turn it on with /agent trigger enable heartbeat.`,
         );
         return addInfo(lines.join(' '));
       }

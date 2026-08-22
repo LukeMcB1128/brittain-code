@@ -73,13 +73,30 @@ const HEARTBEAT_STARTER = [
   'quiet: 22:00-07:00',
   '---',
   '',
-  '<!-- Each item is a condition and an action. A heartbeat run evaluates the',
-  '     list and acts only on items whose condition is currently true. This file',
-  '     only matters once a heartbeat trigger exists for this project. -->',
+  '<!-- Each item below is a condition and an action. A heartbeat run evaluates',
+  '     the list and acts only on items whose condition is currently true.',
   '',
-  '- [ ] Example: if the test suite fails on the current branch, diagnose and write a report. Do not fix.',
+  '     The list starts empty on purpose: a heartbeat trigger ships beside this',
+  '     file, so anything written here runs as soon as that trigger is enabled.',
+  '     Uncomment the example or write your own, then enable the trigger with',
+  '     /agent trigger enable heartbeat.',
+  '',
+  '     - [ ] If the test suite fails on the current branch, diagnose and write',
+  '           a report. Do not fix.',
+  '-->',
   '',
 ].join('\n');
+
+// A heartbeat trigger for this project, shipped inert. It cannot fire by
+// existing: project triggers are gated by the local enablement registry (see
+// project-triggers.js), so this waits for /agent trigger enable heartbeat. No
+// `enabled` field, deliberately — one gate, in one place, rather than two
+// switches that can disagree.
+const TRIGGERS_STARTER = JSON.stringify({
+  triggers: [
+    { id: 'heartbeat', type: 'heartbeat' },
+  ],
+}, null, 2) + '\n';
 
 // Creates .brittain/ with the starter files. Never called automatically:
 // putting agent state inside a repository is a decision, not a default.
@@ -90,6 +107,7 @@ function initWorkspace(cwd) {
   const starters = [
     ['.gitignore', GITIGNORE_STARTER],
     ['HEARTBEAT.md', HEARTBEAT_STARTER],
+    ['triggers.json', TRIGGERS_STARTER],
     ['MEMORY.md', ''],
   ];
   for (const [name, content] of starters) {
@@ -149,7 +167,11 @@ function readHeartbeat(cwd) {
       if (entry) config[entry[1].toLowerCase()] = entry[2].trim();
     }
   }
-  const items = body.split('\n')
+  // Commenting an item out must actually disable it: an HTML comment is the
+  // obvious way to park a checklist line, and a parser that still ran it would
+  // be the worst kind of surprise here.
+  const live = body.replace(/<!--[\s\S]*?-->/g, '');
+  const items = live.split('\n')
     .map((line) => line.trim())
     .filter((line) => /^[-*]\s+(\[[ x]\]\s+)?\S/.test(line))
     .map((line) => line.replace(/^[-*]\s+(\[[ x]\]\s+)?/, ''));
@@ -242,6 +264,7 @@ function looksLikeSecret(text) {
 
 module.exports = {
   DIR_NAME,
+  TRIGGERS_STARTER,
   MIN_HEARTBEAT_MS,
   DEFAULT_HEARTBEAT_MS,
   workspaceDir,
