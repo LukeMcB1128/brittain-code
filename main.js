@@ -2878,6 +2878,10 @@ function notifyRunFinished(mission, reportPath) {
 // pipeline: "check my emails" should not stand up a planner, coder, and
 // verifier. It runs the same ReAct loop as an ordinary Code turn, only with
 // nobody watching, so the autonomy policy governs every tool call.
+// Projects already told about the workspace this session. A hint is worth
+// saying once; saying it after every unattended run is nagging.
+const workspaceHintShown = new Set();
+
 async function runAgentTask(payload = {}) {
   // Decision A: a request arriving while something is already running is queued,
   // not refused. It expires rather than running hours late, and is
@@ -3037,6 +3041,14 @@ async function runAgentTask(payload = {}) {
       transcriptPath: finished.transcriptPath,
     });
     notifyRunFinished(context, reportPath);
+    // Discoverability without a side effect. Creating .brittain/ relocates this
+    // project's memory into the repository, so an unattended run mentions the
+    // option once per session and writes nothing — the decision stays the
+    // user's, which is the same reason nothing here creates it automatically.
+    if (!workspace.hasWorkspace(cwd) && !workspaceHintShown.has(cwd)) {
+      workspaceHintShown.add(cwd);
+      sink.emit('stream:info', 'This project has no .brittain/ workspace — /workspace init keeps memory in the repo (visible in diffs) and enables heartbeat runs.');
+    }
     sink.done();
   }
   return { ok: true, status };
@@ -4027,20 +4039,57 @@ ipcMain.handle('memory:get', (_e, cwd) => {
   };
 });
 
-// Moves a project's memory into the repository: creates .brittain/ (with its
-// starter .gitignore and HEARTBEAT.md) and copies the app-data memory in.
+// Creates .brittain/ and carries this project's memory into it.
+//
+// Creating the directory is what switches memoryPath from app data to the
+// repository, so the two halves cannot be separated: an init that did not
+// migrate would leave the old memory intact on disk but invisible to the
+// agent, which reads as memory loss. Both entry points therefore run this.
 // Never automatic — putting agent memory under version control is a decision.
 // The app-data file is left in place as a backup.
+function initProjectWorkspace(cwd) {
+  const before = readMemory(cwd); // resolves to app data while .brittain/ does not exist
+  const alreadyPresent = workspace.hasWorkspace(cwd);
+  const { dir, created } = workspace.initWorkspace(cwd);
+  const target = workspace.memoryFile(cwd);
+  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : '';
+  const lines = before.split('\n').filter((line) => line.trim() && !existing.includes(line));
+  if (lines.length) fs.appendFileSync(target, lines.join('\n') + '\n', 'utf8');
+  return {
+    ok: true, dir, created, alreadyPresent,
+    moved: lines.length,
+    path: target,
+    heartbeatPath: workspace.heartbeatFile(cwd),
+  };
+}
+
+ipcMain.handle('workspace:state', (_e, cwd) => {
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  const exists = workspace.hasWorkspace(cwd);
+  const heartbeat = exists ? workspace.readHeartbeat(cwd) : null;
+  return {
+    ok: true,
+    exists,
+    dir: workspace.workspaceDir(cwd),
+    memoryPath: memoryPath(cwd),
+    heartbeatPath: workspace.heartbeatFile(cwd),
+    heartbeatItems: heartbeat?.items?.length || 0,
+  };
+});
+
+ipcMain.handle('workspace:init', (_e, cwd) => {
+  if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
+  try {
+    return initProjectWorkspace(cwd);
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
 ipcMain.handle('memory:move', (_e, cwd) => {
   if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
   try {
-    const before = readMemory(cwd); // resolves to app-data while .brittain/ does not exist
-    const { dir, created } = workspace.initWorkspace(cwd);
-    const target = workspace.memoryFile(cwd);
-    const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : '';
-    const lines = before.split('\n').filter((line) => line.trim() && !existing.includes(line));
-    if (lines.length) fs.appendFileSync(target, lines.join('\n') + '\n', 'utf8');
-    return { ok: true, dir, created, moved: lines.length, path: target };
+    return initProjectWorkspace(cwd);
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }

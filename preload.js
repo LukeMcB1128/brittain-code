@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld('api', {
   pendingResolve: (runId, index, approved) => ipcRenderer.invoke('pending:resolve', { runId, index, approved }),
   pendingResume: (runId) => ipcRenderer.invoke('pending:resume', runId),
   memoryMove: (cwd) => ipcRenderer.invoke('memory:move', cwd),
+  workspaceState: (cwd) => ipcRenderer.invoke('workspace:state', cwd),
+  workspaceInit: (cwd) => ipcRenderer.invoke('workspace:init', cwd),
   autonomySuggestions: () => ipcRenderer.invoke('autonomy:suggestions'),
   autonomyPromote: (policyId, toolName) => ipcRenderer.invoke('autonomy:promote', { policyId, toolName }),
   mcpTrustAccept: (server) => ipcRenderer.invoke('mcp:trustAccept', server),

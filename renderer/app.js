@@ -1946,6 +1946,7 @@ const SLASH_HELP = [
   '/agent daemon [status|install|uninstall] — the headless runtime that keeps triggers firing with the app closed',
   '/pending [approve|deny <run> [n|all]|resume <run>] — parked calls from suspended unattended runs',
   '/policies [edit|promote <policy> <tool>] — autonomy policies, held calls, and evidence-backed promotion suggestions',
+  '/workspace [init] — the project\'s .brittain folder: in-repo memory, heartbeat checklist, project triggers',
   '/memory [move] — view what the agent has remembered; move relocates it into the project (.brittain/MEMORY.md)',
   '/ledger — view what this session changed, ran, and failed at (kept across compaction)',
   '/export — save this chat as a markdown file',
@@ -2444,6 +2445,50 @@ async function handleSlash(raw) {
         'same conversation re-read on each agent step — it measures compute',
         'spent, not context size. Subagent/coder/verifier tokens never touch the',
         'main context; that is the point of delegating.',
+      ].join('\n'));
+    }
+
+    case 'workspace': {
+      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      if (arg === 'init') {
+        const res = await window.api.workspaceInit(cwd);
+        if (!res.ok) return addError(res.error);
+        const lines = [
+          res.alreadyPresent
+            ? `${res.dir} already exists.`
+            : `Created ${res.dir}${res.created.length ? ` (${res.created.join(', ')})` : ''}.`,
+        ];
+        if (res.moved) lines.push(`Carried ${res.moved} remembered line(s) in from app data; the old copy is left as a backup.`);
+        lines.push(
+          'Project memory now lives in the repository, so it shows up in diffs — review it like any other change.',
+          `Edit ${res.heartbeatPath} to set up a heartbeat, then register a trigger of type "heartbeat" (/agent trigger new).`,
+        );
+        return addInfo(lines.join(' '));
+      }
+      const state = await window.api.workspaceState(cwd);
+      if (!state.ok) return addError(state.error);
+      if (!state.exists) {
+        return showOverlay('PROJECT WORKSPACE', [
+          `No workspace in this project (${state.dir} does not exist).`,
+          '',
+          'Memory for this project is kept in app data instead:',
+          `  ${state.memoryPath}`,
+          '',
+          '/workspace init creates .brittain/ and moves memory into the repository, where it',
+          'shows up in diffs and travels with a clone. It also adds HEARTBEAT.md, the checklist',
+          'a heartbeat run evaluates. Nothing creates this folder automatically — putting agent',
+          'memory under version control is your call.',
+        ].join('\n'));
+      }
+      return showOverlay('PROJECT WORKSPACE — ' + state.dir, [
+        `Memory:    ${state.memoryPath}`,
+        `Heartbeat: ${state.heartbeatPath} (${state.heartbeatItems} checklist item(s))`,
+        '',
+        'MEMORY.md, HEARTBEAT.md, triggers.json and autonomy.json are meant to be committed.',
+        'state.json and runs/ are gitignored.',
+        '',
+        'In-repo config can only narrow autonomy, never widen it, and project triggers arrive',
+        'disabled — these files can reach you through a pull request.',
       ].join('\n'));
     }
 
