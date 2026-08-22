@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld('api', {
   triggersState: () => ipcRenderer.invoke('triggers:state'),
   triggersOpenConfig: () => ipcRenderer.invoke('triggers:openConfig'),
   triggersRun: (id) => ipcRenderer.invoke('triggers:run', id),
+  memoryMove: (cwd) => ipcRenderer.invoke('memory:move', cwd),
   usageGet: () => ipcRenderer.invoke('usage:get'),
   mcpStatus: () => ipcRenderer.invoke('mcp:status'),
   mcpToggle: (name, on) => ipcRenderer.invoke('mcp:toggle', name, on),

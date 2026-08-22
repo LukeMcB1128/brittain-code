@@ -2432,9 +2432,17 @@ async function handleSlash(raw) {
 
     case 'memory': {
       if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      if (arg === 'move') {
+        const moved = await window.api.memoryMove(cwd);
+        if (!moved.ok) return addError(moved.error);
+        return addInfo(`Project memory now lives in ${moved.path} (${moved.moved} line(s) copied in`
+          + (moved.created.length ? `; created ${moved.created.join(', ')}` : '') + '). '
+          + 'The app-data copy remains as a backup. .brittain/MEMORY.md is meant to be committed — review it like any other change.');
+      }
       const res = await window.api.memoryGet(cwd);
       if (!res.ok) return addError(res.error);
       let content = res.content.trim() || '(nothing remembered for this project yet)';
+      if (res.inRepo) content = '(in-repo: .brittain/MEMORY.md)\n\n' + content;
       if (res.legacyContent?.trim()) {
         content += `\n\nLEGACY UNIVERSAL MEMORY (not injected)\n${res.legacyPath}\n\n${res.legacyContent.trim()}`;
       }

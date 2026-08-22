@@ -158,6 +158,39 @@ function decide(rawPolicy, call = {}) {
   return { verdict: resolveAsk(attended), reason: 'risky tool not in the policy allow list' };
 }
 
+// A project's .brittain/autonomy.json may only make the active policy
+// stricter. It arrives via `git pull` like any other repository file, so
+// letting it widen permissions would let a malicious PR grant itself access;
+// widening lives in the userData autonomy.json, outside the repository.
+// Anything that is not a narrowing is returned in `ignored` for the caller to
+// warn about, and applied is the policy actually enforced.
+function narrowPolicy(rawPolicy, overlay) {
+  const policy = normalizePolicy(rawPolicy);
+  if (!overlay || typeof overlay !== 'object') return { policy, ignored: [] };
+  const ignored = [];
+  const narrowed = { ...policy, allow: new Set(policy.allow), deny: new Set(policy.deny) };
+  for (const [key, value] of Object.entries(overlay)) {
+    if (key === 'deny' && Array.isArray(value)) {
+      for (const name of value) narrowed.deny.add(String(name));
+    } else if (key === 'maxToolCalls') {
+      const cap = Number(value);
+      if (cap > 0 && (!narrowed.maxToolCalls || cap < narrowed.maxToolCalls)) narrowed.maxToolCalls = cap;
+      else if (!(cap > 0) || (narrowed.maxToolCalls && cap > narrowed.maxToolCalls)) ignored.push(key);
+    } else if (key === 'network') {
+      // Downgrade only: allow → ask → deny. An overlay cannot move up.
+      const rank = { deny: 0, ask: 1, allow: 2 };
+      const wanted = value === true ? 'allow' : value === 'ask' ? 'ask' : 'deny';
+      if (rank[wanted] < rank[narrowed.network]) narrowed.network = wanted;
+      else if (rank[wanted] > rank[narrowed.network]) ignored.push(key);
+    } else if (key === 'label' || key === 'description') {
+      // informational; nothing to enforce
+    } else {
+      ignored.push(key);
+    }
+  }
+  return { policy: narrowed, ignored };
+}
+
 // A Git checkpoint is the wrong safety model for a run that can act on the
 // world — you cannot revert a request that has already left the machine — so a
 // repository is no longer required. When there is one, the run still branches
@@ -255,6 +288,7 @@ function ensureConfig(userDataDir) {
 }
 
 module.exports = {
+  narrowPolicy,
   loadCustomPolicies,
   ensureConfig,
   EXAMPLE_CONFIG,

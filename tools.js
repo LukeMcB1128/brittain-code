@@ -15,6 +15,7 @@ const net = require('net');
 const dns = require('dns').promises;
 const { execFile, exec, spawn } = require('child_process');
 const { createToolPolicy } = require('./src/tools/policy');
+const workspace = require('./src/main/workspace');
 const {
   findReferences,
   findSymbol,
@@ -83,6 +84,10 @@ function memoryDir() {
 }
 
 function memoryPath(cwd) {
+  // A project that opted into the in-repo workspace keeps its memory there,
+  // where it shows up in diffs; everything else stays in app data. The
+  // presence of .brittain/ IS the opt-in — created only by an explicit init.
+  if (workspace.hasWorkspace(cwd)) return workspace.memoryFile(cwd);
   return path.join(memoryDir(), 'projects', projectMemoryId(cwd) + '.md');
 }
 
@@ -1647,6 +1652,12 @@ async function executeTool(name, args, cwd) {
       if (!fact) return 'Error: fact must not be empty.';
       if (readMemory(cwd).includes(fact)) return 'Already remembered for this project.';
       const target = memoryPath(cwd);
+      // In-repo memory is potentially committed and pushed. A remembered
+      // credential there is a published credential, so anything key-shaped is
+      // refused rather than written.
+      if (workspace.hasWorkspace(cwd) && workspace.looksLikeSecret(fact)) {
+        return 'Error: this fact looks like a credential or key, and project memory lives inside the repository (.brittain/MEMORY.md). Not saved. Rephrase without the secret value.';
+      }
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.appendFileSync(target, '- ' + fact + '\n', 'utf8');
       registerProjectMemory(cwd);
