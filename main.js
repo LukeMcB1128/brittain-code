@@ -19,7 +19,7 @@ const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
 const { enqueue: enqueueRun, dequeue: dequeueRun, peek: peekQueue } = require('./src/main/run-queue');
 const { readTriggers, dueTriggers, validateTrigger, ensureConfig: ensureTriggerConfig, configPath: triggerConfigPath } = require('./src/main/triggers');
-const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies, checkPreconditions } = require('./src/main/autonomy');
+const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies, checkPreconditions, ensureConfig: ensureAutonomyConfig } = require('./src/main/autonomy');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
@@ -482,6 +482,32 @@ function requestApproval(info) {
   });
 }
 
+// A best-effort signal that a call is trying to move money — a checkout, a
+// payment API, a transfer, a crypto send. It is a heuristic backstop, not a
+// guarantee: it errs toward flagging, because a false prompt costs a click and
+// a missed one costs real money. The policy turns any hit into an approval
+// moment that no permissive setting can waive.
+// Tuned for precision, not recall: a coding agent trips over bare words like
+// "order" or "payment" constantly, so these require the shape of an actual
+// money-moving action — a payment-provider API path, a checkout/purchase
+// phrase, or a crypto send with a currency. The browser-checkout path is
+// already held by the "MCP never automatic" invariant.
+const FINANCIAL_PATTERNS = [
+  /\/(?:v\d+\/)?(?:charges|payment_intents|payments|transfers|payouts|checkout(?:\/sessions)?|orders\/[^/\s]+\/(?:pay|capture))\b/i,
+  /\b(?:place|submit|confirm|complete)\s+(?:the\s+)?(?:order|purchase|payment)\b/i,
+  /\b(?:buy\s+now|check\s?out\s+now|pay\s+now|confirm\s+and\s+pay)\b/i,
+  /\b(?:stripe|paypal|braintree|coinbase|binance)\b[^\n]{0,60}\b(?:charge|payment|checkout|transfer|payout)\b/i,
+  /\b(?:send|transfer|withdraw|swap)\b[^\n]{0,40}\b(?:eth|btc|usdc|usdt|sol|wallet)\b/i,
+];
+
+function looksFinancial(name, args) {
+  const haystack = [
+    args?.command, args?.url, args?.body, args?.data,
+    typeof args === 'object' ? JSON.stringify(args) : '',
+  ].filter(Boolean).join(' ');
+  return FINANCIAL_PATTERNS.some((pattern) => pattern.test(haystack));
+}
+
 // Classifying a call once, in one place, is what lets the policy answer the
 // same question the approval chain used to answer inline six times over.
 function classifyToolCall(name, args) {
@@ -493,6 +519,7 @@ function classifyToolCall(name, args) {
     mcp: mcp.owns(name),
     sensitive: isSensitiveToolCall(name, args),
     risky: RISKY_TOOLS.has(name),
+    financial: looksFinancial(name, args),
   };
 }
 
@@ -561,7 +588,10 @@ async function resolveToolCall(name, args, { autoApprove, onlineResearch, attend
     return { approved: true, ...decision, policyId: id };
   }
   if (decision.verdict === 'ask') {
-    const approved = await requestApproval({ name, args, ...promptKind });
+    // A financial call is surfaced as such even when the caller passed a
+    // different promptKind, so the human sees what they are approving.
+    const kind = call.financial ? { ...promptKind, financial: true } : promptKind;
+    const approved = await requestApproval({ name, args, ...kind });
     recordDecision({ name, verdict: approved ? 'approved' : 'denied', reason: decision.reason, at });
     return { approved, ...decision, policyId: id };
   }
@@ -3192,6 +3222,14 @@ ipcMain.handle('autonomy:state', () => {
     })),
     deferred: deferredFrom(currentRun || lastFinishedRun).map((entry) => ({ name: entry.name, target: entry.target, reason: entry.reason, at: entry.at })),
   };
+});
+
+ipcMain.handle('autonomy:openConfig', () => {
+  const target = ensureAutonomyConfig(settingsUserDataDir);
+  // Reload so a policy added by hand is available without a restart.
+  customPolicies = loadCustomPolicies(settingsUserDataDir);
+  shell.showItemInFolder(target);
+  return { ok: true, path: target };
 });
 
 ipcMain.handle('autonomy:set', (_e, id) => {

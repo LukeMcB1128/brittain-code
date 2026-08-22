@@ -95,6 +95,7 @@ function decide(rawPolicy, call = {}) {
     destructive = false,
     mcp = false,
     network = false,
+    financial = false,
     onlineResearch = false,
     toolCalls = 0,
   } = call;
@@ -110,6 +111,15 @@ function decide(rawPolicy, call = {}) {
   }
 
   // --- invariants: no policy may waive these ---
+
+  // Moving money out is the one action where "agreed at launch" and "approved
+  // this specific transaction" are genuinely different consents. No policy,
+  // however permissive, turns it into an automatic 'allow'. Unattended, that
+  // means it is held for review rather than performed — the fence bounded-B
+  // runs inside.
+  if (financial) {
+    return { verdict: resolveAsk(attended), reason: 'a financial transaction always needs approval at the moment it happens' };
+  }
 
   // Online requests need the app-level switch and a policy that opts in.
   if (network) {
@@ -196,8 +206,46 @@ function loadCustomPolicies(userDataDir) {
   }
 }
 
+// A worked example of bounded-B: an autonomous policy that runs unattended
+// inside a fence, rather than a raw waiver. Written disabled-by-omission — it
+// is only a template until a run names it — and every field is a bound the
+// user chose, not a default they inherited.
+const EXAMPLE_CONFIG = {
+  policies: {
+    autonomous: {
+      label: 'Autonomous',
+      description: 'Runs unattended within a fence. Raise the bounds deliberately, not by default.',
+      allowRisky: true,
+      writeScope: 'project',
+      // The fence. Autonomy is real; it just runs inside these.
+      maxToolCalls: 300,
+      requireBranch: true,
+      network: 'ask',
+      // Even here, these are never automatic — destructive ops, sensitive
+      // reads, external MCP tools, and anything that moves money still stop
+      // for you (unattended, they wait in the review tray).
+      deny: [],
+    },
+  },
+};
+
+function ensureConfig(userDataDir) {
+  const fs = require('fs');
+  const path = require('path');
+  const configPath = path.join(userDataDir, 'autonomy.json');
+  try {
+    if (!fs.existsSync(configPath)) {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(EXAMPLE_CONFIG, null, 2) + '\n', 'utf8');
+    }
+  } catch {}
+  return configPath;
+}
+
 module.exports = {
   loadCustomPolicies,
+  ensureConfig,
+  EXAMPLE_CONFIG,
   decide,
   checkPreconditions,
   normalizePolicy,

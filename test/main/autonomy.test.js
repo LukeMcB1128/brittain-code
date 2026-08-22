@@ -172,3 +172,35 @@ test('every approval path in main.js goes through the policy', () => {
   assert.match(main, /recordDecision\(\{ name, verdict: decision\.verdict/, 'every verdict is recorded, not only the denials');
   assert.match(main, /function deferredFrom\(run\)/, 'the deferred subset is the tray a person reads afterwards');
 });
+
+// --- the financial fence: bounded-B's one carve-out ---
+
+const autonomous = { allow: ['*'], allowRisky: true, network: true, writeScope: 'project', maxToolCalls: 300 };
+
+test('no policy, however permissive, makes a money-moving call automatic', () => {
+  assert.equal(decide(autonomous, { name: 'run_command', financial: true, risky: true }).verdict, 'ask');
+  assert.equal(decide(autonomous, { name: 'run_command', financial: true, risky: true, attended: false }).verdict, 'defer');
+});
+
+test('the financial fence outranks even a network allow', () => {
+  // A financial web request must not slip through on the network opt-in.
+  const result = decide(autonomous, { name: 'web_fetch', financial: true, network: true, onlineResearch: true });
+  assert.equal(result.verdict, 'ask');
+  assert.match(result.reason, /financial/);
+});
+
+test('an ordinary call under the same policy still runs unattended', () => {
+  assert.equal(decide(autonomous, { name: 'write_file', risky: true, attended: false }).verdict, 'allow');
+  assert.equal(decide(autonomous, { name: 'run_command', risky: true, attended: false }).verdict, 'allow');
+});
+
+test('the shipped autonomous example is bounded, not a raw waiver', () => {
+  const { EXAMPLE_CONFIG } = require('../../src/main/autonomy');
+  const policy = EXAMPLE_CONFIG.policies.autonomous;
+  assert.ok(policy.maxToolCalls > 0, 'an autonomous policy needs a tool-call ceiling');
+  assert.equal(policy.requireBranch, true, 'and it must run on a branch');
+  // Even this policy holds money, destructive ops, sensitive reads, and MCP.
+  assert.equal(decide(policy, { name: 'run_command', financial: true, risky: true, attended: false }).verdict, 'defer');
+  assert.equal(decide(policy, { name: 'revert_to_last_commit', destructive: true, attended: false }).verdict, 'defer');
+  assert.equal(decide(policy, { name: 'mcp_x', mcp: true, attended: false }).verdict, 'defer');
+});

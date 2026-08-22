@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('api', {
   ledgerGet: () => ipcRenderer.invoke('ledger:get'),
   autonomyState: () => ipcRenderer.invoke('autonomy:state'),
   autonomySet: (id) => ipcRenderer.invoke('autonomy:set', id),
+  autonomyOpenConfig: () => ipcRenderer.invoke('autonomy:openConfig'),
   agentRun: (payload) => ipcRenderer.invoke('agent:run', payload),
   triggersState: () => ipcRenderer.invoke('triggers:state'),
   triggersOpenConfig: () => ipcRenderer.invoke('triggers:openConfig'),

@@ -396,6 +396,32 @@ $('cwd-btn').addEventListener('click', async () => {
 // In-app replacement for window.confirm() — native dialogs break keyboard
 // focus in the renderer on Windows (Electron/Chromium). Returns a promise that
 // resolves true (OK) or false (Cancel). Enter confirms, Escape cancels.
+// Projects that have already acknowledged the unattended-run disclosure. Kept
+// per project so it is a one-time act, not a nag on every run.
+const agentAcknowledged = new Set(JSON.parse(localStorage.getItem('agentAcknowledged') || '[]'));
+
+async function confirmAgentRun(projectPath, policyId) {
+  if (agentAcknowledged.has(projectPath)) return true;
+  const named = policyId || autonomyPolicy;
+  const confirmed = await confirmDialog(
+    'Start an UNATTENDED agent run in this project?\n\n'
+    + `Autonomy policy: ${named}\n\n`
+    + 'With nobody watching, the agent acts on its own — it can run shell commands, '
+    + 'drive a browser, and call connected tools to do things on the web. Some of those '
+    + 'actions cannot be undone, and a Git checkpoint only restores files, not anything '
+    + 'that has left this machine.\n\n'
+    + 'Actions the policy does not permit are held in the run\'s review tray rather than '
+    + 'performed. Spending money still requires your approval at the moment it happens.\n\n'
+    + 'You are responsible for what an unattended run does. Continue?',
+    { okLabel: 'RUN UNATTENDED', danger: true }
+  );
+  if (confirmed) {
+    agentAcknowledged.add(projectPath);
+    localStorage.setItem('agentAcknowledged', JSON.stringify([...agentAcknowledged]));
+  }
+  return confirmed;
+}
+
 function confirmDialog(message, { okLabel = 'OK', cancelLabel = 'CANCEL', danger = false } = {}) {
   return new Promise((resolve) => {
     const modal = $('confirm-modal');
@@ -1497,9 +1523,9 @@ function shortArgs(name, args) {
 // ---------- approvals ----------
 let pendingApprovalId = null;
 
-window.api.onApprovalRequest(({ id, name, args, network, sensitive, destructive }) => {
+window.api.onApprovalRequest(({ id, name, args, network, sensitive, destructive, financial }) => {
   pendingApprovalId = id;
-  $('approval-tool').textContent = (network ? 'ONLINE REQUEST — ' : sensitive ? 'SENSITIVE READ — ' : destructive ? 'DESTRUCTIVE — ' : 'APPROVE ') + name.toUpperCase() + '?';
+  $('approval-tool').textContent = (financial ? '💳 SPENDING — ' : network ? 'ONLINE REQUEST — ' : sensitive ? 'SENSITIVE READ — ' : destructive ? 'DESTRUCTIVE — ' : 'APPROVE ') + name.toUpperCase() + '?';
   $('approval-detail').textContent =
     name === 'web_search' ? `This query will be sent to DuckDuckGo:\n\n${args.query}\n\nDomains: ${(args.allowed_domains || []).join(', ') || '(unrestricted)'}`
     : name === 'web_fetch' ? `This public URL will be requested and its text returned to the model:\n\n${args.url}`
@@ -1512,6 +1538,10 @@ window.api.onApprovalRequest(({ id, name, args, network, sensitive, destructive 
     : name === 'edit_file' ? `${args.path}\n\n- ${String(args.old_string || '').slice(0, 300)}\n+ ${String(args.new_string || '').slice(0, 300)}`
     : args.source ? `${args.source} → ${args.destination}`
     : String(args.path || JSON.stringify(args));
+  if (financial) {
+    $('approval-detail').textContent = 'This call looks like it moves money — approve only if you intend to spend.\n\n'
+      + $('approval-detail').textContent;
+  }
   $('approval-bar').classList.remove('hidden');
   setState('awaiting approval');
 });
@@ -1897,6 +1927,7 @@ const SLASH_HELP = [
   '/auto <request> — select the best compatible installed model and run the request',
   '/agent [--policy <name>] <goal> — run unattended: always branched, always checkpointed, always reported',
   '/agent trigger [list|new|run <id>] — scheduled unattended runs from triggers.json',
+  '/policies [edit] — list autonomy policies and calls held for review; edit to define a custom one',
   '/memory — view what the agent has remembered',
   '/ledger — view what this session changed, ran, and failed at (kept across compaction)',
   '/export — save this chat as a markdown file',
@@ -2451,6 +2482,11 @@ async function handleSlash(raw) {
       if (flagged) { policy = flagged[1]; goal = flagged[2].trim(); }
       if (!goal) return addError('Usage: /agent [--policy <name>] <goal> — runs unattended, always on a branch, always reported.');
 
+      // Disclosure before an unattended run, once per project. Undo is the wrong
+      // safety model for a run that can act on the world, so this states plainly
+      // what unattended means instead of implying a checkpoint will save you.
+      if (!(await confirmAgentRun(cwd, policy))) return;
+
       const coder = coderModel || modelSelect.value;
       addMessage('user', `AGENT: ${goal}`);
       startRun();
@@ -2475,6 +2511,28 @@ async function handleSlash(raw) {
       }
       if (!res.ok) return addError(res.error);
       return saveChat();
+    }
+
+    case 'policies': {
+      const state = await window.api.autonomyState();
+      if (!state?.ok) return addError('Could not read autonomy policies.');
+      if (arg === 'edit' || arg === 'new') {
+        const opened = await window.api.autonomyOpenConfig();
+        return addInfo(`Edit custom policies in ${opened.path}, then reload with /policies.`);
+      }
+      const lines = ['AUTONOMY POLICIES', ''];
+      for (const policy of state.policies) {
+        lines.push(`${policy.id === state.current ? '▶ ' : '  '}${policy.id}${policy.builtIn ? '' : ' (custom)'} — ${policy.description || policy.label}`);
+      }
+      if (state.configError) lines.push('', `autonomy.json: ${state.configError}`);
+      if (state.deferred.length) {
+        lines.push('', 'HELD FOR REVIEW (last unattended run):');
+        for (const entry of state.deferred) {
+          lines.push(`- ${entry.name}${entry.target ? ` on ${entry.target}` : ''} — ${entry.reason}`);
+        }
+      }
+      lines.push('', 'Set with the AUTONOMY dial, or /policies edit to define a custom one.');
+      return showOverlay('AUTONOMY POLICIES', lines.join('\n'));
     }
 
     case 'ledger': {

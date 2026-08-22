@@ -59,7 +59,11 @@ Each ledger is also written to `runs/` in the app's data directory as it is prod
 
 `/agent <goal>` runs a mission with nobody watching. It is a commitment rather than a setting: it always moves work onto a generated branch, always takes a checkpoint, and always writes a report, however the toggles happen to sit. `--policy <name>` picks an autonomy policy for that run alone without changing your default.
 
-Because nobody is there to answer, a call that would normally prompt is *deferred*: it does not run, it is recorded, and the run carries on rather than stalling until morning. When the run ends you get a foldable decision log in the chat listing every verdict, with the deferred calls separated out as the ones that need you. A run without a Git repository is refused outright — there is no undo without one.
+Starting an unattended run shows a one-time-per-project disclosure: undo is the wrong safety model for a run that can act on the world, so it states plainly that the agent acts on its own — running commands, driving a browser, calling connected tools — and that some actions cannot be undone. A run without a Git repository is still refused, but the honest guard is the disclosure, not the checkpoint.
+
+Because nobody is there to answer, a call that would normally prompt is *deferred*: it does not run, it is recorded, and the run carries on rather than stalling until morning. When the run ends you get a foldable decision log in the chat listing every verdict, with the deferred calls separated out as the ones that need you.
+
+Autonomy runs inside a fence, not on a blanket waiver. An **autonomous** policy (see `/policies edit`) can run risky tools unattended while a tool-call ceiling, a required branch, and the standing invariants still hold. Four things stay held for a person whatever the policy says: destructive operations, sensitive reads, external MCP tools, and anything that moves money. The money guard is a heuristic backstop — a payment-provider API call, a checkout, a crypto send — surfaced as a spending approval so that spending meets you at the moment it happens rather than at launch.
 
 Each run leaves a timestamped transcript and a markdown report in `runs/` in the application-data directory, and raises a notification when it finishes.
 
@@ -128,6 +132,7 @@ Type these in the message box:
 | `/memory` | View what the agent has remembered for the selected project |
 | `/agent [--policy <name>] <goal>` | Run unattended: always branched, checkpointed, and reported |
 | `/agent trigger [list\|new\|run <id>]` | Scheduled unattended runs from `triggers.json` |
+| `/policies [edit]` | List autonomy policies and calls held for review; edit to define a custom one |
 | `/ledger` | View what this session changed, ran, and failed at (survives compaction) |
 | `/export` | Save the chat as a markdown file |
 | `/tools` | List available tools and their risky, sensitive, or network classification |
