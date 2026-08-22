@@ -89,3 +89,20 @@ test('/agent is listed in help and restricted to Code mode', () => {
   assert.match(app, /'\/agent \[--policy <name>\] <goal>/);
   assert.match(app, /'memory', 'ledger', 'agent'\]/);
 });
+
+test('a mission runs without a Git repo instead of failing on the checkpoint', () => {
+  const main = read('main.js');
+  const start = main.indexOf('async function startMission(');
+  const end = main.indexOf('ipcMain.handle(\'mission:start\'', start);
+  const body = main.slice(start, end);
+
+  // The checkpoint is best-effort: a null result (no repo) must not throw.
+  assert.doesNotMatch(body, /if \(!checkpoint\) throw/,
+    'a repo-less folder must not fail the mission on a missing checkpoint');
+  assert.match(body, /if \(checkpoint\) \{/, 'checkpoint work is guarded on there being one');
+  assert.match(body, /recovery: null/, 'a mission with no checkpoint records no recovery');
+
+  // Progress capture and resume both tolerate a null recovery.
+  assert.match(main, /if \(!activeMission\.recovery\) \{\s*updateMission\(\{ \.\.\.progress \}\);/);
+  assert.match(main, /ran without a Git repository, so there is no checkpoint to resume/);
+});

@@ -2558,6 +2558,12 @@ async function runActiveMission({ model, coderModel, subModel, goal, cwd, autoAp
       loopLog,
       iterationOffset,
       onProgress: async (progress) => {
+        // Recovery only exists when a checkpoint was taken (a Git repo). Without
+        // one, progress is still persisted; there is just nothing to resume to.
+        if (!activeMission.recovery) {
+          updateMission({ ...progress });
+          return;
+        }
         const recovery = await captureMissionRecovery({
           cwd,
           checkpointRef: activeMission.recovery.checkpointRef,
@@ -2642,14 +2648,24 @@ async function startMission({
 
   try {
     await maybeAutoBranch(cwd, goal, !!autoBranch);
+    // The checkpoint enables UNDO and mid-mission resume, both of which are
+    // Git features. Without a repository there is neither — so the mission runs
+    // without them rather than refusing to start. Undo is the wrong safety
+    // model for a run that acts on the world anyway; the disclosure is the guard.
     const checkpoint = await createCheckpoint(cwd);
-    if (!checkpoint) throw new Error('Could not create the mission recovery checkpoint.');
-    const recovery = await captureMissionRecovery({ cwd, checkpointRef: checkpoint.ref, gitRun });
-    updateMission({
-      projectPath: recovery.projectPath,
-      recovery: { ...recovery, checkpointAt: checkpoint.at },
-      lastEvent: 'Recovery checkpoint saved. Starting mission.',
-    });
+    if (checkpoint) {
+      const recovery = await captureMissionRecovery({ cwd, checkpointRef: checkpoint.ref, gitRun });
+      updateMission({
+        projectPath: recovery.projectPath,
+        recovery: { ...recovery, checkpointAt: checkpoint.at },
+        lastEvent: 'Recovery checkpoint saved. Starting mission.',
+      });
+    } else {
+      updateMission({
+        recovery: null,
+        lastEvent: 'No Git repository — running without checkpoint or resume. Starting mission.',
+      });
+    }
   } catch (error) {
     const message = String(error.message || error);
     updateMission({ status: 'failed', currentPhase: 'failed', endedAt: new Date().toISOString(), lastEvent: message, finalReport: message });
@@ -2911,6 +2927,10 @@ ipcMain.handle('mission:resume', async (_e, { cwd, chatId, autoApprove, think, o
   if (activeMission.status !== 'interrupted') return { ok: false, error: `Only an interrupted mission can resume. Current status: ${activeMission.status}.` };
   if (!cwd) return { ok: false, error: 'Pick the saved mission directory first.' };
   if (!chatId || chatId !== activeMission.chatId) return { ok: false, error: 'Open the chat that started this mission before resuming it.' };
+  // A mission run without a Git repository has no checkpoint to resume to.
+  if (!activeMission.recovery) {
+    return { ok: false, error: 'This mission ran without a Git repository, so there is no checkpoint to resume from. Start a new run.' };
+  }
 
   const validation = await validateMissionRecovery({ mission: activeMission, cwd, gitRun });
   if (!validation.ok) {
