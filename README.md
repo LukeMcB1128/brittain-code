@@ -59,6 +59,20 @@ Each ledger is also written to `runs/` in the app's data directory as it is prod
 
 `/agent <goal>` runs a single agent loop with nobody watching — one model working the goal, free to spawn a subagent when it needs one. It is not the planner/coder/verifier mission pipeline; "check my emails" should not stand up three models. It is a commitment rather than a setting: where there is a repository it moves work onto a generated branch and checkpoints it, and it always writes a report, however the toggles happen to sit. `--policy <name>` picks an autonomy policy for that run alone without changing your default.
 
+**Parked calls.** Unattended, a call only a human may approve — money, destructive operations, sensitive reads, untrusted MCP tools — no longer ends the run without it. The call's exact arguments are frozen, the run suspends, and a notification says a decision is waiting. `/pending` lists suspended runs; approve or deny each call, then `/pending resume <run>` continues the run from exactly where it stopped, executing what was parked — never a regenerated variant. Undecided calls at resume count as denied, and a decision nobody makes for six hours expires. Ordinary risky calls a policy merely does not list are still deferred (recorded, skipped, the run continues) — a defer's answer would be stale by morning anyway.
+
+**The project workspace.** `/memory move` creates `<project>/.brittain/` and relocates the agent's memory into `MEMORY.md` there, where it shows up in diffs and travels with the repository. The directory also holds `HEARTBEAT.md` (below), optional project-scoped `triggers.json` and `autonomy.json`, and a starter `.gitignore` covering the volatile half (`state.json`, `runs/`). These files can arrive via `git pull` from anyone, so they follow strict trust rules: memory and heartbeat text are injected as data, never instructions; a project `autonomy.json` can only *narrow* the active policy (widening lives in the app-data `autonomy.json`, outside the repository); and project triggers arrive disabled — they fire only after `/agent trigger enable <id>`, and re-disable automatically if a pull changes their definition. `remember` refuses key-shaped facts when memory is in-repo, since a committed credential is a published one.
+
+**Heartbeats.** A trigger of `{"type": "heartbeat"}` fires no fixed goal. On its interval (frontmatter in `HEARTBEAT.md`; 15-minute floor, optional quiet hours) it reads the project's checklist and acts only on items whose condition is currently true, recording what it concluded in `state.json` for the next beat to read. That is the difference between scheduled and autonomous: cron fires a goal, a heartbeat asks a question.
+
+**The daemon.** Triggers normally fire only while the app is open. `/agent daemon install` (macOS, opt-in, never automatic) installs a LaunchAgent that runs the app `--headless`: no window, the same runtime, answering on a unix domain socket — deliberately not a network port. The daemon owns the trigger scheduler; a window that finds it alive does not start a second one.
+
+**Graduated MCP trust.** "MCP is never automatic" is right for a server installed five minutes ago and wrong forever after. A `trust` map in `mcp.json` (`{"search": "allow", "send": "park"}`) grants specific tools on a specific server; the grant is keyed to the server's command line and voids itself if that changes (`/mcp trust accept <server>` re-affirms). The financial, destructive, and sensitive invariants still apply to trusted MCP calls.
+
+**The learning loop.** Every run's verdicts accumulate. A call held (deferred or parked) five or more times across runs and never denied by a human surfaces in `/policies` as a promotion suggestion; `/policies promote <custom-policy> <tool>` adds it to that policy's allow list. Never automatic — the aggregate produces evidence, a person clicks. Built-in policies cannot be widened.
+
+**Sandboxing.** A custom policy with `"sandbox": true` runs unattended shell commands under macOS `sandbox-exec`, with writes confined to the project and temp directories — path confinement as an OS guarantee rather than a code one. On platforms without a sandbox the run says so plainly and continues unconfined.
+
 Starting an unattended run shows a one-time-per-project disclosure: undo is the wrong safety model for a run that can act on the world, so it states plainly that the agent acts on its own — running commands, driving a browser, calling connected tools — and that some actions cannot be undone. A Git repository is no longer required; when there is one the run still branches and checkpoints for its file-level work, and when there is not, the disclosure is the guard and file-level undo simply does not apply. A policy can still opt into requiring a generated branch, which only applies inside a repository.
 
 Because nobody is there to answer, a call that would normally prompt is *deferred*: it does not run, it is recorded, and the run carries on rather than stalling until morning. When the run ends you get a foldable decision log in the chat listing every verdict, with the deferred calls separated out as the ones that need you.
@@ -129,10 +143,12 @@ Type these in the message box:
 | `/recs` | Compare installed models by memory fit, capabilities, measured speed, and local Brittainmark results |
 | `/auto <request>` | Select the best compatible installed model for the current mode and attachments, then run the request |
 | `/mcp [on\|off <server>]` | External MCP tool servers: status, enable, disable |
-| `/memory` | View what the agent has remembered for the selected project |
+| `/memory [move]` | View what the agent has remembered; `move` relocates it into the project's `.brittain/MEMORY.md` |
 | `/agent [--policy <name>] <goal>` | Run unattended: always branched, checkpointed, and reported |
-| `/agent trigger [list\|new\|run <id>]` | Scheduled unattended runs from `triggers.json` |
-| `/policies [edit]` | List autonomy policies and calls held for review; edit to define a custom one |
+| `/agent trigger [list\|new\|run <id>\|enable <id>\|disable <id>]` | Scheduled unattended runs; enable/disable act on project (`.brittain`) triggers |
+| `/agent daemon [status\|install\|uninstall]` | The headless runtime that keeps triggers and heartbeats firing with every window closed |
+| `/pending [approve\|deny <run> [n\|all]\|resume <run>]` | Parked calls from suspended unattended runs |
+| `/policies [edit\|promote <policy> <tool>]` | Autonomy policies, held calls, and evidence-backed promotion suggestions |
 | `/ledger` | View what this session changed, ran, and failed at (survives compaction) |
 | `/export` | Save the chat as a markdown file |
 | `/tools` | List available tools and their risky, sensitive, or network classification |
