@@ -21,6 +21,7 @@ const { enqueue: enqueueRun, dequeue: dequeueRun, peek: peekQueue } = require('.
 const { readTriggers, dueTriggers, validateTrigger, ensureConfig: ensureTriggerConfig, configPath: triggerConfigPath } = require('./src/main/triggers');
 const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies, checkPreconditions, ensureConfig: ensureAutonomyConfig, narrowPolicy, BUILT_IN: BUILT_IN_POLICIES } = require('./src/main/autonomy');
 const workspace = require('./src/main/workspace');
+const pendingStore = require('./src/main/pending-store');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
 const { selectAutoModel } = require('./src/main/model-router');
@@ -541,6 +542,10 @@ function beginRun({ attended = true, transcriptPath = '', label = '', cwd = '' }
     cwd,
     startedAt: new Date().toISOString(),
     decisions: [],
+    // Calls held for a human decision while the run suspends: name, frozen
+    // args, and the conversation index of the placeholder tool result that the
+    // real result replaces at resume.
+    parked: [],
     transcriptPath,
   };
   if (transcriptPath) sink.configure({ targets: ['renderer', 'file'], transcriptPath });
@@ -622,7 +627,31 @@ async function resolveToolCall(name, args, { autoApprove, onlineResearch, prompt
   if (decision.verdict === 'defer') {
     sink.emit('stream:info', `Deferred ${name} — ${decision.reason}. Recorded for review.`);
   }
+  if (decision.verdict === 'park') {
+    // Frozen at park time: what was parked is what runs at resume, never a
+    // regenerated variant. The conversation index of the placeholder result is
+    // attached by the loop right after it pushes the message.
+    currentRun?.parked?.push({
+      name, args, reason: decision.reason, target: describeCallTarget(name, args), at,
+      classification: { destructive: !!call.destructive, sensitive: !!call.sensitive, financial: !!call.financial, mcp: !!call.mcp },
+      messageIndex: -1, decision: '',
+    });
+    sink.emit('stream:info', `Parked ${name} — ${decision.reason}. The run will suspend for your decision.`);
+  }
   return { approved: false, ...decision, policyId: id };
+}
+
+// The tool result the model sees for a call that was not approved. Park and
+// defer are policy outcomes with fixed phrasing; a denial keeps the branch's
+// own wording so the model knows what kind of thing was refused.
+function unapprovedResult(verdict, deniedText) {
+  if (verdict === 'park') {
+    return 'This call needs the user\'s approval and has been parked; the run is suspending and will resume once they decide. Finish any unrelated work in progress, then stop.';
+  }
+  if (verdict === 'defer') {
+    return 'This tool call was not permitted for an unattended run and has been recorded for review. Continue without it.';
+  }
+  return deniedText;
 }
 
 function describeCallTarget(name, args) {
@@ -1070,6 +1099,9 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   const runLog = { mutations: new Set(), commands: [], verified: false };
   let lastStats = null;
   let exhaustedWithToolCalls = false;
+  // Set when a parked call ends the loop early: the run suspends for approval
+  // instead of finishing. The caller serializes and reports.
+  let suspendedForApproval = false;
   const maxAgentSteps = runtimeSettings.maxAgentSteps || MAX_AGENT_STEPS;
   const temperature = chatMode ? runtimeSettings.chatTemperature : runtimeSettings.codeTemperature;
 
@@ -1217,51 +1249,52 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
             result = 'Online research is disabled. Do not retry this tool; continue offline or ask the user to enable ONLINE RESEARCH.';
             sink.emit('stream:toolresult', { name, result: preview(result), denied: true });
           } else {
-            const { approved } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { network: true } });
+            const { approved, verdict } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { network: true } });
             result = approved
               ? await safeExecute(name, args, cwd)
-              : 'The user denied this online request. Do not retry it unless the user explicitly changes direction.';
-            sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(online request denied by user)', denied: !approved });
+              : unapprovedResult(verdict, 'The user denied this online request. Do not retry it unless the user explicitly changes direction.');
+            sink.emit('stream:toolresult', { name, result: approved ? preview(result) : `(online request ${verdict === 'park' ? 'parked' : 'denied by user'})`, denied: !approved });
           }
         } else if (DESTRUCTIVE_TOOLS.has(name)) {
           if (args.dry_run !== false) {
             result = await safeExecute(name, args, cwd);
             sink.emit('stream:toolresult', { name, result: preview(result) });
           } else {
-            const { approved } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { destructive: true } });
+            const { approved, verdict } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { destructive: true } });
             result = approved
               ? await safeExecute(name, args, cwd)
-              : 'The user denied this destructive operation. Do not retry it unless the user explicitly asks.';
-            sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(destructive operation denied by user)', denied: !approved });
+              : unapprovedResult(verdict, 'The user denied this destructive operation. Do not retry it unless the user explicitly asks.');
+            sink.emit('stream:toolresult', { name, result: approved ? preview(result) : `(destructive operation ${verdict === 'park' ? 'parked' : 'denied by user'})`, denied: !approved });
           }
         } else if (name === 'run_command' && isDestructiveCommand(args.command)) {
           // destructive shell patterns are never automatic, whatever the policy says
-          const { approved } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { destructive: true } });
+          const { approved, verdict } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { destructive: true } });
           result = approved
             ? await safeExecute(name, args, cwd)
-            : 'The user denied this destructive command. Do not retry it or any variation of it unless the user explicitly asks.';
-          sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(destructive command denied by user)', denied: !approved });
+            : unapprovedResult(verdict, 'The user denied this destructive command. Do not retry it or any variation of it unless the user explicitly asks.');
+          sink.emit('stream:toolresult', { name, result: approved ? preview(result) : `(destructive command ${verdict === 'park' ? 'parked' : 'denied by user'})`, denied: !approved });
         } else if (mcp.owns(name)) {
           // MCP tools are third-party and untrusted, so they normally require
           // approval even under the code-mode AUTO-APPROVE. The dedicated
           // mcpAutoApprove setting is the ONLY thing that waives that prompt —
           // opt-in, off by default, and gated behind a disclaimer in Settings.
           const autoApproved = !!runtimeSettings.mcpAutoApprove;
-          const approved = autoApproved
-            || (await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { mcp: true } })).approved;
-          if (approved) {
+          const decision = autoApproved
+            ? { approved: true, verdict: 'allow' }
+            : await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { mcp: true } });
+          if (decision.approved) {
             const callResult = await mcp.call(name, args);
             result = autoApproved ? '[MCP auto-approved] ' + callResult : callResult;
           } else {
-            result = 'The user denied this external MCP tool call. Do not retry it unless the user explicitly asks.';
+            result = unapprovedResult(decision.verdict, 'The user denied this external MCP tool call. Do not retry it unless the user explicitly asks.');
           }
-          sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(MCP call denied by user)', denied: !approved });
+          sink.emit('stream:toolresult', { name, result: decision.approved ? preview(result) : `(MCP call ${decision.verdict === 'park' ? 'parked' : 'denied by user'})`, denied: !decision.approved });
         } else if (isSensitiveToolCall(name, args)) {
-          const { approved } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { sensitive: true } });
+          const { approved, verdict } = await resolveToolCall(name, args, { autoApprove, onlineResearch, promptKind: { sensitive: true } });
           result = approved
             ? await safeExecute(name, args, cwd)
-            : 'The user denied this sensitive read. Do not retry it unless the user explicitly asks.';
-          sink.emit('stream:toolresult', { name, result: approved ? preview(result) : '(sensitive read denied by user)', denied: !approved });
+            : unapprovedResult(verdict, 'The user denied this sensitive read. Do not retry it unless the user explicitly asks.');
+          sink.emit('stream:toolresult', { name, result: approved ? preview(result) : `(sensitive read ${verdict === 'park' ? 'parked' : 'denied by user'})`, denied: !approved });
         } else if (name === 'apply_patch' && args.dry_run !== false) {
           result = await safeExecute(name, args, cwd);
           sink.emit('stream:toolresult', { name, result: preview(result) });
@@ -1269,10 +1302,8 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           const { approved, verdict } = await resolveToolCall(name, args, { autoApprove, onlineResearch });
           result = approved
             ? await safeExecute(name, args, cwd)
-            : verdict === 'defer'
-              ? 'This tool call was not permitted for an unattended run and has been recorded for review. Continue without it.'
-              : 'The user denied this tool call. Ask before retrying, or try another approach.';
-          if (!approved) sink.emit('stream:toolresult', { name, result: `(${verdict === 'defer' ? 'deferred by policy' : 'denied by user'})`, denied: true });
+            : unapprovedResult(verdict, 'The user denied this tool call. Ask before retrying, or try another approach.');
+          if (!approved) sink.emit('stream:toolresult', { name, result: `(${verdict === 'defer' ? 'deferred by policy' : verdict === 'park' ? 'parked' : 'denied by user'})`, denied: true });
           else sink.emit('stream:toolresult', { name, result: preview(result) });
         } else {
           result = await safeExecute(name, args, cwd);
@@ -1293,8 +1324,19 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           }
         }
         conversation.push({ role: 'tool', tool_name: name, content: String(result) });
+        // A call parked just above owns the placeholder result pushed just now:
+        // record its index so resume can swap in the real result.
+        const lastParked = currentRun?.parked?.length ? currentRun.parked[currentRun.parked.length - 1] : null;
+        if (lastParked && lastParked.messageIndex === -1) lastParked.messageIndex = conversation.length - 1;
       }
       if (stopRequested) break;
+      // Parked calls suspend the run once the current batch has finished — the
+      // rest of the batch ran normally, the conversation is complete and
+      // serializable, and resume picks up from exactly here.
+      if (currentRun?.parked?.some((entry) => !entry.decision)) {
+        suspendedForApproval = true;
+        break;
+      }
 
       // Auto-compaction protects generation quality before the window overflows
       // (glitch tokens, thought-leak into files — see fablereview.md), so this
@@ -1318,7 +1360,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   if (exhaustedWithToolCalls && !stopRequested) {
     sink.emit('stream:info', `Agent stopped after reaching the ${maxAgentSteps}-step safety cap.`);
   }
-  return { lastContent, lastStats, contextLength, runLog };
+  return { lastContent, lastStats, contextLength, runLog, suspendedForApproval };
 }
 
 // ---------- run checkpoints (Tier 1 safety) ----------
@@ -2741,6 +2783,15 @@ function renderRunReport(run, mission) {
     }
     lines.push('');
   }
+  const parked = run?.parked || [];
+  if (parked.length) {
+    lines.push('## Parked', '',
+      'These calls are frozen with their exact arguments, awaiting a decision (/pending):', '');
+    for (const entry of parked) {
+      lines.push(`- \`${entry.name}\`${entry.target ? ` on \`${entry.target}\`` : ''} — ${entry.reason}${entry.decision ? ` (${entry.decision})` : ' (undecided)'}`);
+    }
+    lines.push('');
+  }
   if (mission?.finalReport) lines.push('## Result', '', String(mission.finalReport), '');
   if (run?.transcriptPath) lines.push('## Transcript', '', `\`${run.transcriptPath}\``, '');
   return lines.join('\n');
@@ -2749,9 +2800,14 @@ function renderRunReport(run, mission) {
 function notifyRunFinished(mission, reportPath) {
   try {
     if (!Notification.isSupported()) return;
+    const suspended = mission?.status === 'suspended';
     const notification = new Notification({
-      title: `Brittain Code — mission ${mission?.status || 'finished'}`,
-      body: String(mission?.goal || '').slice(0, 120),
+      title: suspended
+        ? 'Brittain Code — run suspended, needs your approval'
+        : `Brittain Code — mission ${mission?.status || 'finished'}`,
+      body: suspended
+        ? `Parked calls await a decision: ${String(mission?.goal || '').slice(0, 90)}`
+        : String(mission?.goal || '').slice(0, 120),
     });
     notification.on('click', () => shell.showItemInFolder(reportPath));
     notification.show();
@@ -2773,6 +2829,9 @@ async function runAgentTask(payload = {}) {
   // not refused. It expires rather than running hours late, and is
   // re-checkpointed when it actually starts.
   if (currentAbort || activeMission?.status === 'running') {
+    // A resume restores a serialized conversation into the live session; it
+    // cannot sit in the queue behind other work. Try again when idle.
+    if (payload.resumeRecord) return { ok: false, error: 'Busy — resume the suspended run when the current one finishes.' };
     const queued = enqueueRun(settingsUserDataDir, payload);
     if (!queued.ok) return queued;
     sink.emit('stream:info', `Busy — queued "${payload.goal}" (${queued.depth} waiting).`);
@@ -2803,25 +2862,37 @@ async function runAgentTask(payload = {}) {
 
   const previousPolicy = runtimeSettings.autonomyPolicy;
   runtimeSettings = { ...runtimeSettings, autonomyPolicy: policyId };
-  const run = beginRun({ attended: false, label: 'agent' });
-  run.transcriptPath = path.join(settingsUserDataDir || app.getPath('userData'), 'runs', `${run.id}.log`);
+  // A resume continues the suspended run's identity: same id, same transcript,
+  // and the parked entries already decided carry over into the record.
+  const resume = payload.resumeRecord || null;
+  const run = beginRun({ attended: false, label: resume ? 'agent-resume' : 'agent', cwd });
+  if (resume) {
+    run.id = resume.runId;
+    run.parked = resume.parked || [];
+  }
+  run.transcriptPath = resume?.transcriptPath
+    || path.join(settingsUserDataDir || app.getPath('userData'), 'runs', `${run.id}.log`);
   sink.configure({ targets: ['renderer', 'file'], transcriptPath: run.transcriptPath });
-  sink.emit('stream:info', `Agent run ${run.id} starting unattended under "${policy.label || policyId}". Transcript: ${run.transcriptPath}`);
+  sink.emit('stream:info', resume
+    ? `Agent run ${run.id} resuming under "${policy.label || policyId}".`
+    : `Agent run ${run.id} starting unattended under "${policy.label || policyId}". Transcript: ${run.transcriptPath}`);
+
 
   // Where there is a repo, branch and checkpoint for undo; where there is not,
   // neither exists and the disclosure is the guard.
   await maybeAutoBranch(cwd, goal, true);
   await createCheckpoint(cwd);
 
-  conversation.push({ role: 'user', content: goal, displayContent: goal });
+  if (!resume) conversation.push({ role: 'user', content: goal, displayContent: goal });
   stopRequested = false;
   currentAbort = new AbortController();
   const runStartedAt = Date.now();
   let outcome = 'ok';
   let status = 'completed';
+  let finalContent = '';
 
   try {
-    const { runLog } = await runAgentTurn(
+    const turn = await runAgentTurn(
       model, cwd,
       /* autoApprove (unused; the policy decides) */ false,
       !!payload.think,
@@ -2829,7 +2900,13 @@ async function runAgentTask(payload = {}) {
       !!payload.onlineResearch,
       'code',
     );
-    await emitRunReport(cwd, runLog);
+    finalContent = String(turn.lastContent || '');
+    if (turn.suspendedForApproval) {
+      outcome = 'suspended';
+      status = 'suspended';
+    } else {
+      await emitRunReport(cwd, turn.runLog);
+    }
   } catch (err) {
     if (err?.name === 'AbortError') { outcome = 'stopped'; status = 'stopped'; }
     else { outcome = 'failed'; status = 'failed'; sink.emit('stream:info', `Agent run failed: ${String(err.message || err)}`); }
@@ -2838,6 +2915,31 @@ async function runAgentTask(payload = {}) {
     currentAbort = null;
     runtimeSettings = { ...runtimeSettings, autonomyPolicy: previousPolicy };
     const finished = endRun();
+    // A suspended run is serialized whole — conversation, frozen calls, the
+    // settings it ran under — so approval can resume it from exactly here,
+    // even after a restart.
+    if (status === 'suspended') {
+      try {
+        pendingStore.save(settingsUserDataDir, {
+          runId: finished.id,
+          goal, cwd, model,
+          subModel: payload.subModel || 'qwen3:8b',
+          think: !!payload.think,
+          onlineResearch: !!payload.onlineResearch,
+          policyId,
+          heartbeat: payload.heartbeat || null,
+          suspendedAt: new Date().toISOString(),
+          transcriptPath: finished.transcriptPath,
+          parked: finished.parked || [],
+          conversation,
+          maxAgeMs: payload.maxAgeMs,
+        });
+        sink.emit('stream:info', `Run suspended — ${(finished.parked || []).filter((entry) => !entry.decision).length} call(s) parked for your decision. /pending to review.`);
+      } catch (err) {
+        sink.emit('stream:info', `Could not save the suspended run: ${String(err.message || err)}`);
+        status = 'failed';
+      }
+    }
     const context = { goal, projectPath: cwd, status };
     const reportPath = runReportPath(finished.id);
     try {
@@ -2851,6 +2953,7 @@ async function runAgentTask(payload = {}) {
       policy: policyId,
       decisions: finished.decisions,
       deferred: deferredFrom(finished),
+      parked: (finished.parked || []).map((entry) => ({ name: entry.name, target: entry.target, reason: entry.reason, decision: entry.decision || '' })),
       reportPath,
       transcriptPath: finished.transcriptPath,
     });
@@ -2861,6 +2964,91 @@ async function runAgentTask(payload = {}) {
 }
 
 ipcMain.handle('agent:run', async (_e, payload = {}) => runAgentTask(payload));
+
+// ---------- suspended runs (parked calls) ----------
+// Approval resumes a suspended run from exactly where it stopped: the frozen
+// call executes with its original arguments, its placeholder tool result is
+// replaced with the real one, and the loop continues. A denial replaces the
+// placeholder with a refusal the model can read. Either way the model never
+// regenerates the call — what was parked is what runs.
+async function resumeSuspendedRun(runId) {
+  if (currentAbort || activeMission?.status === 'running') {
+    return { ok: false, error: 'Something is already running — resume when it finishes.' };
+  }
+  const record = pendingStore.read(settingsUserDataDir, runId);
+  if (!record) return { ok: false, error: `No suspended run "${runId}" — it may have expired or already resumed.` };
+  if (pendingStore.isExpired(record)) {
+    pendingStore.remove(settingsUserDataDir, runId);
+    return { ok: false, error: `Suspended run "${runId}" aged out before anyone decided — a decision nobody made in six hours is a decision not to.` };
+  }
+
+  conversation = Array.isArray(record.conversation) ? record.conversation : [];
+  for (const entry of record.parked || []) {
+    if (!(entry.messageIndex >= 0 && entry.messageIndex < conversation.length)) continue;
+    let text;
+    if (entry.decision === 'approved') {
+      // Re-validate the frozen call: the world may have moved while it waited.
+      // A call that now classifies as something worse than what was approved
+      // is refused, not upgraded.
+      const now = classifyToolCall(entry.name, entry.args);
+      const was = entry.classification || {};
+      const escalated = ['destructive', 'sensitive', 'financial'].filter((flag) => now[flag] && !was[flag]);
+      if (escalated.length) {
+        text = `This parked call was approved, but re-validation now classifies it as ${escalated.join(', ')} — refused. Ask the user directly if it is still wanted.`;
+        sink.emit('stream:info', `Refused parked ${entry.name} at resume — classification escalated to ${escalated.join(', ')}.`);
+      } else {
+        const raw = now.mcp
+          ? await mcp.call(entry.name, entry.args)
+          : await safeExecute(entry.name, entry.args, record.cwd);
+        text = '[approved by the user while the run was suspended] ' + String(raw);
+      }
+    } else {
+      // Undecided at resume counts as denied: resuming IS the decision moment.
+      text = 'The user reviewed this parked call and did not approve it. Do not retry it; continue without it.';
+    }
+    conversation[entry.messageIndex] = { role: 'tool', tool_name: entry.name, content: text };
+  }
+  pendingStore.remove(settingsUserDataDir, runId);
+
+  return runAgentTask({
+    goal: record.goal,
+    cwd: record.cwd,
+    model: record.model,
+    subModel: record.subModel,
+    think: record.think,
+    onlineResearch: record.onlineResearch,
+    policy: record.policyId,
+    heartbeat: record.heartbeat,
+    maxAgeMs: record.maxAgeMs,
+    // Undecided entries were just treated as denied above — stamp them so the
+    // resumed run's suspension check does not see them as still-open parks.
+    resumeRecord: { ...record, parked: (record.parked || []).map((entry) => ({ ...entry, decision: entry.decision || 'denied', resumed: true })) },
+  });
+}
+
+ipcMain.handle('pending:list', () => {
+  const { records, expired } = pendingStore.list(settingsUserDataDir);
+  return {
+    ok: true,
+    expired: expired.map((record) => ({ runId: record.runId, goal: record.goal })),
+    records: records.map((record) => ({
+      runId: record.runId,
+      goal: record.goal,
+      cwd: record.cwd,
+      suspendedAt: record.suspendedAt,
+      parked: (record.parked || []).map((entry, index) => ({
+        index, name: entry.name, target: entry.target, reason: entry.reason, decision: entry.decision || '',
+      })),
+    })),
+  };
+});
+
+ipcMain.handle('pending:resolve', (_e, { runId, index, approved }) => {
+  const result = pendingStore.resolveCall(settingsUserDataDir, runId, index, !!approved);
+  return result.ok ? { ok: true } : result;
+});
+
+ipcMain.handle('pending:resume', (_e, runId) => resumeSuspendedRun(runId));
 
 // ---------- triggers ----------
 // A minute-resolution tick over triggers.json. Deliberately small: no

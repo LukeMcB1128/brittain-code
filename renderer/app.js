@@ -1126,7 +1126,7 @@ function addInfo(text) {
 // Decision J: the log renders inline as one foldable block per run rather than
 // as a panel. It costs far less UI, sits next to the run it describes, and
 // survives a history reload for free.
-function addDecisionLog({ runId, policy, decisions = [], deferred = [], reportPath, transcriptPath }) {
+function addDecisionLog({ runId, policy, decisions = [], deferred = [], parked = [], reportPath, transcriptPath }) {
   const counts = decisions.reduce((totals, entry) => {
     totals[entry.verdict] = (totals[entry.verdict] || 0) + 1;
     return totals;
@@ -1136,11 +1136,26 @@ function addDecisionLog({ runId, policy, decisions = [], deferred = [], reportPa
   const details = document.createElement('details');
   details.className = 'msg info decision-log';
   const heading = document.createElement('summary');
+  const undecided = parked.filter((entry) => !entry.decision).length;
   heading.textContent = `AGENT RUN — ${policy} — ${summary}`
-    + (deferred.length ? ` — ${deferred.length} needs review` : '');
+    + (deferred.length ? ` — ${deferred.length} needs review` : '')
+    + (undecided ? ` — ${undecided} parked (/pending)` : '');
   details.appendChild(heading);
 
   const body = document.createElement('div');
+  if (parked.length) {
+    const tray = document.createElement('div');
+    tray.className = 'needs-review';
+    tray.textContent = 'Parked — the run is suspended until you decide (/pending):';
+    const list = document.createElement('ul');
+    for (const entry of parked) {
+      const item = document.createElement('li');
+      item.textContent = `${entry.name}${entry.target ? ` on ${entry.target}` : ''} — ${entry.reason}${entry.decision ? ` (${entry.decision})` : ''}`;
+      list.appendChild(item);
+    }
+    tray.appendChild(list);
+    body.appendChild(tray);
+  }
   if (deferred.length) {
     const tray = document.createElement('div');
     tray.className = 'needs-review';
@@ -2520,6 +2535,56 @@ async function handleSlash(raw) {
       }
       if (!res.ok) return addError(res.error);
       return saveChat();
+    }
+
+    case 'pending': {
+      const [sub = '', runArg = '', callArg = ''] = arg.split(/\s+/);
+
+      // Approve/deny mark decisions on the stored record; resume is the
+      // separate, explicit act that executes them and continues the run.
+      if (sub === 'approve' || sub === 'deny') {
+        if (!runArg) return addError(`Usage: /pending ${sub} <runId> [n|all]`);
+        const listed = await window.api.pendingList();
+        const record = listed.records?.find((entry) => entry.runId === runArg || entry.runId.endsWith(runArg));
+        if (!record) return addError(`No suspended run matching "${runArg}".`);
+        const approved = sub === 'approve';
+        const indexes = callArg && callArg !== 'all'
+          ? [parseInt(callArg, 10)].filter((n) => Number.isInteger(n))
+          : record.parked.map((entry) => entry.index);
+        for (const index of indexes) {
+          const res = await window.api.pendingResolve(record.runId, index, approved);
+          if (!res.ok) return addError(res.error);
+        }
+        return addInfo(`${approved ? 'Approved' : 'Denied'} ${indexes.length} parked call(s) on ${record.runId}. /pending resume ${record.runId} to continue the run.`);
+      }
+
+      if (sub === 'resume') {
+        if (!runArg) return addError('Usage: /pending resume <runId>');
+        const listed = await window.api.pendingList();
+        const record = listed.records?.find((entry) => entry.runId === runArg || entry.runId.endsWith(runArg));
+        if (!record) return addError(`No suspended run matching "${runArg}".`);
+        const undecided = record.parked.filter((entry) => !entry.decision).length;
+        if (undecided) addInfo(`${undecided} parked call(s) are undecided — resuming treats them as denied.`);
+        startRun();
+        let res;
+        try { res = await window.api.pendingResume(record.runId); } finally { endRun(); }
+        return res.ok ? saveChat() : addError(res.error);
+      }
+
+      const listed = await window.api.pendingList();
+      if (!listed.ok) return addError('Could not read suspended runs.');
+      const lines = [];
+      for (const record of listed.expired || []) lines.push(`(expired unanswered: "${record.goal}")`);
+      if (!listed.records.length) lines.push('No suspended runs. When an unattended run parks a call, it appears here.');
+      for (const record of listed.records) {
+        lines.push(`${record.runId} — "${record.goal}"`, `  suspended ${record.suspendedAt} in ${record.cwd}`);
+        for (const entry of record.parked) {
+          lines.push(`  [${entry.index}] ${entry.name}${entry.target ? ` on ${entry.target}` : ''} — ${entry.reason}${entry.decision ? ` (${entry.decision})` : ''}`);
+        }
+        lines.push('');
+      }
+      lines.push('/pending approve <run> [n|all] · /pending deny <run> [n|all] · /pending resume <run>');
+      return showOverlay('PARKED CALLS', lines.join('\n'));
     }
 
     case 'policies': {

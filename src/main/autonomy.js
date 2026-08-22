@@ -11,6 +11,8 @@
 // A verdict is one of:
 //   allow   run it
 //   ask     put it to the human (only meaningful when someone is watching)
+//   park    do not run it now; suspend the run and hold the call, with its
+//           exact arguments frozen, until a human decides — then resume
 //   defer   do not run it, record it for review, let the run continue
 //   deny    refuse outright and tell the model not to retry
 //
@@ -79,10 +81,13 @@ function matches(patterns, name) {
   return false;
 }
 
-// An 'ask' with nobody there is not an approval — it is a hang. Decision B says
-// the run continues and reports rather than stalling until morning.
-function resolveAsk(attended) {
-  return attended ? 'ask' : 'defer';
+// An 'ask' with nobody there is not an approval — it is a hang. Unattended,
+// a call where a human decision is genuinely needed is parked — the run
+// suspends and resumes once someone decides — while a call whose answer would
+// be stale by morning is deferred: recorded, skipped, the run continues.
+function resolveAsk(attended, parkable = false) {
+  if (attended) return 'ask';
+  return parkable ? 'park' : 'defer';
 }
 
 function decide(rawPolicy, call = {}) {
@@ -118,7 +123,7 @@ function decide(rawPolicy, call = {}) {
   // means it is held for review rather than performed — the fence bounded-B
   // runs inside.
   if (financial) {
-    return { verdict: resolveAsk(attended), reason: 'a financial transaction always needs approval at the moment it happens' };
+    return { verdict: resolveAsk(attended, true), reason: 'a financial transaction always needs approval at the moment it happens' };
   }
 
   // Online requests need the app-level switch and a policy that opts in.
@@ -126,23 +131,23 @@ function decide(rawPolicy, call = {}) {
     if (!onlineResearch) return { verdict: 'deny', reason: 'online research is disabled' };
     if (policy.network === 'deny') return { verdict: 'deny', reason: 'policy does not permit online requests' };
     if (policy.network === 'allow') return { verdict: 'allow', reason: 'policy permits online requests' };
-    return { verdict: resolveAsk(attended), reason: 'online requests always need approval' };
+    return { verdict: resolveAsk(attended, true), reason: 'online requests always need approval' };
   }
 
   // Losing a day's work unsupervised is not a trade worth making.
   if (destructive) {
-    return { verdict: resolveAsk(attended), reason: 'destructive operations are never automatic' };
+    return { verdict: resolveAsk(attended, true), reason: 'destructive operations are never automatic' };
   }
 
   // Third-party tools are untrusted regardless of how much the user trusts
   // this policy — the same posture the MCP client already takes.
   if (mcp) {
-    return { verdict: resolveAsk(attended), reason: 'external MCP tools are never automatic' };
+    return { verdict: resolveAsk(attended, true), reason: 'external MCP tools are never automatic' };
   }
 
   // Credentials and keys leaving the machine is the worst available outcome.
   if (sensitive) {
-    return { verdict: resolveAsk(attended), reason: 'sensitive reads are never automatic' };
+    return { verdict: resolveAsk(attended, true), reason: 'sensitive reads are never automatic' };
   }
 
   // --- ordinary tools ---

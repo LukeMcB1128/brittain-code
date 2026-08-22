@@ -43,8 +43,13 @@ function outcomeOf(result) {
   const text = String(result || '');
   // Denial strings are authored in main.js and all open the same way. Matching
   // the sentence rather than a UI label keeps this accurate.
-  if (/^\s*The user (denied|cancelled)\b/i.test(text)) return 'denied';
+  if (/^\s*The user (denied|cancelled|reviewed)\b/i.test(text)) return 'denied';
   if (/^\s*Cancelled by user\b/i.test(text)) return 'denied';
+  // Parked and deferred placeholders: the call did NOT run. Grouped with
+  // denied so a held write is never ledgered as a mutation.
+  if (/^\s*This call needs the user's approval\b/i.test(text)) return 'denied';
+  if (/^\s*This tool call was not permitted\b/i.test(text)) return 'denied';
+  if (/^\s*This parked call was approved, but re-validation\b/i.test(text)) return 'denied';
   if (/^\s*Error:/i.test(text)) return 'error';
   return 'ok';
 }

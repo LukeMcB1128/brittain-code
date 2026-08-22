@@ -37,17 +37,19 @@ const permissive = { allow: ['*'], allowRisky: true, network: true, writeScope: 
 
 test('no policy can make a destructive operation automatic', () => {
   assert.equal(decide(permissive, { name: 'revert_to_last_commit', destructive: true }).verdict, 'ask');
-  assert.equal(decide(permissive, { name: 'revert_to_last_commit', destructive: true, attended: false }).verdict, 'defer');
+  // Unattended, an invariant call parks: frozen and held for a real decision,
+  // with the run suspending — not skipped, and not a hang.
+  assert.equal(decide(permissive, { name: 'revert_to_last_commit', destructive: true, attended: false }).verdict, 'park');
 });
 
 test('no policy can make an external MCP tool automatic', () => {
   assert.equal(decide(permissive, { name: 'mcp_github_create_issue', mcp: true }).verdict, 'ask');
-  assert.equal(decide(permissive, { name: 'mcp_github_create_issue', mcp: true, attended: false }).verdict, 'defer');
+  assert.equal(decide(permissive, { name: 'mcp_github_create_issue', mcp: true, attended: false }).verdict, 'park');
 });
 
 test('no policy can make a sensitive read automatic', () => {
   assert.equal(decide(permissive, { name: 'read_file', sensitive: true }).verdict, 'ask');
-  assert.equal(decide(permissive, { name: 'get_environment_variables', sensitive: true, attended: false }).verdict, 'defer');
+  assert.equal(decide(permissive, { name: 'get_environment_variables', sensitive: true, attended: false }).verdict, 'park');
 });
 
 test('online requests need both the app switch and a policy opt-in', () => {
@@ -182,7 +184,7 @@ const autonomous = { allow: ['*'], allowRisky: true, network: true, writeScope: 
 
 test('no policy, however permissive, makes a money-moving call automatic', () => {
   assert.equal(decide(autonomous, { name: 'run_command', financial: true, risky: true }).verdict, 'ask');
-  assert.equal(decide(autonomous, { name: 'run_command', financial: true, risky: true, attended: false }).verdict, 'defer');
+  assert.equal(decide(autonomous, { name: 'run_command', financial: true, risky: true, attended: false }).verdict, 'park');
 });
 
 test('the financial fence outranks even a network allow', () => {
@@ -204,8 +206,24 @@ test('the shipped autonomous example is bounded, not a raw waiver', () => {
   // requireBranch is off by default so an autonomous run works in any folder;
   // the ceiling and the standing invariants are the fence.
   assert.equal(policy.requireBranch, false);
-  // Even this policy holds money, destructive ops, sensitive reads, and MCP.
-  assert.equal(decide(policy, { name: 'run_command', financial: true, risky: true, attended: false }).verdict, 'defer');
-  assert.equal(decide(policy, { name: 'revert_to_last_commit', destructive: true, attended: false }).verdict, 'defer');
-  assert.equal(decide(policy, { name: 'mcp_x', mcp: true, attended: false }).verdict, 'defer');
+  // Even this policy holds money, destructive ops, sensitive reads, and MCP —
+  // unattended they park: frozen for approval, the run suspends.
+  assert.equal(decide(policy, { name: 'run_command', financial: true, risky: true, attended: false }).verdict, 'park');
+  assert.equal(decide(policy, { name: 'revert_to_last_commit', destructive: true, attended: false }).verdict, 'park');
+  assert.equal(decide(policy, { name: 'mcp_x', mcp: true, attended: false }).verdict, 'park');
+});
+
+
+// --- park: the third unattended outcome ---
+
+test('an invariant call parks unattended while a merely-risky call defers', () => {
+  // Park suspends the run for a decision that is genuinely a human's to make;
+  // defer skips a call whose answer would be stale by morning anyway.
+  assert.equal(decide(permissive, { name: 'mcp_x', mcp: true, attended: false }).verdict, 'park');
+  assert.equal(verdict('guarded', { name: 'write_file', risky: true, attended: false }), 'defer');
+});
+
+test('a policy deny still beats a would-be park', () => {
+  const policy = { ...permissive, deny: ['mcp_x'] };
+  assert.equal(decide(policy, { name: 'mcp_x', mcp: true, attended: false }).verdict, 'deny');
 });
