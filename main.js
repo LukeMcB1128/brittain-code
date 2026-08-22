@@ -27,6 +27,7 @@ const { readTriggers, dueTriggers, validateTrigger, ensureConfig: ensureTriggerC
 const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies, checkPreconditions, ensureConfig: ensureAutonomyConfig, narrowPolicy, BUILT_IN: BUILT_IN_POLICIES } = require('./src/main/autonomy');
 const workspace = require('./src/main/workspace');
 const pendingStore = require('./src/main/pending-store');
+const decisionsLog = require('./src/main/decisions-log');
 const projectTriggers = require('./src/main/project-triggers');
 const daemon = require('./src/main/daemon');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
@@ -3006,6 +3007,7 @@ async function runAgentTask(payload = {}) {
         });
       } catch {}
     }
+    try { decisionsLog.record(settingsUserDataDir, finished, policyId); } catch {}
     const context = { goal, projectPath: cwd, status };
     const reportPath = runReportPath(finished.id);
     try {
@@ -4031,6 +4033,15 @@ ipcMain.handle('memory:move', (_e, cwd) => {
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
+});
+
+// ---------- policy learning loop ----------
+ipcMain.handle('autonomy:suggestions', () => ({ ok: true, suggestions: decisionsLog.suggestions(settingsUserDataDir) }));
+
+ipcMain.handle('autonomy:promote', (_e, { policyId, toolName }) => {
+  const result = decisionsLog.promote(settingsUserDataDir, String(policyId || ''), String(toolName || ''), Object.keys(BUILT_IN_POLICIES));
+  if (result.ok) customPolicies = loadCustomPolicies(settingsUserDataDir);
+  return result;
 });
 
 // ---------- MCP trust ----------

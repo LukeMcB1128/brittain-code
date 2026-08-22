@@ -2638,6 +2638,15 @@ async function handleSlash(raw) {
         const opened = await window.api.autonomyOpenConfig();
         return addInfo(`Edit custom policies in ${opened.path}, then reload with /policies.`);
       }
+      if (/^promote\b/.test(arg)) {
+        const [, policyId = '', toolName = ''] = arg.split(/\s+/);
+        if (!policyId || !toolName) return addError('Usage: /policies promote <custom-policy> <tool> — adds the tool to that policy\'s allow list.');
+        const res = await window.api.autonomyPromote(policyId, toolName);
+        if (!res.ok) return addError(res.error);
+        return addInfo(res.already
+          ? `${toolName} is already on ${policyId}'s allow list.`
+          : `Promoted ${toolName} into ${policyId}'s allow list (${res.configPath}).`);
+      }
       const lines = ['AUTONOMY POLICIES', ''];
       for (const policy of state.policies) {
         lines.push(`${policy.id === state.current ? '▶ ' : '  '}${policy.id}${policy.builtIn ? '' : ' (custom)'} — ${policy.description || policy.label}`);
@@ -2647,6 +2656,18 @@ async function handleSlash(raw) {
         lines.push('', 'HELD FOR REVIEW (last unattended run):');
         for (const entry of state.deferred) {
           lines.push(`- ${entry.name}${entry.target ? ` on ${entry.target}` : ''} — ${entry.reason}`);
+        }
+      }
+      // The learning loop: patterns held often across runs and never denied by
+      // a human are evidence a policy is too tight. Promotion is always a
+      // person's click, never automatic.
+      const learned = await window.api.autonomySuggestions();
+      if (learned?.ok && learned.suggestions.length) {
+        lines.push('', 'SUGGESTIONS (held often across runs, never denied by you):');
+        for (const suggestion of learned.suggestions) {
+          lines.push(`- ${suggestion.key} — held ${suggestion.held}× across ${suggestion.runs} run(s)`
+            + (suggestion.example ? ` (e.g. ${suggestion.example})` : '')
+            + ` → /policies promote <custom-policy> ${suggestion.name}`);
         }
       }
       lines.push('', 'Set with the AUTONOMY dial, or /policies edit to define a custom one.');
