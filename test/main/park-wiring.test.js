@@ -52,3 +52,11 @@ test('/pending is wired renderer → preload → main', () => {
   assert.match(read('preload.js'), /pendingResume: \(runId\) => ipcRenderer\.invoke\('pending:resume', runId\)/);
   assert.match(read('main.js'), /ipcMain\.handle\('pending:resume'/);
 });
+
+test('a suspended run does not claim it hit the step cap', () => {
+  // Suspending breaks out of the tool loop with calls still in flight, which
+  // looks identical to exhausting the step budget. Reporting a 100-step cap on
+  // a run that parked its first call would be plainly false.
+  const main = read('main.js');
+  assert.match(main, /exhaustedWithToolCalls && !stopRequested && !suspendedForApproval/);
+});

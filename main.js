@@ -1411,7 +1411,11 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       }
     }
   }
-  if (exhaustedWithToolCalls && !stopRequested) {
+  // A suspension breaks out of the loop with tool calls still in flight, which
+  // looks exactly like exhausting the step budget. It is the opposite: the run
+  // stopped on its first parked call and is waiting for a person, so saying it
+  // hit a 100-step cap would be plainly false.
+  if (exhaustedWithToolCalls && !stopRequested && !suspendedForApproval) {
     sink.emit('stream:info', `Agent stopped after reaching the ${maxAgentSteps}-step safety cap.`);
   }
   return { lastContent, lastStats, contextLength, runLog, suspendedForApproval };

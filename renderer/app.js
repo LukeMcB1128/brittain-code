@@ -1944,7 +1944,7 @@ const SLASH_HELP = [
   '/agent [--policy <name>] <goal> — run unattended: always branched, always checkpointed, always reported',
   '/agent trigger [list|new|run <id>|enable <id>|disable <id>] — scheduled unattended runs; enable/disable are for project (.brittain) triggers',
   '/agent daemon [status|install|uninstall] — the headless runtime that keeps triggers firing with the app closed',
-  '/pending [approve|deny <run> [n|all]|resume <run>] — parked calls from suspended unattended runs',
+  '/pending [approve|deny [<run>] [n|all]|resume [<run>]] — parked calls from suspended unattended runs; the run id is optional when only one is waiting',
   '/policies [edit|promote <policy> <tool>] — autonomy policies, held calls, and evidence-backed promotion suggestions',
   '/workspace [init] — the project\'s .brittain folder: in-repo memory, heartbeat checklist, project triggers',
   '/memory [move] — view what the agent has remembered; move relocates it into the project (.brittain/MEMORY.md)',
@@ -2633,33 +2633,32 @@ async function handleSlash(raw) {
 
       // Approve/deny mark decisions on the stored record; resume is the
       // separate, explicit act that executes them and continues the run.
-      if (sub === 'approve' || sub === 'deny') {
-        if (!runArg) return addError(`Usage: /pending ${sub} <runId> [n|all]`);
+      if (sub === 'approve' || sub === 'deny' || sub === 'resume') {
         const listed = await window.api.pendingList();
-        const record = listed.records?.find((entry) => entry.runId === runArg || entry.runId.endsWith(runArg));
-        if (!record) return addError(`No suspended run matching "${runArg}".`);
+        const target = PendingTarget.resolvePendingTarget(listed.records || [], runArg, callArg);
+        if (target.error) return addError(target.error);
+        const { record, selector } = target;
+
+        if (sub === 'resume') {
+          const undecided = record.parked.filter((entry) => !entry.decision).length;
+          if (undecided) addInfo(`${undecided} parked call(s) are undecided — resuming treats them as denied.`);
+          startRun();
+          let res;
+          try { res = await window.api.pendingResume(record.runId); } finally { endRun(); }
+          return res.ok ? saveChat() : addError(res.error);
+        }
+
         const approved = sub === 'approve';
-        const indexes = callArg && callArg !== 'all'
-          ? [parseInt(callArg, 10)].filter((n) => Number.isInteger(n))
+        const indexes = selector && selector !== 'all'
+          ? [parseInt(selector, 10)].filter((n) => Number.isInteger(n))
           : record.parked.map((entry) => entry.index);
+        if (!indexes.length) return addError(`"${selector}" is not one of this run's parked calls. /pending lists them by index.`);
         for (const index of indexes) {
           const res = await window.api.pendingResolve(record.runId, index, approved);
           if (!res.ok) return addError(res.error);
         }
-        return addInfo(`${approved ? 'Approved' : 'Denied'} ${indexes.length} parked call(s) on ${record.runId}. /pending resume ${record.runId} to continue the run.`);
-      }
-
-      if (sub === 'resume') {
-        if (!runArg) return addError('Usage: /pending resume <runId>');
-        const listed = await window.api.pendingList();
-        const record = listed.records?.find((entry) => entry.runId === runArg || entry.runId.endsWith(runArg));
-        if (!record) return addError(`No suspended run matching "${runArg}".`);
-        const undecided = record.parked.filter((entry) => !entry.decision).length;
-        if (undecided) addInfo(`${undecided} parked call(s) are undecided — resuming treats them as denied.`);
-        startRun();
-        let res;
-        try { res = await window.api.pendingResume(record.runId); } finally { endRun(); }
-        return res.ok ? saveChat() : addError(res.error);
+        return addInfo(`${approved ? 'Approved' : 'Denied'} ${indexes.length} parked call(s) on ${record.runId}.`
+          + ` /pending resume${listed.records.length > 1 ? ' ' + record.runId : ''} to continue the run.`);
       }
 
       const listed = await window.api.pendingList();
@@ -2674,7 +2673,9 @@ async function handleSlash(raw) {
         }
         lines.push('');
       }
-      lines.push('/pending approve <run> [n|all] · /pending deny <run> [n|all] · /pending resume <run>');
+      lines.push(listed.records.length === 1
+        ? '/pending approve [n|all] · /pending deny [n|all] · /pending resume — the run id is optional while only this one is waiting'
+        : '/pending approve <run> [n|all] · /pending deny <run> [n|all] · /pending resume <run>');
       return showOverlay('PARKED CALLS', lines.join('\n'));
     }
 
