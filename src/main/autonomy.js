@@ -158,16 +158,25 @@ function decide(rawPolicy, call = {}) {
   return { verdict: resolveAsk(attended), reason: 'risky tool not in the policy allow list' };
 }
 
-// Runs that nobody is watching depend on the checkpoint and branch for undo.
-// Without a repository there is no way back, so refuse rather than degrade.
+// A Git checkpoint is the wrong safety model for a run that can act on the
+// world — you cannot revert a request that has already left the machine — so a
+// repository is no longer required. When there is one, the run still branches
+// and checkpoints for the file-level work it does; when there is not, the
+// disclosure is the guard and undo simply does not apply.
+//
+// A policy may still opt into requiring a generated branch. That only makes
+// sense with a repository, so a policy that demands one without a repo is a
+// contradiction the user chose, and is refused with a clear message.
 function checkPreconditions(rawPolicy, { attended = true, isGitRepo = false, onBranch = '' } = {}) {
   const policy = normalizePolicy(rawPolicy);
   if (attended) return { ok: true };
-  if (!isGitRepo) {
-    return { ok: false, error: 'An unattended run needs a Git repository — there is no undo without one.' };
-  }
-  if (policy.requireBranch && !/^brittain\//.test(onBranch)) {
-    return { ok: false, error: `This policy requires a brittain/ branch; the working tree is on "${onBranch || 'an unknown branch'}".` };
+  if (policy.requireBranch) {
+    if (!isGitRepo) {
+      return { ok: false, error: 'This policy requires a brittain/ branch, which needs a Git repository. Remove requireBranch or run in a repo.' };
+    }
+    if (!/^brittain\//.test(onBranch)) {
+      return { ok: false, error: `This policy requires a brittain/ branch; the working tree is on "${onBranch || 'an unknown branch'}".` };
+    }
   }
   return { ok: true };
 }
@@ -219,7 +228,10 @@ const EXAMPLE_CONFIG = {
       writeScope: 'project',
       // The fence. Autonomy is real; it just runs inside these.
       maxToolCalls: 300,
-      requireBranch: true,
+      // Set requireBranch: true to force work onto a generated brittain/ branch
+      // — only meaningful in a Git repository. Off by default so an autonomous
+      // run works in any folder, code or not.
+      requireBranch: false,
       network: 'ask',
       // Even here, these are never automatic — destructive ops, sensitive
       // reads, external MCP tools, and anything that moves money still stop

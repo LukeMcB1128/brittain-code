@@ -409,7 +409,8 @@ async function confirmAgentRun(projectPath, policyId) {
     + 'With nobody watching, the agent acts on its own: it can run shell commands, '
     + 'drive a browser, and call connected tools to do things on the web. Some of those '
     + 'actions cannot be undone, and a Git checkpoint only restores files, not anything '
-    + 'that has left this machine.\n\n'
+    + 'that has left this machine — and in a folder without a Git repository there is no '
+    + 'file-level undo at all.\n\n'
     + 'Actions the policy does not permit are held in the run\'s review tray rather than '
     + 'performed. Spending money still requires your approval at the moment it happens.\n\n'
     + 'You are responsible for what an unattended run does. Continue?',

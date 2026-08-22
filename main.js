@@ -2738,8 +2738,9 @@ async function runAgentMission(payload = {}) {
   const cwd = payload.cwd;
   if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
 
-  // Unattended runs depend on the branch and checkpoint for undo, so the
-  // preconditions are checked before anything is started, not after.
+  // A repository is no longer required — undo is the wrong safety model for a
+  // run that can act on the world, and the disclosure is the guard. The branch
+  // is still read so a policy that opts into requiring one can be checked.
   const branch = await gitRun(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
   const preconditions = checkPreconditions(policy, {
     attended: false,

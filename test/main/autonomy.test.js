@@ -98,20 +98,23 @@ test('a spent tool-call budget stops the run whatever it is doing', () => {
 
 // --- preconditions ---
 
-test('an unattended run is refused without a repository to undo from', () => {
-  const result = checkPreconditions(getPolicy('trusted'), { attended: false, isGitRepo: false });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /no undo without one/);
-});
-
-test('an attended run has no such requirement', () => {
+test('an unattended run no longer requires a Git repository', () => {
+  // Undo is the wrong safety model for a run that acts on the world, so a
+  // repo-less folder is allowed; the disclosure is the guard.
+  assert.equal(checkPreconditions(getPolicy('trusted'), { attended: false, isGitRepo: false }).ok, true);
   assert.equal(checkPreconditions(getPolicy('supervised'), { attended: true, isGitRepo: false }).ok, true);
 });
 
-test('a policy can require the work to sit on a generated branch', () => {
+test('a policy may still opt into requiring a generated branch', () => {
   const policy = { allowRisky: true, requireBranch: true };
   assert.equal(checkPreconditions(policy, { attended: false, isGitRepo: true, onBranch: 'main' }).ok, false);
   assert.equal(checkPreconditions(policy, { attended: false, isGitRepo: true, onBranch: 'brittain/fix-tests' }).ok, true);
+});
+
+test('requiring a branch without a repository is refused as the contradiction it is', () => {
+  const result = checkPreconditions({ allowRisky: true, requireBranch: true }, { attended: false, isGitRepo: false });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /needs a Git repository/);
 });
 
 test('custom policies join the built-ins without displacing them', () => {
@@ -198,7 +201,9 @@ test('the shipped autonomous example is bounded, not a raw waiver', () => {
   const { EXAMPLE_CONFIG } = require('../../src/main/autonomy');
   const policy = EXAMPLE_CONFIG.policies.autonomous;
   assert.ok(policy.maxToolCalls > 0, 'an autonomous policy needs a tool-call ceiling');
-  assert.equal(policy.requireBranch, true, 'and it must run on a branch');
+  // requireBranch is off by default so an autonomous run works in any folder;
+  // the ceiling and the standing invariants are the fence.
+  assert.equal(policy.requireBranch, false);
   // Even this policy holds money, destructive ops, sensitive reads, and MCP.
   assert.equal(decide(policy, { name: 'run_command', financial: true, risky: true, attended: false }).verdict, 'defer');
   assert.equal(decide(policy, { name: 'revert_to_last_commit', destructive: true, attended: false }).verdict, 'defer');
