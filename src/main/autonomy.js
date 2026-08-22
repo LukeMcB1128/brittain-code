@@ -101,6 +101,7 @@ function decide(rawPolicy, call = {}) {
     mcp = false,
     network = false,
     financial = false,
+    mcpTrust = '',
     onlineResearch = false,
     toolCalls = 0,
   } = call;
@@ -142,6 +143,17 @@ function decide(rawPolicy, call = {}) {
   // Third-party tools are untrusted regardless of how much the user trusts
   // this policy — the same posture the MCP client already takes.
   if (mcp) {
+    // Graduated trust: a specific tool on a specific server, granted 'allow' or
+    // 'park' by the user in mcp.json, may run or park under that grant. The
+    // grant is per-tool and resets when the server's command line changes; the
+    // default for everything remains ask/park. The destructive, sensitive, and
+    // financial invariants above still apply to MCP calls regardless of trust.
+    if (mcpTrust === 'allow') {
+      return { verdict: 'allow', reason: 'this MCP tool is explicitly trusted in mcp.json' };
+    }
+    if (mcpTrust === 'park') {
+      return { verdict: resolveAsk(attended, true), reason: 'this MCP tool is set to park for approval in mcp.json' };
+    }
     return { verdict: resolveAsk(attended, true), reason: 'external MCP tools are never automatic' };
   }
 

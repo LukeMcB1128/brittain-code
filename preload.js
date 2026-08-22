@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('api', {
   pendingResolve: (runId, index, approved) => ipcRenderer.invoke('pending:resolve', { runId, index, approved }),
   pendingResume: (runId) => ipcRenderer.invoke('pending:resume', runId),
   memoryMove: (cwd) => ipcRenderer.invoke('memory:move', cwd),
+  mcpTrustAccept: (server) => ipcRenderer.invoke('mcp:trustAccept', server),
   daemonStatus: () => ipcRenderer.invoke('daemon:status'),
   daemonInstall: () => ipcRenderer.invoke('daemon:install'),
   daemonUninstall: () => ipcRenderer.invoke('daemon:uninstall'),

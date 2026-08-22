@@ -553,12 +553,22 @@ function looksFinancial(name, args) {
 // Classifying a call once, in one place, is what lets the policy answer the
 // same question the approval chain used to answer inline six times over.
 function classifyToolCall(name, args) {
+  const isMcp = mcp.owns(name);
+  let mcpTrust = '';
+  if (isMcp) {
+    const trust = mcp.trustFor(name);
+    mcpTrust = trust.level;
+    if (trust.stale) {
+      sink.emit('stream:info', `MCP server "${trust.server}" changed its command line since its trust map was affirmed — treating every tool on it as untrusted. Re-affirm with /mcp trust accept ${trust.server}.`);
+    }
+  }
   return {
     name,
     network: NETWORK_TOOLS.has(name),
     destructive: DESTRUCTIVE_TOOLS.has(name)
       || (name === 'run_command' && isDestructiveCommand(args?.command)),
-    mcp: mcp.owns(name),
+    mcp: isMcp,
+    mcpTrust,
     sensitive: isSensitiveToolCall(name, args),
     risky: RISKY_TOOLS.has(name),
     financial: looksFinancial(name, args),
@@ -3893,6 +3903,9 @@ ipcMain.handle('memory:move', (_e, cwd) => {
     return { ok: false, error: String(err.message || err) };
   }
 });
+
+// ---------- MCP trust ----------
+ipcMain.handle('mcp:trustAccept', (_e, serverName) => mcp.affirmTrust(String(serverName || '')));
 
 // ---------- daemon lifecycle ----------
 ipcMain.handle('daemon:status', async () => ({

@@ -10,6 +10,7 @@
 // untrusted by default, regardless of AUTO-APPROVE.
 
 const { spawn } = require('child_process');
+const mcpTrust = require('./src/main/mcp-trust');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
@@ -149,6 +150,7 @@ class McpManager {
     this.enabled = new Set();   // session-toggleable via /mcp
     this.routes = new Map();    // qualified tool name -> { server, tool }
     this.configPath = '';
+    this.userDataDir = '';
   }
 
   loadConfig(userDataDir) {
@@ -162,6 +164,7 @@ class McpManager {
   }
 
   async startAll(userDataDir) {
+    this.userDataDir = userDataDir;
     const entries = Object.entries(this.loadConfig(userDataDir));
     const results = [];
     for (const [name, config] of entries) {
@@ -213,6 +216,26 @@ class McpManager {
 
   owns(name) {
     return this.routes.has(name);
+  }
+
+  // Graduated trust for one qualified tool name: '' (untrusted default),
+  // 'allow', or 'park', per the server's trust map in mcp.json — void when the
+  // server's command line changed since the grant (see src/main/mcp-trust.js).
+  trustFor(qualifiedName) {
+    const route = this.routes.get(qualifiedName);
+    if (!route || !this.userDataDir) return { level: '', stale: false, server: route?.server || '' };
+    const server = this.servers.get(route.server);
+    const result = mcpTrust.effectiveTrust(this.userDataDir, route.server, server?.config, route.tool);
+    return { ...result, server: route.server };
+  }
+
+  // Re-affirms a server's current command line after a change voided its
+  // trust map. Only ever called from an explicit user action.
+  affirmTrust(serverName) {
+    const server = this.servers.get(serverName);
+    if (!server) return { ok: false, error: `No MCP server named "${serverName}".` };
+    mcpTrust.affirm(this.userDataDir, serverName, server.config);
+    return { ok: true };
   }
 
   async call(qualifiedName, args) {
