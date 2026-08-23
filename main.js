@@ -30,6 +30,8 @@ const pendingStore = require('./src/main/pending-store');
 const decisionsLog = require('./src/main/decisions-log');
 const projectTriggers = require('./src/main/project-triggers');
 const daemon = require('./src/main/daemon');
+const { createDiscordBridge } = require('./src/bridge/discord-client');
+const { readConfig: readDiscordConfig, validateConfig: validateDiscordConfig, ensureConfig: ensureDiscordConfig, configPath: discordConfigPath } = require('./src/bridge/discord-config');
 const sandbox = require('./src/main/sandbox');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
@@ -354,7 +356,93 @@ const modelInstaller = createModelInstallService({
 });
 
 let daemonServer = null;
+let discordBridge = null;
 const daemonStartedAt = new Date().toISOString();
+
+// Anything that wants the run narrative — the daemon's attached clients, the
+// Discord bridge — registers here. One tap on sink.emit feeds them all, so the
+// sink itself stays unaware of who is listening.
+const runEventListeners = new Set();
+function tapRunEvents() {
+  const originalEmit = sink.emit;
+  sink.emit = (channel, payload) => {
+    originalEmit(channel, payload);
+    for (const listener of runEventListeners) {
+      try { listener(channel, payload); } catch {}
+    }
+  };
+}
+
+// The commands the agent answers, whatever the transport. The daemon serves
+// these over its socket; the in-process Discord bridge calls them directly.
+// One map, so a remote caller can never reach something a local one cannot.
+function commandHandlers() {
+  return {
+    ping: () => ({ ok: true, pid: process.pid, startedAt: daemonStartedAt }),
+    run: (payload) => runAgentTask(payload),
+    status: () => ({ ok: true, mission: activeMission, queued: peekQueue(settingsUserDataDir).map((entry) => entry.goal) }),
+    // The park loop, served remotely. This is what lets an approval travel: a
+    // run parks here, the decision is made from wherever the person is, and
+    // the run resumes on this machine with the arguments it froze.
+    pending: () => {
+      const { records } = pendingStore.list(settingsUserDataDir);
+      return {
+        ok: true,
+        records: records.map((record) => ({
+          runId: record.runId,
+          goal: record.goal,
+          cwd: record.cwd,
+          suspendedAt: record.suspendedAt,
+          parked: (record.parked || []).map((entry, index) => ({
+            index, name: entry.name, target: entry.target, reason: entry.reason, decision: entry.decision || '',
+          })),
+        })),
+      };
+    },
+    resolve: ({ runId, index, approved }) => pendingStore.resolveCall(settingsUserDataDir, runId, index, !!approved),
+    resume: ({ runId }) => resumeSuspendedRun(runId),
+    stop: () => {
+      if (!currentAbort) return { ok: false, error: 'Nothing is running.' };
+      stopRequested = true;
+      currentAbort.abort();
+      return { ok: true };
+    },
+  };
+}
+
+// Starts the Discord bridge in this process when discord.json enables it.
+// Running it here rather than as a separate script is what makes it work in a
+// packaged app, where scripts/ does not ship at all.
+function startDiscordBridge(handlers) {
+  const { config, error } = readDiscordConfig(settingsUserDataDir);
+  if (error) {
+    console.log(`discord.json could not be read: ${error}`);
+    return;
+  }
+  if (!config?.enabled) return; // absent or switched off: nothing to say
+  const missing = validateDiscordConfig(config);
+  if (missing.length) {
+    console.log(`Discord bridge not started — discord.json is missing ${missing.join(', ')}.`);
+    return;
+  }
+  discordBridge = createDiscordBridge({
+    config,
+    ask: async (message) => {
+      const handler = handlers[message?.cmd];
+      if (!handler) return { ok: false, error: `unknown cmd "${message?.cmd}"` };
+      try {
+        return await handler(message.payload || {});
+      } catch (err) {
+        return { ok: false, error: String(err?.message || err) };
+      }
+    },
+    subscribe: (listener) => {
+      runEventListeners.add(listener);
+      return () => runEventListeners.delete(listener);
+    },
+  });
+  discordBridge.start().catch((err) => console.log(`Discord bridge failed to start: ${String(err.message || err)}`));
+}
 
 app.whenReady().then(async () => {
   settingsUserDataDir = app.getPath('userData');
@@ -373,59 +461,32 @@ app.whenReady().then(async () => {
     }
   });
 
+  tapRunEvents();
+
   if (HEADLESS) {
     // No window, no renderer: the daemon owns the scheduler and answers on a
     // unix socket. The run sink already drops renderer sends harmlessly.
-    daemonServer = daemon.startServer(settingsUserDataDir, {
-      ping: () => ({ ok: true, pid: process.pid, startedAt: daemonStartedAt }),
-      run: (payload) => runAgentTask(payload),
-      status: () => ({ ok: true, mission: activeMission, queued: peekQueue(settingsUserDataDir).map((entry) => entry.goal) }),
-      // The park loop, served remotely. This is what lets an approval travel:
-      // a run parks here, the decision is made from wherever the person is,
-      // and the run resumes on this machine with the arguments it froze.
-      pending: () => {
-        const { records } = pendingStore.list(settingsUserDataDir);
-        return {
-          ok: true,
-          records: records.map((record) => ({
-            runId: record.runId,
-            goal: record.goal,
-            cwd: record.cwd,
-            suspendedAt: record.suspendedAt,
-            parked: (record.parked || []).map((entry, index) => ({
-              index, name: entry.name, target: entry.target, reason: entry.reason, decision: entry.decision || '',
-            })),
-          })),
-        };
-      },
-      resolve: ({ runId, index, approved }) => pendingStore.resolveCall(settingsUserDataDir, runId, index, !!approved),
-      resume: ({ runId }) => resumeSuspendedRun(runId),
-      stop: () => {
-        if (!currentAbort) return { ok: false, error: 'Nothing is running.' };
-        stopRequested = true;
-        currentAbort.abort();
-        return { ok: true };
-      },
-    });
-    // Attached clients get the run narrative. This taps sink.emit — the path
-    // every run-loop message goes through — leaving the sink itself unchanged.
-    const originalEmit = sink.emit;
-    sink.emit = (channel, payload) => {
-      originalEmit(channel, payload);
+    const handlers = commandHandlers();
+    daemonServer = daemon.startServer(settingsUserDataDir, handlers);
+    runEventListeners.add((channel, payload) => {
       try { daemonServer.broadcast(channel, payload); } catch {}
-    };
+    });
     startTriggerScheduler();
+    startDiscordBridge(handlers);
     console.log(`Brittain Code daemon: headless, listening at ${daemonServer.socketPath}`);
     return;
   }
 
   createWindow();
-  // Exactly one scheduler may tick. If a headless daemon is alive, it owns the
-  // triggers; a second scheduler here would double-fire every one of them.
+  // Exactly one scheduler may tick, and exactly one process may hold the
+  // Discord connection — two bots would answer every message twice. A live
+  // daemon owns both; otherwise this window does, so the bridge works in a
+  // packaged app whether or not the daemon is installed.
   if (await daemon.daemonAlive(settingsUserDataDir)) {
-    console.log('Brittain Code daemon is running — it owns the trigger scheduler; this window will not start one.');
+    console.log('Brittain Code daemon is running — it owns the trigger scheduler and the Discord bridge.');
   } else {
     startTriggerScheduler();
+    startDiscordBridge(commandHandlers());
   }
   const packageMetadata = require('./package.json');
   updateService = createUpdateService({
@@ -4172,6 +4233,29 @@ ipcMain.handle('autonomy:promote', (_e, { policyId, toolName }) => {
 
 // ---------- MCP trust ----------
 ipcMain.handle('mcp:trustAccept', (_e, serverName) => mcp.affirmTrust(String(serverName || '')));
+
+// ---------- discord bridge ----------
+ipcMain.handle('discord:state', () => {
+  const { config, error } = readDiscordConfig(settingsUserDataDir);
+  return {
+    ok: true,
+    configPath: discordConfigPath(settingsUserDataDir),
+    error,
+    exists: !!config,
+    enabled: !!config?.enabled,
+    missing: config ? validateDiscordConfig(config) : [],
+    running: !!discordBridge,
+    notifyChannel: discordBridge?.notifyChannel?.() || '',
+    cwd: config?.cwd || '',
+    policy: config?.policy || '',
+  };
+});
+
+ipcMain.handle('discord:openConfig', () => {
+  const target = ensureDiscordConfig(settingsUserDataDir);
+  shell.showItemInFolder(target);
+  return { ok: true, path: target };
+});
 
 // ---------- daemon lifecycle ----------
 ipcMain.handle('daemon:status', async () => ({

@@ -1,0 +1,241 @@
+'use strict';
+
+// The Discord bridge itself: gateway connection, REST replies, command loop.
+//
+// It takes its transport rather than choosing one, which is what lets the same
+// code run two ways. In the packaged app it runs inside whichever process owns
+// the trigger scheduler and dispatches straight to the daemon's handlers; from
+// a checkout, scripts/discord-bridge.js supplies handlers that go over the unix
+// socket instead. One implementation, so the standalone path cannot drift from
+// the shipped one.
+//
+// No dependencies. Node ships a WebSocket global and the gateway is documented
+// JSON, so this is hand-rolled for the same reason mcp.js is: the most
+// security-sensitive component of the app should not carry a supply chain.
+//
+// The bridge holds no authority of its own. It turns an allowlisted person's
+// message into the same run the app starts, under the policy in its config, so
+// every invariant, every park, and every decision record still applies. What it
+// adds is that an approval can travel: a run parks on this machine and the
+// decision arrives from wherever the person is.
+
+const { authorize, parseCommand, chunk, renderPending, renderEvent, HELP } = require('./discord-protocol');
+
+const API = 'https://discord.com/api/v10';
+// GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
+const INTENTS = (1 << 9) | (1 << 12) | (1 << 15);
+
+// `ask(message, timeoutMs)` runs one daemon command and resolves its reply.
+// `subscribe(fn)` receives run events and returns an unsubscribe function.
+function createDiscordBridge({ config, ask, subscribe, log = console }) {
+  let socket = null;
+  let heartbeat = null;
+  let unsubscribe = null;
+  let notifyChannel = '';
+  let lastChannel = '';
+  let stopped = false;
+
+  async function send(channelId, text) {
+    if (!channelId) return;
+    for (const part of chunk(text)) {
+      if (!part.trim()) continue;
+      const res = await fetch(`${API}/channels/${channelId}/messages`, {
+        method: 'POST',
+        headers: { Authorization: `Bot ${config.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: part }),
+      });
+      if (res.status === 429) {
+        const retry = Number((await res.json())?.retry_after || 1);
+        await new Promise((resolve) => setTimeout(resolve, retry * 1000));
+        continue;
+      }
+      if (!res.ok) log.error?.('Discord send failed:', res.status, await res.text());
+    }
+  }
+
+  // A bot cannot message someone out of the blue without a channel to do it in,
+  // and the notifications worth having are exactly the unprompted ones — a run
+  // parking overnight. So resolve one up front rather than waiting to be spoken
+  // to. Opening a DM requires the bot and the owner to share a server, which is
+  // why setup asks you to invite it to one.
+  async function resolveNotifyChannel() {
+    if (config.notifyChannelId) return String(config.notifyChannelId);
+    const owner = String((config.ownerIds || [])[0] || '');
+    if (!owner) return '';
+    try {
+      const res = await fetch(`${API}/users/@me/channels`, {
+        method: 'POST',
+        headers: { Authorization: `Bot ${config.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipient_id: owner }),
+      });
+      if (!res.ok) {
+        log.error?.(`Could not open a DM with owner ${owner} (${res.status}). Unprompted notifications will go to the last channel used.`);
+        log.error?.('A bot can only DM someone it shares a server with — invite it to one, or set notifyChannelId.');
+        return '';
+      }
+      return String((await res.json()).id || '');
+    } catch (error) {
+      log.error?.('Could not open an owner DM:', String(error.message || error));
+      return '';
+    }
+  }
+
+  async function handle(message, channelId) {
+    const command = parseCommand(message.content);
+    switch (command.kind) {
+      case 'ignore': return;
+      case 'help': return send(channelId, HELP);
+      case 'error': return send(channelId, command.error);
+
+      case 'status': {
+        const res = await ask({ cmd: 'status' });
+        if (!res.ok) return send(channelId, `Daemon: ${res.error}`);
+        return send(channelId, res.mission?.status === 'running'
+          ? `Running: ${res.mission.goal || '(no goal)'}`
+          : `Idle.${res.queued?.length ? ` ${res.queued.length} queued.` : ''}`);
+      }
+
+      case 'pending': {
+        const res = await ask({ cmd: 'pending' });
+        return send(channelId, res.ok ? renderPending(res.records) : `Could not read parked calls: ${res.error}`);
+      }
+
+      case 'resolve': {
+        const listed = await ask({ cmd: 'pending' });
+        if (!listed.ok || !listed.records.length) return send(channelId, 'Nothing parked.');
+        if (listed.records.length > 1) {
+          return send(channelId, 'Several runs are suspended; deciding from here handles one at a time — `!resume` them in order, or use the app.');
+        }
+        const record = listed.records[0];
+        const indexes = command.selector === 'all'
+          ? record.parked.map((entry) => entry.index)
+          : [parseInt(command.selector, 10)].filter((n) => Number.isInteger(n));
+        if (!indexes.length) return send(channelId, `"${command.selector}" is not one of the parked calls. \`!pending\` lists them.`);
+        for (const index of indexes) {
+          const res = await ask({ cmd: 'resolve', payload: { runId: record.runId, index, approved: command.approved } });
+          if (!res.ok) return send(channelId, `Failed: ${res.error}`);
+        }
+        return send(channelId, `${command.approved ? 'Approved' : 'Denied'} ${indexes.length} call(s). \`!resume\` to continue the run.`);
+      }
+
+      case 'resume': {
+        const listed = await ask({ cmd: 'pending' });
+        const record = command.runId
+          ? listed.records?.find((entry) => entry.runId.endsWith(command.runId))
+          : listed.records?.[0];
+        if (!record) return send(channelId, 'No suspended run to resume.');
+        await send(channelId, `▶️ Resuming ${record.runId}…`);
+        const res = await ask({ cmd: 'resume', payload: { runId: record.runId } }, 0);
+        return send(channelId, res.ok ? `Finished: ${res.status}` : `Resume failed: ${res.error}`);
+      }
+
+      case 'stop': {
+        const res = await ask({ cmd: 'stop' });
+        return send(channelId, res.ok ? 'Stopping after the current operation.' : res.error);
+      }
+
+      case 'run': {
+        await send(channelId, `🤖 Running unattended under **${config.policy}** in \`${config.cwd}\`…`);
+        const res = await ask({
+          cmd: 'run',
+          payload: {
+            goal: command.goal,
+            cwd: config.cwd,
+            policy: config.policy,
+            model: config.model || undefined,
+            chatId: `discord-${channelId}`,
+          },
+        }, 0);
+        if (!res.ok) return send(channelId, `Could not start: ${res.error}`);
+        if (res.queued) return send(channelId, `Busy — queued (${res.depth} waiting).`);
+        // A suspension already announced itself over the event stream.
+        if (res.status === 'suspended') return;
+        return send(channelId, `✅ ${res.status}`);
+      }
+      default: return;
+    }
+  }
+
+  function connect() {
+    if (stopped) return;
+    let sequence = null;
+    socket = new WebSocket('wss://gateway.discord.gg/?v=10&encoding=json');
+
+    socket.addEventListener('message', async (event) => {
+      const frame = JSON.parse(event.data);
+      if (frame.s !== null && frame.s !== undefined) sequence = frame.s;
+
+      if (frame.op === 10) {
+        heartbeat = setInterval(() => socket.send(JSON.stringify({ op: 1, d: sequence })), frame.d.heartbeat_interval);
+        socket.send(JSON.stringify({
+          op: 2,
+          d: {
+            token: config.token,
+            intents: INTENTS,
+            properties: { os: process.platform, browser: 'brittain-code', device: 'brittain-code' },
+          },
+        }));
+        return;
+      }
+      if (frame.op === 7 || frame.op === 9) { socket.close(); return; }
+      if (frame.op !== 0) return;
+
+      if (frame.t === 'READY') {
+        log.log?.(`Discord bridge logged in as ${frame.d.user.username}. Owners: ${(config.ownerIds || []).join(', ')}.`);
+        return;
+      }
+      if (frame.t !== 'MESSAGE_CREATE') return;
+
+      // Authorization first, before the content is even looked at. A refused
+      // message is dropped in silence: telling strangers they are not allowed
+      // only confirms something is listening.
+      const allowed = authorize(config, frame.d);
+      if (!allowed.ok) {
+        log.log?.(`Discord bridge ignored a message: ${allowed.reason}`);
+        return;
+      }
+      lastChannel = frame.d.channel_id;
+      try {
+        await handle(frame.d, frame.d.channel_id);
+      } catch (error) {
+        log.error?.('Discord handler failed:', error);
+        await send(frame.d.channel_id, `Bridge error: ${String(error.message || error)}`);
+      }
+    });
+
+    socket.addEventListener('close', () => {
+      if (heartbeat) clearInterval(heartbeat);
+      heartbeat = null;
+      if (stopped) return;
+      log.log?.('Discord gateway closed; reconnecting in 5s.');
+      setTimeout(connect, 5_000);
+    });
+    socket.addEventListener('error', (error) => log.error?.('Discord gateway error:', error?.message || error));
+  }
+
+  return {
+    async start() {
+      stopped = false;
+      notifyChannel = await resolveNotifyChannel();
+      // Replies land where you spoke; unprompted messages fall back to the
+      // notification channel, so a run parking while you sleep still reaches you.
+      lastChannel = notifyChannel;
+      unsubscribe = subscribe((channel, payload) => {
+        const text = renderEvent(channel, payload);
+        const target = lastChannel || notifyChannel;
+        if (text && target) send(target, text).catch(() => {});
+      });
+      connect();
+      return { notifyChannel };
+    },
+    stop() {
+      stopped = true;
+      if (heartbeat) clearInterval(heartbeat);
+      if (unsubscribe) unsubscribe();
+      try { socket?.close(); } catch {}
+    },
+    notifyChannel: () => notifyChannel,
+  };
+}
+
+module.exports = { createDiscordBridge, INTENTS };

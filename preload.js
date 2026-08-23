@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld('api', {
   autonomySuggestions: () => ipcRenderer.invoke('autonomy:suggestions'),
   autonomyPromote: (policyId, toolName) => ipcRenderer.invoke('autonomy:promote', { policyId, toolName }),
   mcpTrustAccept: (server) => ipcRenderer.invoke('mcp:trustAccept', server),
+  discordState: () => ipcRenderer.invoke('discord:state'),
+  discordOpenConfig: () => ipcRenderer.invoke('discord:openConfig'),
   daemonStatus: () => ipcRenderer.invoke('daemon:status'),
   daemonInstall: () => ipcRenderer.invoke('daemon:install'),
   daemonUninstall: () => ipcRenderer.invoke('daemon:uninstall'),

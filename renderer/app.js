@@ -1946,6 +1946,7 @@ const SLASH_HELP = [
   '/agent daemon [status|install|uninstall] — the headless runtime that keeps triggers firing with the app closed',
   '/pending [approve|deny [<run>] [n|all]|resume [<run>]] — parked calls from suspended unattended runs; the run id is optional when only one is waiting',
   '/policies [edit|promote <policy> <tool>] — autonomy policies, held calls, and evidence-backed promotion suggestions',
+  '/discord [edit] — bridge a Discord bot to the agent so it is reachable from a phone',
   '/workspace [init] — the project\'s .brittain folder: in-repo memory, heartbeat checklist, project triggers',
   '/memory [move] — view what the agent has remembered; move relocates it into the project (.brittain/MEMORY.md)',
   '/ledger — view what this session changed, ran, and failed at (kept across compaction)',
@@ -2446,6 +2447,31 @@ async function handleSlash(raw) {
         'spent, not context size. Subagent/coder/verifier tokens never touch the',
         'main context; that is the point of delegating.',
       ].join('\n'));
+    }
+
+    case 'discord': {
+      const state = await window.api.discordState();
+      if (!state.ok) return addError('Could not read the Discord bridge state.');
+      if (arg === 'edit' || arg === 'setup') {
+        const opened = await window.api.discordOpenConfig();
+        return addInfo(`Edit ${opened.path}, then restart Brittain Code to connect. The bridge runs inside the app — no separate process to start.`);
+      }
+      const lines = ['DISCORD BRIDGE', ''];
+      lines.push(`Config:  ${state.configPath}`);
+      if (state.error) lines.push(`         (could not be read: ${state.error})`);
+      lines.push(`Status:  ${state.running ? 'connected' : state.enabled ? 'enabled but not running in this process' : 'disabled'}`);
+      if (state.missing?.length) lines.push(`Missing: ${state.missing.join(', ')}`);
+      if (state.cwd) lines.push(`Runs in: ${state.cwd} under "${state.policy}"`);
+      if (state.notifyChannel) lines.push(`Notifies: channel ${state.notifyChannel}`);
+      lines.push('',
+        'Message the bot a goal and it runs unattended; a parked call comes back to you',
+        'as a message you can approve from anywhere. !help lists the commands.',
+        '',
+        'The bridge runs inside the app or the daemon — whichever owns the trigger',
+        'scheduler — so there is no separate process to keep alive.',
+        '',
+        '/discord edit opens the config. Changes take effect on restart.');
+      return showOverlay('DISCORD BRIDGE', lines.join('\n'));
     }
 
     case 'workspace': {
