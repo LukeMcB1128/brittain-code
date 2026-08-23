@@ -126,3 +126,16 @@ test('a mission runs without a Git repo instead of failing on the checkpoint', (
   assert.match(main, /if \(!activeMission\.recovery\) \{\s*updateMission\(\{ \.\.\.progress \}\);/);
   assert.match(main, /ran without a Git repository, so there is no checkpoint to resume/);
 });
+
+test('a moved file reads as a move, not as deletion', () => {
+  // git diff only sees tracked paths, so a file renamed to a path git does not
+  // know about shows as a deletion with nothing on the other side. A run that
+  // reorganised a folder reported "2 files changed, 26 deletions(-)", which
+  // reads as data loss.
+  const main = read('main.js');
+  const report = main.slice(main.indexOf('async function emitRunReport'), main.indexOf('async function emitRunReport') + 1800);
+  assert.match(report, /ls-files', '--others', '--exclude-standard'/);
+  assert.match(report, /new, untracked:/);
+  // Scoped to the project like the diff above it, for the same reason.
+  assert.match(report, /'--exclude-standard', '--', '\.'\], cwd\)/);
+});

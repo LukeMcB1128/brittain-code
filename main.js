@@ -1673,6 +1673,16 @@ async function emitRunReport(cwd, runLog) {
     // change anywhere in that repo — unrelated projects included.
     const stat = await gitRun(['diff', '--stat', lastCheckpoint.ref, '--', '.'], cwd);
     if (stat.ok && stat.out.trim()) diffPart = stat.out.trim().split('\n').slice(-11).join('\n');
+
+    // git diff only sees tracked paths, so a file moved to a new name shows as
+    // a deletion and nothing else: a reorganisation reads as data loss. Listing
+    // what arrived untracked is what makes a move look like a move.
+    const untracked = await gitRun(['ls-files', '--others', '--exclude-standard', '--', '.'], cwd);
+    if (untracked.ok && untracked.out.trim()) {
+      const added = untracked.out.trim().split('\n').filter(Boolean);
+      const shown = added.slice(0, 10).join(', ');
+      diffPart += (diffPart ? '\n' : '') + `new, untracked: ${shown}${added.length > 10 ? ` (+${added.length - 10} more)` : ''}`;
+    }
   }
   if (diffPart) lines.push(diffPart);
   else if (runLog.mutations.size) lines.push('files touched: ' + [...runLog.mutations].slice(0, 10).join(', '));
