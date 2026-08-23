@@ -131,24 +131,95 @@ function registerProjectMemory(cwd) {
 }
 
 // ---------- tools ----------
-function resolveInside(cwd, p) {
-  const root = fs.realpathSync(cwd);
-  const abs = path.resolve(root, p || '.');
-  const isInside = (candidate) => {
-    const rel = path.relative(root, candidate);
-    return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
-  };
-  if (!isInside(abs)) throw new Error(`Path escapes the working directory: ${p}`);
 
-  // Lexical checks alone can be bypassed through a symlink inside the project.
-  // Resolve the nearest existing ancestor so new files are safe as well.
-  let existing = abs;
+// Directories outside the project that the active policy grants, supplied by
+// main.js as a function rather than a value. A run's policy can change between
+// turns, and a stale copy here would either over- or under-grant; asking each
+// time means there is no lifecycle to get wrong. Absent provider = project only.
+let rootProvider = null;
+function setRootProvider(fn) {
+  rootProvider = typeof fn === 'function' ? fn : null;
+}
+
+function grantedRoots() {
+  try {
+    return (rootProvider ? rootProvider() : []).filter(Boolean);
+  } catch {
+    // A provider that throws grants nothing, which is the safe direction.
+    return [];
+  }
+}
+
+// Every root a path may legitimately live under: the project, plus whatever the
+// policy granted. A granted root that no longer exists grants nothing rather
+// than throwing — directories come and go, and that must not break a run.
+function activeRoots(cwd) {
+  const roots = [fs.realpathSync(cwd)];
+  for (const extra of grantedRoots()) {
+    try {
+      const real = fs.realpathSync(extra);
+      if (!roots.includes(real)) roots.push(real);
+    } catch {}
+  }
+  return roots;
+}
+
+function containingRoot(roots, candidate) {
+  let best = '';
+  for (const root of roots) {
+    const rel = path.relative(root, candidate);
+    const inside = rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
+    if (inside && root.length > best.length) best = root;
+  }
+  return best;
+}
+
+// The real location a path refers to, including a tail that does not exist yet.
+//
+// Containment cannot be decided lexically. A symlink inside the project can
+// point anywhere, and on macOS an ordinary path like /var/... is itself a
+// symlink to /private/var/..., so comparing raw strings both lets escapes
+// through and rejects legitimate paths. Resolving the nearest existing ancestor
+// and re-attaching the remainder settles both cases at once, and keeps new
+// files safe rather than only existing ones.
+function canonicalize(target) {
+  let existing = target;
   while (!fs.existsSync(existing)) {
     const parent = path.dirname(existing);
     if (parent === existing) break;
     existing = parent;
   }
-  if (!isInside(fs.realpathSync(existing))) throw new Error(`Path escapes the working directory through a symlink: ${p}`);
+  try {
+    return path.join(fs.realpathSync(existing), path.relative(existing, target));
+  } catch {
+    return target;
+  }
+}
+
+function resolveInside(cwd, p) {
+  const roots = activeRoots(cwd);
+  // Relative paths still mean "in the project" — a granted root is reachable by
+  // naming it, never by accident.
+  const abs = path.resolve(roots[0], p || '.');
+  const where = roots.length > 1
+    ? `the working directory or a granted root (${roots.slice(1).join(', ')})`
+    : 'the working directory';
+
+  // Two different failures, worth telling apart. A path that never looked
+  // contained is a mistake; one that looked fine and resolved elsewhere went
+  // through a symlink, and saying so is the difference between "typo" and
+  // "something in this project points outside it".
+  //
+  // The lexical check cannot stand alone in either direction: on macOS an
+  // ordinary /var/... path is itself a symlink to /private/var/..., so it
+  // reads as outside while being perfectly legitimate. Only the canonical
+  // check decides; the lexical one just picks the wording.
+  if (!containingRoot(roots, canonicalize(abs))) {
+    const lookedInside = !!containingRoot(roots, abs);
+    throw new Error(lookedInside
+      ? `Path escapes ${where} through a symlink: ${p}`
+      : `Path escapes ${where}: ${p}`);
+  }
   return abs;
 }
 
@@ -298,7 +369,13 @@ function loadProtectedGlobs(cwd) {
 // tool that mutates the filesystem.
 function resolveForWrite(cwd, p) {
   const abs = resolveInside(cwd, p);
-  const rel = path.relative(fs.realpathSync(cwd), abs).split(path.sep).join('/');
+  // Match protected globs against the path within whichever root contains it.
+  // Measuring from cwd would produce "../../notes/x.md" for a granted root, and
+  // a leading ../ stops every project-relative pattern from matching.
+  const roots = activeRoots(cwd);
+  const real = canonicalize(abs);
+  const base = containingRoot(roots, real) || roots[0];
+  const rel = path.relative(base, real).split(path.sep).join('/');
   for (const glob of loadProtectedGlobs(cwd)) {
     const re = globToRegex(glob);
     if (re.test(rel) || re.test(path.basename(rel))) {
@@ -2349,6 +2426,7 @@ const {
 module.exports = {
   initTools,
   setCommandSandbox,
+  setRootProvider,
   TOOL_DEFS,
   RISKY_TOOLS,
   SUBAGENT_TOOLS,

@@ -12,7 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('node:child_process');
 const { McpManager } = require('./mcp');
-const { initTools, setCommandSandbox, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
+const { initTools, setCommandSandbox, setRootProvider, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
@@ -362,6 +362,10 @@ app.whenReady().then(async () => {
   customPolicies = loadCustomPolicies(settingsUserDataDir);
   recoverMission();
   initTools(settingsUserDataDir);
+  // File tools ask the active policy which directories outside the project it
+  // may reach. Installed once: the provider reads the policy at call time, so
+  // switching the autonomy dial takes effect without any bookkeeping here.
+  setRootProvider(() => activePolicy(runtimeSettings.autoApprove).policy?.roots || []);
   // MCP servers connect in the background; status via /mcp
   mcp.startAll(settingsUserDataDir).then((results) => {
     for (const r of results) {
@@ -2919,6 +2923,13 @@ function notifyRunFinished(mission, reportPath) {
 // pipeline: "check my emails" should not stand up a planner, coder, and
 // verifier. It runs the same ReAct loop as an ordinary Code turn, only with
 // nobody watching, so the autonomy policy governs every tool call.
+// normalizePolicy does the expansion and validation; this is just a named
+// wrapper so the state handler reads clearly.
+function normalizePolicyRoots(policy) {
+  const { roots, rejectedRoots } = require('./src/main/autonomy').normalizePolicy(policy);
+  return { roots, rejectedRoots };
+}
+
 // Projects already told about the workspace this session. A hint is worth
 // saying once; saying it after every unattended run is nagging.
 const workspaceHintShown = new Set();
@@ -2975,6 +2986,16 @@ async function runAgentTask(payload = {}) {
   sink.emit('stream:info', resume
     ? `Agent run ${run.id} resuming under "${policy.label || policyId}".`
     : `Agent run ${run.id} starting unattended under "${policy.label || policyId}". Transcript: ${run.transcriptPath}`);
+
+  // Reaching outside the project is worth saying out loud every time, not just
+  // once in a config file: it is the difference between an agent that can touch
+  // this repo and one that can touch your documents.
+  if (policy.roots?.length) {
+    sink.emit('stream:info', `Policy grants access outside the project: ${policy.roots.join(', ')}`);
+  }
+  if (policy.rejectedRoots?.length) {
+    sink.emit('stream:info', `Ignored unusable roots in this policy (must be an absolute path, and not the filesystem root): ${policy.rejectedRoots.join(', ')}`);
+  }
 
   // OS-level containment for shell commands when the policy opts in. macOS
   // only for now; a policy that asks for it elsewhere is told, not indulged
@@ -3736,6 +3757,10 @@ ipcMain.handle('autonomy:state', () => {
       label: policy.label || id,
       description: policy.description || '',
       builtIn: Object.prototype.hasOwnProperty.call(require('./src/main/autonomy').BUILT_IN, id),
+      // What this policy reaches outside the project, listed so it is visible
+      // in /policies rather than only in a config file nobody re-reads.
+      roots: normalizePolicyRoots(policy).roots,
+      rejectedRoots: normalizePolicyRoots(policy).rejectedRoots,
     })),
     deferred: deferredFrom(currentRun || lastFinishedRun).map((entry) => ({ name: entry.name, target: entry.target, reason: entry.reason, at: entry.at })),
   };

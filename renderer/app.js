@@ -2698,6 +2698,10 @@ async function handleSlash(raw) {
       const lines = ['AUTONOMY POLICIES', ''];
       for (const policy of state.policies) {
         lines.push(`${policy.id === state.current ? '▶ ' : '  '}${policy.id}${policy.builtIn ? '' : ' (custom)'} — ${policy.description || policy.label}`);
+        // Reaching outside the project is the one policy setting worth seeing
+        // without opening the config file.
+        if (policy.roots?.length) lines.push(`      reaches outside the project: ${policy.roots.join(', ')}`);
+        if (policy.rejectedRoots?.length) lines.push(`      ⚠ unusable roots ignored: ${policy.rejectedRoots.join(', ')}`);
       }
       if (state.configError) lines.push('', `autonomy.json: ${state.configError}`);
       if (state.deferred.length) {

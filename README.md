@@ -75,6 +75,14 @@ The bridge holds no authority of its own: it turns an allowlisted person's messa
 
 **The learning loop.** Every run's verdicts accumulate. A call held (deferred or parked) five or more times across runs and never denied by a human surfaces in `/policies` as a promotion suggestion; `/policies promote <custom-policy> <tool>` adds it to that policy's allow list. Never automatic — the aggregate produces evidence, a person clicks. Built-in policies cannot be widened.
 
+**Reaching outside the project.** File tools are confined to the working directory, which is right for a coding agent and wrong for an assistant that should be able to read your notes. A custom policy may list `roots`:
+
+```json
+{ "policies": { "assistant": { "allowRisky": true, "roots": ["~/Documents/notes", "~/Downloads"] } } }
+```
+
+Those directories become readable and writable alongside the project. Paths must be absolute or start with `~`; the filesystem root is refused, and anything unusable is reported rather than silently dropped. Relative paths still mean the project, so a granted root is only ever reached by naming it. Every run that has roots says so in its output, and `/policies` lists them — this is the widest setting in the file, so it is deliberately hard to forget about. It lives in the app-data `autonomy.json` only: a project's `.brittain/autonomy.json` can only narrow, so a file arriving in a pull request cannot hand the agent the rest of the disk.
+
 **Sandboxing.** A custom policy with `"sandbox": true` runs unattended shell commands under macOS `sandbox-exec`, with writes confined to the project and temp directories — path confinement as an OS guarantee rather than a code one. On platforms without a sandbox the run says so plainly and continues unconfined.
 
 Starting an unattended run shows a one-time-per-project disclosure: undo is the wrong safety model for a run that can act on the world, so it states plainly that the agent acts on its own — running commands, driving a browser, calling connected tools — and that some actions cannot be undone. A Git repository is no longer required; when there is one the run still branches and checkpoints for its file-level work, and when there is not, the disclosure is the guard and file-level undo simply does not apply. A policy can still opt into requiring a generated branch, which only applies inside a repository.

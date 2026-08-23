@@ -19,6 +19,42 @@
 // The invariants below hold whatever a policy says. They are the actual
 // security design; everything else is configuration.
 
+const os = require('os');
+const path = require('path');
+
+// Extra directories a policy may reach outside the selected project.
+//
+// File tools are confined to the working directory, which is right for a
+// coding agent and wrong for an assistant that should be able to read your
+// notes folder. Roots widen that — so they live in a policy, in app data, and
+// are ignored in a project's .brittain/autonomy.json, which may only narrow. A
+// file that can arrive in a pull request must not hand itself the rest of the
+// disk.
+function expandRoot(value) {
+  let text = String(value || '').trim();
+  if (!text) return '';
+  if (text === '~' || text.startsWith('~/') || text.startsWith('~' + path.sep)) {
+    text = path.join(os.homedir(), text.slice(1));
+  }
+  if (!path.isAbsolute(text)) return '';
+  const resolved = path.resolve(text);
+  // Granting the whole filesystem is not a considered decision; it is what gets
+  // typed when the question has not been thought about.
+  if (resolved === path.parse(resolved).root) return '';
+  return resolved;
+}
+
+function normalizeRoots(list) {
+  const roots = [];
+  const rejected = [];
+  for (const entry of Array.isArray(list) ? list : []) {
+    const expanded = expandRoot(entry);
+    if (!expanded) rejected.push(String(entry));
+    else if (!roots.includes(expanded)) roots.push(expanded);
+  }
+  return { roots, rejected };
+}
+
 const BUILT_IN = {
   supervised: {
     label: 'Supervised',
@@ -69,7 +105,14 @@ function normalizePolicy(rawPolicy) {
     writeScope: policy.writeScope || (policy.allowRisky ? 'project' : 'none'),
     requireBranch: !!policy.requireBranch,
     maxToolCalls: Number(policy.maxToolCalls) > 0 ? Number(policy.maxToolCalls) : 0,
+    ...normalizeRootsInto(policy.roots),
+    sandbox: !!policy.sandbox,
   };
+}
+
+function normalizeRootsInto(list) {
+  const { roots, rejected } = normalizeRoots(list);
+  return { roots, rejectedRoots: rejected };
 }
 
 function matches(patterns, name) {
@@ -185,7 +228,10 @@ function narrowPolicy(rawPolicy, overlay) {
   const policy = normalizePolicy(rawPolicy);
   if (!overlay || typeof overlay !== 'object') return { policy, ignored: [] };
   const ignored = [];
-  const narrowed = { ...policy, allow: new Set(policy.allow), deny: new Set(policy.deny) };
+  // roots is copied from the base policy and never taken from the overlay:
+  // reaching outside the project is a widening, so it falls through to the
+  // ignored list below like any other.
+  const narrowed = { ...policy, allow: new Set(policy.allow), deny: new Set(policy.deny), roots: [...policy.roots] };
   for (const [key, value] of Object.entries(overlay)) {
     if (key === 'deny' && Array.isArray(value)) {
       for (const name of value) narrowed.deny.add(String(name));
@@ -283,6 +329,13 @@ const EXAMPLE_CONFIG = {
       // run works in any folder, code or not.
       requireBranch: false,
       network: 'ask',
+      // Directories outside the project this policy may read and write. File
+      // tools are confined to the working directory otherwise, which suits a
+      // coding agent and not an assistant that should reach your notes. Absolute
+      // paths or ~; the filesystem root is refused. Grant the narrowest thing
+      // that does the job — this is the widest setting in the file.
+      //   roots: ['~/Documents/notes'],
+      roots: [],
       // Even here, these are never automatic — destructive ops, sensitive
       // reads, external MCP tools, and anything that moves money still stop
       // for you (unattended, they wait in the review tray).
@@ -306,6 +359,8 @@ function ensureConfig(userDataDir) {
 
 module.exports = {
   narrowPolicy,
+  expandRoot,
+  normalizeRoots,
   loadCustomPolicies,
   ensureConfig,
   EXAMPLE_CONFIG,

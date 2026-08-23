@@ -53,8 +53,14 @@ const CONFIG_TEMPLATE = {
   // it always has somewhere to reach you without being spoken to first.
   notifyChannelId: '',
   // Where runs happen, and how much they may do without asking.
+  //
+  // "trusted" is the working setting: unattended, "guarded" defers writes AND
+  // commands, so a bot on it reads the project, declines every edit, and
+  // reports a list of deferrals having changed nothing. Every run still
+  // branches and checkpoints first, and the invariants — money, destructive
+  // ops, sensitive reads, untrusted MCP — still come back to you to approve.
   cwd: '',
-  policy: 'guarded',
+  policy: 'trusted',
   model: '',
 };
 

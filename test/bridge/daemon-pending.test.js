@@ -31,9 +31,13 @@ test('the bridge adds no authority of its own', () => {
   for (const forbidden of ['child_process', 'execSync', 'eval(']) {
     assert.ok(!bridge.includes(forbidden), `the bridge must not use ${forbidden}`);
   }
-  // Policy comes from config and goes to the daemon; the bridge never picks it.
+  // Policy comes from config and goes to the daemon; the bridge never picks it
+  // at call time. The config template may default to a permissive policy — that
+  // is the user's setting to change — but the run payload must always read it
+  // from config rather than substituting one.
   assert.match(bridge, /policy: config\.policy/);
-  assert.ok(!bridge.includes("policy: 'trusted'"), 'the bridge must not hardcode a permissive policy');
+  const handler = bridge.slice(bridge.indexOf('async function handle('), bridge.indexOf('// ---------- gateway'));
+  assert.ok(!/policy: '[a-z]+'/.test(handler), 'the handler must not substitute a policy of its own');
 });
 
 test('authorization runs before the message content is used', () => {
