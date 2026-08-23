@@ -376,6 +376,32 @@ app.whenReady().then(async () => {
       ping: () => ({ ok: true, pid: process.pid, startedAt: daemonStartedAt }),
       run: (payload) => runAgentTask(payload),
       status: () => ({ ok: true, mission: activeMission, queued: peekQueue(settingsUserDataDir).map((entry) => entry.goal) }),
+      // The park loop, served remotely. This is what lets an approval travel:
+      // a run parks here, the decision is made from wherever the person is,
+      // and the run resumes on this machine with the arguments it froze.
+      pending: () => {
+        const { records } = pendingStore.list(settingsUserDataDir);
+        return {
+          ok: true,
+          records: records.map((record) => ({
+            runId: record.runId,
+            goal: record.goal,
+            cwd: record.cwd,
+            suspendedAt: record.suspendedAt,
+            parked: (record.parked || []).map((entry, index) => ({
+              index, name: entry.name, target: entry.target, reason: entry.reason, decision: entry.decision || '',
+            })),
+          })),
+        };
+      },
+      resolve: ({ runId, index, approved }) => pendingStore.resolveCall(settingsUserDataDir, runId, index, !!approved),
+      resume: ({ runId }) => resumeSuspendedRun(runId),
+      stop: () => {
+        if (!currentAbort) return { ok: false, error: 'Nothing is running.' };
+        stopRequested = true;
+        currentAbort.abort();
+        return { ok: true };
+      },
     });
     // Attached clients get the run narrative. This taps sink.emit — the path
     // every run-loop message goes through — leaving the sink itself unchanged.
@@ -1113,11 +1139,22 @@ function systemPrompt(cwd, model = '', onlineResearch = false) {
 // under-report by the whole tool schema.
 function activeToolDefs(chatMode, onlineResearch) {
   const modeTools = chatMode ? CHAT_TOOLS : TOOL_DEFS;
-  const activeTools = chatMode
-    ? (onlineResearch ? modeTools : null)
-    : (onlineResearch ? modeTools : modeTools.filter((definition) => !NETWORK_TOOLS.has(definition.function.name)));
   const mcpDefs = mcp.toolDefs();
-  return activeTools ? activeTools.concat(mcpDefs) : activeTools;
+  const offline = (defs) => defs.filter((definition) => !NETWORK_TOOLS.has(definition.function.name));
+
+  if (!chatMode) return (onlineResearch ? modeTools : offline(modeTools)).concat(mcpDefs);
+
+  // Chat mode used to hand back null whenever ONLINE was off, which dropped the
+  // MCP tools with it. That conflated two unrelated permissions: MCP servers
+  // are the only way chat mode reaches mail, a calendar, or anything else
+  // outside the conversation, and they carry their own approval path. It made
+  // "check my email" impossible without also switching on web search.
+  const chatTools = (onlineResearch ? modeTools : offline(modeTools)).concat(mcpDefs);
+
+  // With no servers configured and ONLINE off, the only tool left is ask_user,
+  // and a chat with nothing to call should still answer in prose — so null
+  // (meaning "send no tools at all") remains right for that case.
+  return (mcpDefs.length || onlineResearch) ? chatTools : null;
 }
 
 // The fixed per-request overhead: system prompt + tool schemas. Both are sent on

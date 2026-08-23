@@ -12,6 +12,7 @@
   "scripts": {
     "start": "node scripts/start.js",
     "test": "node scripts/run-tests.js",
+    "discord": "node scripts/discord-bridge.js",
     "dist": "electron-builder --mac dmg zip",
     "deploy": "electron-builder --mac dir && rm -rf '/Applications/Brittain Code.app' && cp -R 'dist/mac-arm64/Brittain Code.app' /Applications/ && echo 'Deployed to /Applications'",
     "dist:win": "electron-builder --win --x64",

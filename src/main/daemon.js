@@ -89,21 +89,27 @@ function startServer(userDataDir, handlers) {
 }
 
 // One-shot client: send a command, await one reply line.
+//
+// A timeoutMs of 0 waits indefinitely, which is what `run` needs — its reply
+// only arrives once the agent has finished, and that is measured in minutes.
+// Progress in the meantime comes over an attached socket, not this one.
 function sendCommand(userDataDir, message, timeoutMs = 10_000) {
   return new Promise((resolve) => {
     const socket = net.connect(socketPath(userDataDir));
-    const timer = setTimeout(() => { socket.destroy(); resolve({ ok: false, error: 'daemon did not answer' }); }, timeoutMs);
+    const timer = timeoutMs > 0
+      ? setTimeout(() => { socket.destroy(); resolve({ ok: false, error: 'daemon did not answer' }); }, timeoutMs)
+      : null;
     let buffer = '';
     socket.on('connect', () => socket.write(JSON.stringify(message) + '\n'));
     socket.on('data', (chunk) => {
       buffer += String(chunk);
       const newline = buffer.indexOf('\n');
       if (newline < 0) return;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       socket.destroy();
       try { resolve(JSON.parse(buffer.slice(0, newline))); } catch { resolve({ ok: false, error: 'bad reply' }); }
     });
-    socket.on('error', (error) => { clearTimeout(timer); resolve({ ok: false, error: String(error.message || error) }); });
+    socket.on('error', (error) => { if (timer) clearTimeout(timer); resolve({ ok: false, error: String(error.message || error) }); });
   });
 }
 

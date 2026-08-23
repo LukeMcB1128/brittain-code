@@ -67,6 +67,10 @@ Each ledger is also written to `runs/` in the app's data directory as it is prod
 
 **The daemon.** Triggers normally fire only while the app is open. `/agent daemon install` (macOS, opt-in, never automatic) installs a LaunchAgent that runs the app `--headless`: no window, the same runtime, answering on a unix domain socket — deliberately not a network port. The daemon owns the trigger scheduler; a window that finds it alive does not start a second one.
 
+**Reach it from Discord.** `npm run discord` starts a bridge between a Discord bot and the headless daemon, so the agent is reachable from a phone. Message it a goal and it runs unattended in the configured project; `!pending`, `!approve`, `!deny`, `!resume`, `!status` and `!stop` mirror the slash commands. This is what parked calls were built for — a run suspends on your desktop, the bridge tells you what it is waiting on, and you approve from wherever you are; the frozen call then executes at home.
+
+The bridge holds no authority of its own: it turns an allowlisted person's message into the same run the app starts, under the same policy, so every invariant and every decision record still applies. Configuration lives in `discord.json` in the application-data directory and ships disabled. It answers nobody until `ownerIds` names you, and with no `channelIds` it accepts direct messages only — a shared channel has to be opted into by naming it. Messages from bots, from non-owners, and from channels you did not list are dropped without a reply. It adds no dependencies: Node ships a WebSocket client, and the gateway protocol is hand-rolled for the same reason the MCP client is.
+
 **Graduated MCP trust.** "MCP is never automatic" is right for a server installed five minutes ago and wrong forever after. A `trust` map in `mcp.json` (`{"search": "allow", "send": "park"}`) grants specific tools on a specific server; the grant is keyed to the server's command line and voids itself if that changes (`/mcp trust accept <server>` re-affirms). The financial, destructive, and sensitive invariants still apply to trusted MCP calls.
 
 **The learning loop.** Every run's verdicts accumulate. A call held (deferred or parked) five or more times across runs and never denied by a human surfaces in `/policies` as a promotion suggestion; `/policies promote <custom-policy> <tool>` adds it to that policy's allow list. Never automatic — the aggregate produces evidence, a person clicks. Built-in policies cannot be widened.
@@ -143,6 +147,7 @@ Type these in the message box:
 | `/recs` | Compare installed models by memory fit, capabilities, measured speed, and local Brittainmark results |
 | `/auto <request>` | Select the best compatible installed model for the current mode and attachments, then run the request |
 | `/mcp [on\|off <server>]` | External MCP tool servers: status, enable, disable |
+| `npm run discord` | Bridge a Discord bot to the headless daemon so the agent is reachable from a phone |
 | `/workspace [init]` | The project's `.brittain` folder: in-repo memory, heartbeat checklist, project triggers |
 | `/memory [move]` | View what the agent has remembered; `move` relocates it into the project's `.brittain/MEMORY.md` |
 | `/agent [--policy <name>] <goal>` | Run unattended: always branched, checkpointed, and reported |

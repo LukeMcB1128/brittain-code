@@ -105,6 +105,9 @@ test('Code and Chat modes are wired through UI, persistence, and the agent bound
   assert.match(historyStore, /mode: meta\.mode === 'chat' \? 'chat' : 'code'/);
   assert.match(main, /const runMode = mode === 'chat' \? 'chat' : 'code'/);
   assert.match(main, /const modeTools = chatMode \? CHAT_TOOLS : TOOL_DEFS/);
+  // MCP is chat mode's only route to anything outside the conversation, and it
+  // must not be gated behind the unrelated ONLINE switch.
+  assert.match(main, /return \(mcpDefs\.length \|\| onlineResearch\) \? chatTools : null;/);
   assert.match(main, /if \(!activeToolNames\.has\(name\)\)/);
 });
 
