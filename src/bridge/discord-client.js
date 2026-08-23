@@ -19,7 +19,7 @@
 // adds is that an approval can travel: a run parks on this machine and the
 // decision arrives from wherever the person is.
 
-const { authorize, parseCommand, chunk, renderPending, renderEvent, HELP } = require('./discord-protocol');
+const { authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, HELP } = require('./discord-protocol');
 
 const API = 'https://discord.com/api/v10';
 
@@ -157,7 +157,10 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       }
 
       case 'run': {
-        await send(channelId, `🤖 Running unattended under **${config.policy}** in \`${config.cwd}\`…`);
+        // One short acknowledgement, then silence until there is something to
+        // say. The alternative — narrating every step — turns a chat into a
+        // console log nobody reads.
+        await send(channelId, '🤖 On it…');
         const res = await ask({
           cmd: 'run',
           payload: {
@@ -168,11 +171,9 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
             chatId: `discord-${channelId}`,
           },
         }, 0);
-        if (!res.ok) return send(channelId, `Could not start: ${res.error}`);
-        if (res.queued) return send(channelId, `Busy — queued (${res.depth} waiting).`);
-        // A suspension already announced itself over the event stream.
-        if (res.status === 'suspended') return;
-        return send(channelId, `✅ ${res.status}`);
+        // A suspension has already said what it is waiting on, so renderResult
+        // returns nothing for it rather than repeating itself.
+        return send(channelId, renderResult(res));
       }
       default: return;
     }
@@ -185,10 +186,10 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   async function introduce() {
     if (!notifyChannel || !greetStore || greetStore.hasGreeted(notifyChannel)) return;
     await send(notifyChannel, [
-      '**Brittain Code** is connected.',
-      `Send me a goal and I will run it unattended in \`${config.cwd}\` under **${config.policy}**.`,
-      'If a run hits something only you can approve, it pauses and asks here.',
-      '`!help` for commands.',
+      '**Brittain Code** is here.',
+      `Send me anything and I will work on it in \`${config.cwd.split('/').pop() || config.cwd}\`.`,
+      'If I hit something only you can approve, I will ask.',
+      '`!help` for the rest.',
     ].join('\n')).catch(() => {});
     greetStore.markGreeted(notifyChannel);
   }

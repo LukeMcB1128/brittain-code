@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  authorize, parseCommand, chunk, renderPending, renderEvent, MAX_DISCORD_MESSAGE,
+  authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, MAX_DISCORD_MESSAGE,
 } = require('../../src/bridge/discord-protocol');
 
 const config = { ownerIds: ['111'], channelIds: ['999'] };
@@ -86,18 +86,61 @@ test('a single over-long line is truncated rather than dropped', () => {
   assert.ok(parts[0].endsWith('…'));
 });
 
-test('only the run narrative is relayed, never the token stream', () => {
-  // Relaying every token would be unreadable and would rate-limit the bot.
+test('chat gets interruptions, not progress', () => {
+  // A console log piped into a DM buries the two things a remote person can
+  // act on under paragraphs they cannot.
   assert.equal(renderEvent('stream:token', 'hello'), '');
   assert.equal(renderEvent('stream:toolcall', { name: 'read_file' }), '');
-  assert.equal(renderEvent('stream:info', 'Agent run starting'), 'Agent run starting');
+  for (const noise of [
+    'Agent run run-123 starting unattended under "Trusted". Transcript: /Users/x/runs/run-123.log',
+    'Policy grants access outside the project: /Users/x/notes',
+    'Context past 70% — auto-compacting…',
+    'This project has no .brittain/ workspace — /workspace init keeps memory in the repo',
+  ]) {
+    assert.equal(renderEvent('stream:info', noise), '', `should not relay: ${noise}`);
+  }
+  // But a failure or a skipped call is worth breaking silence for.
+  assert.match(renderEvent('stream:info', 'Agent run failed: ollama refused'), /failed/);
+  assert.match(renderEvent('stream:info', 'Deferred write_file — risky tool not in the policy allow list'), /Deferred/);
+});
+
+test('the answer reaches the person who asked', () => {
+  // The whole point of asking from a phone. This returned "completed" and threw
+  // the answer away.
+  const text = renderResult({ ok: true, status: 'completed', content: 'The repo has 3 files: a.js, b.js, README.md', changed: 0, commands: 1 });
+  assert.match(text, /3 files: a\.js/);
+  assert.match(text, /1 command/);
+});
+
+test('a result says something even when there is nothing to say', () => {
+  // Silence is indistinguishable from a broken bridge.
+  assert.match(renderResult({ ok: true, status: 'completed', content: '' }), /finished without a closing message/);
+});
+
+test('failures and refusals read as such', () => {
+  assert.match(renderResult({ ok: false, error: 'no model' }), /⚠️.*no model/);
+  assert.match(renderResult({ ok: true, status: 'failed', error: 'ollama died', content: '' }), /Failed.*ollama died/s);
+  assert.match(renderResult({ ok: true, status: 'stopped', content: '' }), /Stopped/);
+  assert.match(renderResult({ ok: true, queued: true, depth: 2 }), /queued \(2 waiting\)/);
+});
+
+test('a suspended run does not repeat what it already announced', () => {
+  assert.equal(renderResult({ ok: true, status: 'suspended' }), '');
+});
+
+test('unverified changes are flagged, because that is the risky outcome', () => {
+  const text = renderResult({ ok: true, status: 'completed', content: 'done', changed: 2, commands: 0, verified: false });
+  assert.match(text, /2 files changed/);
+  assert.match(text, /not verified/);
+  const checked = renderResult({ ok: true, status: 'completed', content: 'done', changed: 2, commands: 3, verified: true });
+  assert.ok(!checked.includes('not verified'));
 });
 
 test('a suspension is announced with what it is waiting on', () => {
   const text = renderEvent('run:decisions', {
     parked: [{ name: 'mcp_gmail_send', target: 'a@b.c', reason: 'external MCP tools are never automatic', decision: '' }],
   });
-  assert.match(text, /Run suspended/);
+  assert.match(text, /Waiting on you/);
   assert.match(text, /mcp_gmail_send/);
   assert.match(text, /!approve all/);
 });
@@ -143,7 +186,7 @@ test('the bridge introduces itself so the DM exists to click', () => {
   // one leaves the bot unreachable — findable nowhere in the sidebar.
   assert.match(client, /if \(!notifyChannel \|\| !greetStore \|\| greetStore\.hasGreeted\(notifyChannel\)\) return;/);
   assert.match(client, /greetStore\.markGreeted\(notifyChannel\)/);
-  assert.match(client, /\*\*Brittain Code\*\* is connected/);
+  assert.match(client, /\*\*Brittain Code\*\* is here/);
 });
 
 test('a bot in no servers says so, because it cannot be DMed at all', () => {

@@ -58,12 +58,13 @@ function parseCommand(content) {
 
 const HELP = [
   '**Brittain Code**',
-  '`<anything>` — run it unattended in the configured project',
-  '`!pending` — parked calls waiting on you',
-  '`!approve [n|all]` / `!deny [n|all]` — decide them',
-  '`!resume` — continue the suspended run',
-  '`!status` — what the daemon is doing',
-  '`!stop` — stop the running agent',
+  'Send anything and I run it as a task. No prefix needed.',
+  '',
+  '`!pending` — what is waiting on your approval',
+  '`!approve` / `!deny` — decide it (add a number for just one)',
+  '`!resume` — carry on after deciding',
+  '`!status` — am I busy?',
+  '`!stop` — stop what I am doing',
 ].join('\n');
 
 // Discord hard-caps a message at 2000 characters. Splitting on line boundaries
@@ -98,25 +99,69 @@ function renderPending(records) {
   return lines.join('\n');
 }
 
-// Which run events are worth relaying. A live token stream would be unreadable
-// in chat and would rate-limit the bot instantly, so the bridge sends the
-// narrative only: what it decided, what it parked, what it finished.
-const RELAYED = new Set(['stream:info', 'run:decisions', 'stream:done']);
+// What a chat window should show, which is far less than a terminal does.
+//
+// The run narrative is written for someone watching a console: transcript
+// paths, branch names, policy grants, compaction notices, step budgets. Piping
+// all of it into a DM buries the two things a remote person actually needs —
+// that something is waiting on them, and that something went wrong — under
+// paragraphs they cannot act on. The answer itself arrives separately, when
+// the run returns it.
+//
+// So: relay interruptions, not progress.
+const RELAYED = new Set(['run:decisions']);
+
+// Info lines worth breaking silence for. Everything else is bookkeeping.
+const NOTEWORTHY = [
+  /^Agent run failed:/i,
+  /^Deferred /,
+  /could not be read/i,
+  /^Trigger "/,
+  /^Heartbeat for /,
+];
 
 function renderEvent(channel, payload) {
+  if (channel === 'stream:info') {
+    const text = String(payload || '');
+    return NOTEWORTHY.some((pattern) => pattern.test(text)) ? text : '';
+  }
   if (!RELAYED.has(channel)) return '';
-  if (channel === 'stream:info') return String(payload || '');
-  if (channel === 'stream:done') return '';
   const parked = (payload?.parked || []).filter((entry) => !entry.decision);
   if (!parked.length) return '';
   return [
-    `⏸️ **Run suspended** — ${parked.length} call(s) need you.`,
-    ...parked.map((entry) => `  • **${entry.name}**${entry.target ? ` on \`${entry.target}\`` : ''} — ${entry.reason}`),
-    '`!pending` for detail · `!approve all` · `!resume`',
+    `⏸️ **Waiting on you** — ${parked.length} call(s) need approval.`,
+    ...parked.map((entry) => `• **${entry.name}**${entry.target ? ` \`${entry.target}\`` : ''} — ${entry.reason}`),
+    '',
+    '`!approve all` then `!resume` · `!pending` for detail',
   ].join('\n');
+}
+
+// The end of a run, as a person would want it: the answer first, then one line
+// of what it did. A run that changed nothing and said nothing still says so,
+// because silence is indistinguishable from a bridge that broke.
+function renderResult(result) {
+  if (!result?.ok) return `⚠️ ${result?.error || 'the run could not start'}`;
+  if (result.queued) return `Busy — queued (${result.depth} waiting).`;
+  if (result.status === 'suspended') return '';
+
+  const parts = [];
+  const answer = String(result.content || '').trim();
+  if (result.status === 'failed') parts.push(`⚠️ **Failed** — ${result.error || 'see the run report'}`);
+  else if (result.status === 'stopped') parts.push('⏹️ Stopped.');
+
+  if (answer) parts.push(answer);
+  else if (result.status === 'completed') parts.push('Done — the run finished without a closing message.');
+
+  const did = [];
+  if (result.changed) did.push(`${result.changed} file${result.changed === 1 ? '' : 's'} changed`);
+  if (result.commands) did.push(`${result.commands} command${result.commands === 1 ? '' : 's'}`);
+  if (result.changed && !result.verified) did.push('not verified');
+  if (did.length) parts.push(`-# ${did.join(' · ')}`);
+
+  return parts.join('\n\n');
 }
 
 module.exports = {
   MAX_DISCORD_MESSAGE, HELP, RELAYED,
-  authorize, parseCommand, chunk, renderPending, renderEvent,
+  authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, NOTEWORTHY,
 };

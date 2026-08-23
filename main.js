@@ -3107,6 +3107,10 @@ async function runAgentTask(payload = {}) {
   let outcome = 'ok';
   let status = 'completed';
   let finalContent = '';
+  // What the run actually did, for a caller with no window to look at. The
+  // answer itself was being computed and thrown away: a remote caller got
+  // "completed" and never saw a word of it.
+  let summary = { changed: 0, commands: 0, verified: false, error: '' };
 
   try {
     const turn = await runAgentTurn(
@@ -3118,6 +3122,12 @@ async function runAgentTask(payload = {}) {
       'code',
     );
     finalContent = String(turn.lastContent || '');
+    summary = {
+      changed: turn.runLog?.mutations?.size || 0,
+      commands: turn.runLog?.commands?.length || 0,
+      verified: !!turn.runLog?.verified,
+      error: '',
+    };
     if (turn.suspendedForApproval) {
       outcome = 'suspended';
       status = 'suspended';
@@ -3126,7 +3136,12 @@ async function runAgentTask(payload = {}) {
     }
   } catch (err) {
     if (err?.name === 'AbortError') { outcome = 'stopped'; status = 'stopped'; }
-    else { outcome = 'failed'; status = 'failed'; sink.emit('stream:info', `Agent run failed: ${String(err.message || err)}`); }
+    else {
+      outcome = 'failed';
+      status = 'failed';
+      summary.error = String(err.message || err);
+      sink.emit('stream:info', `Agent run failed: ${summary.error}`);
+    }
   } finally {
     setCommandSandbox(null);
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : outcome);
@@ -3201,7 +3216,7 @@ async function runAgentTask(payload = {}) {
     }
     sink.done();
   }
-  return { ok: true, status };
+  return { ok: true, status, content: finalContent, ...summary };
 }
 
 ipcMain.handle('agent:run', async (_e, payload = {}) => runAgentTask(payload));
