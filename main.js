@@ -464,6 +464,11 @@ app.whenReady().then(async () => {
   tapRunEvents();
 
   if (HEADLESS) {
+    // A background process should not sit in the Dock next to the real app.
+    // Without this the daemon shows a second, identical, permanently-idle icon
+    // that does nothing when clicked — which reads as a bug, and is one.
+    app.dock?.hide();
+
     // No window, no renderer: the daemon owns the scheduler and answers on a
     // unix socket. The run sink already drops renderer sends harmlessly.
     const handlers = commandHandlers();
@@ -510,7 +515,11 @@ app.on('before-quit', () => {
   localBrowser.closeAll();
   mcp.stopAll();
 });
-app.on('window-all-closed', () => app.quit());
+// A headless daemon has no windows by design, so "the last window closed" must
+// not mean "quit". Without this guard anything that opened and closed a window
+// in the daemon — a dialog, a transient view — would take the whole background
+// process down with it, silently ending scheduled work.
+app.on('window-all-closed', () => { if (!HEADLESS) app.quit(); });
 
 // ---------- ollama helpers ----------
 async function ollamaJson(route, body, signal) {

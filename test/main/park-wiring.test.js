@@ -60,3 +60,12 @@ test('a suspended run does not claim it hit the step cap', () => {
   const main = read('main.js');
   assert.match(main, /exhaustedWithToolCalls && !stopRequested && !suspendedForApproval/);
 });
+
+test('the headless daemon is a background process, not a second app', () => {
+  const main = read('main.js');
+  const headless = main.slice(main.indexOf('if (HEADLESS) {'), main.indexOf('createWindow();'));
+  assert.match(headless, /app\.dock\?\.hide\(\)/, 'a daemon must not sit in the Dock beside the real app');
+  // With no windows by design, "all windows closed" must not mean "quit", or
+  // any transient window would take the background process down with it.
+  assert.match(main, /window-all-closed', \(\) => \{ if \(!HEADLESS\) app\.quit\(\); \}/);
+});
