@@ -71,4 +71,28 @@ function validateConfig(config) {
   return missing;
 }
 
-module.exports = { CONFIG_TEMPLATE, configPath, ensureConfig, readConfig, validateConfig };
+// Whether the bot has already introduced itself, so it does so exactly once
+// per channel rather than on every restart. Kept beside the config because it
+// is bridge bookkeeping, not something anyone edits.
+function statePath(userDataDir) {
+  return path.join(userDataDir, 'discord-state.json');
+}
+
+function greetStore(userDataDir) {
+  const read = () => {
+    try { return JSON.parse(fs.readFileSync(statePath(userDataDir), 'utf8')) || {}; }
+    catch { return {}; }
+  };
+  return {
+    hasGreeted: (channelId) => !!channelId && read().greeted === channelId,
+    markGreeted: (channelId) => {
+      try {
+        const target = statePath(userDataDir);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, JSON.stringify({ ...read(), greeted: channelId }, null, 2) + '\n', 'utf8');
+      } catch {}
+    },
+  };
+}
+
+module.exports = { CONFIG_TEMPLATE, configPath, ensureConfig, readConfig, validateConfig, greetStore, statePath };

@@ -31,7 +31,7 @@ const decisionsLog = require('./src/main/decisions-log');
 const projectTriggers = require('./src/main/project-triggers');
 const daemon = require('./src/main/daemon');
 const { createDiscordBridge } = require('./src/bridge/discord-client');
-const { readConfig: readDiscordConfig, validateConfig: validateDiscordConfig, ensureConfig: ensureDiscordConfig, configPath: discordConfigPath } = require('./src/bridge/discord-config');
+const { readConfig: readDiscordConfig, validateConfig: validateDiscordConfig, ensureConfig: ensureDiscordConfig, configPath: discordConfigPath, greetStore: discordGreetStore } = require('./src/bridge/discord-config');
 const sandbox = require('./src/main/sandbox');
 const { createRecommendationsService } = require('./src/main/recommendations-service');
 const { readBenchResults: readBenchResultsFile } = require('./src/main/benchmark-service');
@@ -427,6 +427,7 @@ function startDiscordBridge(handlers) {
   }
   discordBridge = createDiscordBridge({
     config,
+    greetStore: discordGreetStore(settingsUserDataDir),
     ask: async (message) => {
       const handler = handlers[message?.cmd];
       if (!handler) return { ok: false, error: `unknown cmd "${message?.cmd}"` };

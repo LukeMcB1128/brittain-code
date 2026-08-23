@@ -27,7 +27,7 @@ const INTENTS = (1 << 9) | (1 << 12) | (1 << 15);
 
 // `ask(message, timeoutMs)` runs one daemon command and resolves its reply.
 // `subscribe(fn)` receives run events and returns an unsubscribe function.
-function createDiscordBridge({ config, ask, subscribe, log = console }) {
+function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = console }) {
   let socket = null;
   let heartbeat = null;
   let unsubscribe = null;
@@ -220,6 +220,21 @@ function createDiscordBridge({ config, ask, subscribe, log = console }) {
       // Replies land where you spoke; unprompted messages fall back to the
       // notification channel, so a run parking while you sleep still reaches you.
       lastChannel = notifyChannel;
+      // Discord hides a DM channel until it holds a message, so a bridge that
+      // opens one silently leaves nothing to click — the bot is unreachable
+      // precisely because it has never spoken. Introduce it once per channel:
+      // enough to make the conversation exist, not enough to be noise on every
+      // restart.
+      if (notifyChannel && greetStore && !greetStore.hasGreeted(notifyChannel)) {
+        await send(notifyChannel, [
+          '**Brittain Code** is connected.',
+          `Send me a goal and I will run it unattended in \`${config.cwd}\` under **${config.policy}**.`,
+          'If a run hits something only you can approve, it pauses and asks here.',
+          '`!help` for commands.',
+        ].join('\n')).catch(() => {});
+        greetStore.markGreeted(notifyChannel);
+      }
+
       unsubscribe = subscribe((channel, payload) => {
         const text = renderEvent(channel, payload);
         const target = lastChannel || notifyChannel;

@@ -16,7 +16,7 @@ const path = require('path');
 const net = require('net');
 
 const { createDiscordBridge } = require('../src/bridge/discord-client');
-const { ensureConfig, readConfig, validateConfig, configPath } = require('../src/bridge/discord-config');
+const { ensureConfig, readConfig, validateConfig, configPath, greetStore } = require('../src/bridge/discord-config');
 const daemon = require('../src/main/daemon');
 
 function userDataDir() {
@@ -79,6 +79,7 @@ async function main() {
   const bridge = createDiscordBridge({
     config,
     ask: (message, timeoutMs) => daemon.sendCommand(dir, message, timeoutMs),
+    greetStore: greetStore(dir),
     subscribe: subscribeOverSocket,
   });
   const { notifyChannel } = await bridge.start();

@@ -114,3 +114,34 @@ test('an empty tray says so rather than rendering nothing', () => {
   assert.match(text, /\[0\]/);
   assert.match(text, /mcp_gmail_send/);
 });
+
+// --- the bot has to speak first, once ---
+
+test('the greeting happens once per channel, not on every restart', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { greetStore } = require('../../src/bridge/discord-config');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-greet-'));
+  const store = greetStore(dir);
+  assert.equal(store.hasGreeted('chan-1'), false);
+  store.markGreeted('chan-1');
+  assert.equal(store.hasGreeted('chan-1'), true);
+  // Survives a restart, because it is on disk and not in memory.
+  assert.equal(greetStore(dir).hasGreeted('chan-1'), true);
+  // A different channel is a different conversation and needs its own hello.
+  assert.equal(store.hasGreeted('chan-2'), false);
+  assert.equal(store.hasGreeted(''), false);
+});
+
+test('the bridge introduces itself so the DM exists to click', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const client = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'bridge', 'discord-client.js'), 'utf8');
+  // Discord hides a DM channel until it holds a message, so a silently opened
+  // one leaves the bot unreachable — findable nowhere in the sidebar.
+  assert.match(client, /greetStore && !greetStore\.hasGreeted\(notifyChannel\)/);
+  assert.match(client, /greetStore\.markGreeted\(notifyChannel\)/);
+  assert.match(client, /\*\*Brittain Code\*\* is connected/);
+});
