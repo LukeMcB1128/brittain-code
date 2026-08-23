@@ -22,6 +22,20 @@
 const { authorize, parseCommand, chunk, renderPending, renderEvent, HELP } = require('./discord-protocol');
 
 const API = 'https://discord.com/api/v10';
+
+// Gateway close codes that no amount of retrying will fix. Reconnecting on
+// these hides the cause behind an endless loop, which is exactly what makes a
+// misconfigured bot look like a broken one — so they stop the bridge and say
+// what to change instead.
+const FATAL_CLOSE = {
+  4004: 'the bot token is wrong or has been reset — copy it again from the Developer Portal (Bot → Reset Token)',
+  4010: 'invalid shard',
+  4011: 'this bot is in too many servers to connect without sharding',
+  4012: 'invalid API version',
+  4013: 'the requested gateway intents are invalid',
+  4014: 'the Message Content intent is not enabled for this bot — Developer Portal → your app → Bot → '
+    + 'Privileged Gateway Intents → turn on MESSAGE CONTENT INTENT, then restart Brittain Code',
+};
 // GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
 const INTENTS = (1 << 9) | (1 << 12) | (1 << 15);
 
@@ -38,6 +52,10 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   // Discord refuses to open the channel — so this one number explains most of
   // the ways setup goes wrong, and is worth surfacing rather than inferring.
   let identity = { username: '', guilds: null };
+  // What the gateway is actually doing, as opposed to whether start() was
+  // called. "The bridge is running" and "Discord accepted us" are different
+  // facts and were being reported as one.
+  let gateway = { state: 'starting', lastError: '' };
 
   async function send(channelId, text) {
     if (!channelId) return;
@@ -201,6 +219,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
 
       if (frame.t === 'READY') {
         identity = { username: frame.d.user?.username || '', guilds: (frame.d.guilds || []).length };
+        gateway = { state: 'ready', lastError: '' };
         log.log?.(`Discord bridge logged in as ${identity.username}. Owners: ${(config.ownerIds || []).join(', ')}.`);
         if (identity.guilds === 0) {
           log.error?.('This bot is in no servers. Discord will not let you DM a bot you share no server with —');
@@ -236,11 +255,20 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       }
     });
 
-    socket.addEventListener('close', () => {
+    socket.addEventListener('close', (event) => {
       if (heartbeat) clearInterval(heartbeat);
       heartbeat = null;
       if (stopped) return;
-      log.log?.('Discord gateway closed; reconnecting in 5s.');
+
+      const explanation = FATAL_CLOSE[event?.code];
+      if (explanation) {
+        gateway = { state: 'failed', lastError: `Discord refused the connection (${event.code}): ${explanation}` };
+        log.error?.(gateway.lastError);
+        stopped = true; // retrying cannot help, and a loop would bury the reason
+        return;
+      }
+      gateway = { state: 'closed', lastError: event?.code ? `closed with code ${event.code}` : '' };
+      log.log?.(`Discord gateway closed${event?.code ? ` (${event.code})` : ''}; reconnecting in 5s.`);
       setTimeout(connect, 5_000);
     });
     socket.addEventListener('error', (error) => log.error?.('Discord gateway error:', error?.message || error));
@@ -270,7 +298,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       try { socket?.close(); } catch {}
     },
     notifyChannel: () => notifyChannel,
-    identity: () => ({ ...identity }),
+    identity: () => ({ ...identity, ...gateway }),
   };
 }
 

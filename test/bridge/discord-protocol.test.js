@@ -157,3 +157,18 @@ test('a bot in no servers says so, because it cannot be DMed at all', () => {
   // And the DM open is retried after login, when a shared server may exist.
   assert.match(client, /if \(!notifyChannel\) \{[\s\S]{0,200}?resolveNotifyChannel\(\)/);
 });
+
+test('a connection Discord refuses stops and explains, rather than looping', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const client = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'bridge', 'discord-client.js'), 'utf8');
+  // Retrying a disallowed intent or a bad token can never succeed, and the
+  // loop buries the one line that says what to fix.
+  assert.match(client, /const FATAL_CLOSE = \{/);
+  assert.match(client, /4014: 'the Message Content intent is not enabled/);
+  assert.match(client, /4004: 'the bot token is wrong/);
+  assert.match(client, /stopped = true; \/\/ retrying cannot help/);
+  // And the gateway's real state is reported separately from "did start() run".
+  assert.match(client, /gateway = \{ state: 'ready', lastError: '' \}/);
+  assert.match(client, /gateway = \{ state: 'failed'/);
+});

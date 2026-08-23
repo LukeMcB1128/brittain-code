@@ -2459,11 +2459,20 @@ async function handleSlash(raw) {
       const lines = ['DISCORD BRIDGE', ''];
       lines.push(`Config:  ${state.configPath}`);
       if (state.error) lines.push(`         (could not be read: ${state.error})`);
-      const status = state.running ? 'connected (this window)'
-        : !state.enabled ? 'disabled in discord.json'
-        : state.daemonOwns ? 'the daemon owns the connection — check its log, not this window'
-        : 'enabled, but nothing is running it yet (restart Brittain Code)';
+      // "The bridge is running" and "Discord accepted us" are different facts,
+      // and reporting them as one turned a rejected connection into a
+      // confident-looking "connected".
+      const gateway = state.identity?.state;
+      const status = !state.enabled ? 'disabled in discord.json'
+        : !state.running ? (state.daemonOwns
+          ? 'the daemon owns the connection — check its log, not this window'
+          : 'enabled, but nothing is running it yet (restart Brittain Code)')
+        : gateway === 'ready' ? 'connected'
+        : gateway === 'failed' ? 'REFUSED by Discord'
+        : gateway === 'closed' ? 'disconnected, retrying'
+        : 'connecting…';
       lines.push(`Status:  ${status}`);
+      if (state.identity?.lastError) lines.push(`         ${state.identity.lastError}`);
       if (state.missing?.length) lines.push(`Missing: ${state.missing.join(', ')}`);
       if (state.cwd) lines.push(`Runs in: ${state.cwd} under "${state.policy}"`);
       if (state.notifyChannel) lines.push(`Notifies: channel ${state.notifyChannel}`);
@@ -2477,8 +2486,11 @@ async function handleSlash(raw) {
           '  scopes: bot, permissions: Send Messages + Read Message History.',
           '  Open the generated URL and add it to any server you are in.');
       }
-      if (state.identity && state.identity.guilds === null) {
-        lines.push('', '(Connected but no READY yet — if this persists, the token is likely wrong.)');
+      // No READY means Discord never accepted the connection. The reason is on
+      // the close frame, which the bridge now reports rather than looping on.
+      if (state.running && state.identity && state.identity.guilds === null && gateway !== 'failed') {
+        lines.push('', 'Discord has not accepted the connection yet. If this does not clear in a few',
+          'seconds, the usual causes are the Message Content intent being off, or a stale token.');
       }
       lines.push('',
         'Message the bot a goal and it runs unattended; a parked call comes back to you',
