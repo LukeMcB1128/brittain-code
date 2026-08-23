@@ -61,7 +61,10 @@ test('the ledger is persisted at compaction and a failed write does not fail the
 
 test('session identity resets when the conversation is cleared or replaced', () => {
   const main = source('main.js');
-  assert.match(main, /ipcMain\.handle\('chat:reset', \(\) => \{\s*newSessionId\(\);/);
+  // Resetting also drops the stashed window session, so cleared messages are
+  // not waiting to be restored the next time something switches back to it.
+  assert.match(main, /ipcMain\.handle\('chat:reset', \(\) => \{[\s\S]{0,160}?newSessionId\(\);/);
+  assert.match(main, /ipcMain\.handle\('chat:reset'[\s\S]{0,160}?sessions\.forget\('window'\);/);
   assert.match(main, /ipcMain\.handle\('chat:load'[\s\S]{0,120}newSessionId\(\);/);
 });
 

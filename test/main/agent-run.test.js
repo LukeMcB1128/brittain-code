@@ -18,7 +18,10 @@ function agentHandler() {
 test('an agent run is callable without IPC, so a trigger can start one', () => {
   const main = read('main.js');
   assert.match(main, /async function runAgentTask\(payload = \{\}\) \{/);
-  assert.match(main, /ipcMain\.handle\('agent:run', async \(_e, payload = \{\}\) => runAgentTask\(payload\)\)/);
+  // The IPC handler is a thin wrapper, so the same function serves a trigger,
+  // the daemon and the Discord bridge. It tags the origin so the run lands in
+  // the window's conversation rather than one of its own.
+  assert.match(main, /ipcMain\.handle\('agent:run', async \(_e, payload = \{\}\) => runAgentTask\(\{ \.\.\.payload, origin: 'ui' \}\)\)/);
 });
 
 test('/agent is a single agent loop, not the mission pipeline', () => {

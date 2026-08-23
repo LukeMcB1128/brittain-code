@@ -1,0 +1,101 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const { createSessions, sessionKeyFor } = require('../../src/main/sessions');
+const read = (name) => fs.readFileSync(path.join(__dirname, '..', '..', name), 'utf8');
+
+// --- routing ---
+
+test('a run belongs to the window unless it says otherwise', () => {
+  // Anything that forgets to declare an origin must behave as it did before,
+  // not quietly acquire a conversation of its own.
+  assert.equal(sessionKeyFor({}), 'window');
+  assert.equal(sessionKeyFor(), 'window');
+  assert.equal(sessionKeyFor({ origin: 'ui', chatId: '17390' }), 'window');
+});
+
+test('each origin is its own conversation', () => {
+  assert.equal(sessionKeyFor({ origin: 'remote', chatId: 'discord-42' }), 'discord-42');
+  assert.equal(sessionKeyFor({ origin: 'trigger', chatId: 'trigger-nightly' }), 'trigger-nightly');
+  assert.equal(sessionKeyFor({ origin: 'heartbeat', chatId: 'heartbeat-/x/y' }), 'heartbeat-/x/y');
+  // Two channels are two conversations.
+  assert.notEqual(sessionKeyFor({ origin: 'remote', chatId: 'discord-1' }),
+                  sessionKeyFor({ origin: 'remote', chatId: 'discord-2' }));
+});
+
+test('an origin with no chat id still gets its own session', () => {
+  assert.equal(sessionKeyFor({ origin: 'remote' }), 'remote');
+  assert.equal(sessionKeyFor({ origin: 'remote', chatId: '  ' }), 'remote');
+});
+
+// --- swapping ---
+
+test('a conversation comes back exactly as it was left', () => {
+  const sessions = createSessions('window');
+  const windowState = { conversation: [{ role: 'user', content: 'in the app' }], sessionId: 's-win' };
+
+  const away = sessions.switchTo('discord-42', windowState);
+  assert.equal(away.changed, true);
+  assert.equal(away.state, null, 'a session entered for the first time starts empty');
+
+  const discordState = { conversation: [{ role: 'user', content: 'from discord' }], sessionId: 's-dis' };
+  const back = sessions.switchTo('window', discordState);
+  assert.equal(back.changed, true);
+  assert.deepEqual(back.state, windowState, 'the window gets its own messages back, not Discord\'s');
+
+  const again = sessions.switchTo('discord-42', windowState);
+  assert.deepEqual(again.state, discordState);
+});
+
+test('switching to the session already active does nothing', () => {
+  const sessions = createSessions('window');
+  const result = sessions.switchTo('window', { conversation: [{ role: 'user', content: 'x' }] });
+  assert.equal(result.changed, false);
+  assert.equal(result.state, null);
+  assert.deepEqual(sessions.known(), [], 'nothing was stashed, so nothing can be clobbered');
+});
+
+test('forget drops a session so a reset does not come back later', () => {
+  const sessions = createSessions('window');
+  sessions.switchTo('discord-42', { conversation: [{ role: 'user', content: 'old' }] });
+  sessions.switchTo('window', { conversation: [] });
+  assert.equal(sessions.forget('discord-42'), true);
+  assert.equal(sessions.switchTo('discord-42', { conversation: [] }).state, null);
+});
+
+// --- wiring ---
+
+test('every window entry point declares its session', () => {
+  const main = read('main.js');
+  // Without this a Discord run would leave its conversation active and the
+  // next thing typed in the app would land in it.
+  for (const handler of ['chat:send', 'chat:loop', 'chat:reset', 'chat:load', 'chat:compact', 'chat:plan', 'chat:orchestrate', 'chat:export']) {
+    const at = main.indexOf(`ipcMain.handle('${handler}'`);
+    assert.ok(at > 0, `${handler} should exist`);
+    assert.match(main.slice(at, at + 400), /enterSession\('window'\)/, `${handler} must declare its session`);
+  }
+  assert.match(main, /ipcMain\.handle\('chat:get', \(\) => \{ enterSession\('window'\); return conversation; \}\)/);
+});
+
+test('runs enter the session their origin names', () => {
+  const main = read('main.js');
+  assert.match(main, /enterSession\(sessionKeyFor\(payload\)\);/);
+  assert.match(main, /ipcMain\.handle\('agent:run', async \(_e, payload = \{\}\) => runAgentTask\(\{ \.\.\.payload, origin: 'ui' \}\)\)/);
+  assert.match(main, /run: \(payload\) => runAgentTask\(\{ \.\.\.payload, origin: payload\.origin \|\| 'remote' \}\)/);
+  assert.match(main, /origin: 'trigger',/);
+  assert.match(main, /origin: 'heartbeat',/);
+});
+
+test('a suspended run resumes into the session it was suspended from', () => {
+  const main = read('main.js');
+  assert.match(main, /sessionKey: activeSessionKey,/, 'the session is recorded with the parked call');
+  assert.match(main, /enterSession\(record\.sessionKey \|\| sessionKeyFor\(record\)\);/);
+});
+
+test('the online latch travels with the session, not the process', () => {
+  const main = read('main.js');
+  assert.match(main, /onlineResearch: sessionOnlineResearch \}/, 'stashed on the way out');
+  assert.match(main, /sessionOnlineResearch = !!state\?\.onlineResearch;/, 'restored on the way in');
+});

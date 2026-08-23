@@ -20,6 +20,7 @@ const { readActiveMission, writeActiveMission, interruptRunningMission } = requi
 const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore, safeChatId } = require('./src/main/history-store');
+const { createSessions, sessionKeyFor } = require('./src/main/sessions');
 const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
 const { enqueue: enqueueRun, dequeue: dequeueRun, peek: peekQueue } = require('./src/main/run-queue');
@@ -197,6 +198,29 @@ function recoverMission() {
 
 // ---------- conversation state (lives in main so tool messages stay in history) ----------
 let conversation = [];            // ollama-format messages, excluding system
+
+// Whose conversation `conversation` currently is. See src/main/sessions.js for
+// why runs are scoped this way; the registry holds the stashed sessions and
+// this function is what actually swaps the module state in and out.
+const sessions = createSessions('window');
+let activeSessionKey = 'window';
+
+function enterSession(key) {
+  const current = { conversation, sessionId, contextState, onlineResearch: sessionOnlineResearch };
+  const { changed, state } = sessions.switchTo(key, current);
+  if (!changed) return activeSessionKey;
+  activeSessionKey = sessions.active();
+  conversation = state?.conversation || [];
+  contextState = state?.contextState || normalizeContextState();
+  // The online latch belongs to the session, not the process: a Discord thread
+  // that never went online must not inherit the claim from a window session
+  // that did, and must not lose its own when the window takes over again.
+  sessionOnlineResearch = !!state?.onlineResearch;
+  // Last, and deliberately: newSessionId clears the latch, so a fresh session
+  // starts clean while a restored one keeps the claim set above.
+  sessionId = state?.sessionId || newSessionId();
+  return activeSessionKey;
+}
 let contextState = normalizeContextState();
 let currentAbort = null;          // AbortController for the in-flight run
 let stopRequested = false;
@@ -394,7 +418,7 @@ function tapRunEvents() {
 function commandHandlers() {
   return {
     ping: () => ({ ok: true, pid: process.pid, startedAt: daemonStartedAt }),
-    run: (payload) => runAgentTask(payload),
+    run: (payload) => runAgentTask({ ...payload, origin: payload.origin || 'remote' }),
     status: () => ({ ok: true, mission: activeMission, queued: peekQueue(settingsUserDataDir).map((entry) => entry.goal) }),
     // The park loop, served remotely. This is what lets an approval travel: a
     // run parks here, the decision is made from wherever the person is, and
@@ -1667,6 +1691,7 @@ function contentWithAttachments(text, attachments) {
 }
 
 ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, think, images, imageTypes, imageAttachments, files, subModel, onlineResearch, autoBranch }) => {
+  enterSession('window');
   const runMode = mode === 'chat' ? 'chat' : 'code';
   rememberLastModel(model);
   noteOnlineResearch(onlineResearch);
@@ -2725,6 +2750,7 @@ async function runCoderGoalLoop({ model, coderModel, subModel, goal, cwd, autoAp
 }
 
 ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove, think, onlineResearch, maxIterations, autoBranch }) => {
+  enterSession('window');
   if (!model) return { ok: false, error: 'Select a model first.' };
   if (!goal?.trim()) return { ok: false, error: 'A loop goal is required.' };
   if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
@@ -3128,6 +3154,10 @@ async function runAgentTask(payload = {}) {
   });
   if (!preconditions.ok) return { ok: false, error: preconditions.error };
 
+  // Each origin keeps its own history: a Discord thread, a trigger and the
+  // window are different conversations that happen to share a process.
+  enterSession(sessionKeyFor(payload));
+
   const previousPolicy = runtimeSettings.autonomyPolicy;
   runtimeSettings = { ...runtimeSettings, autonomyPolicy: policyId };
   // A resume continues the suspended run's identity: same id, same transcript,
@@ -3227,6 +3257,8 @@ async function runAgentTask(payload = {}) {
         pendingStore.save(settingsUserDataDir, {
           runId: finished.id,
           goal, cwd, model,
+          sessionKey: activeSessionKey,
+          origin: payload.origin || '',
           subModel: payload.subModel || 'qwen3:8b',
           think: !!payload.think,
           onlineResearch: !!payload.onlineResearch,
@@ -3293,7 +3325,7 @@ async function runAgentTask(payload = {}) {
   return { ok: true, status, content: finalContent, ...summary };
 }
 
-ipcMain.handle('agent:run', async (_e, payload = {}) => runAgentTask(payload));
+ipcMain.handle('agent:run', async (_e, payload = {}) => runAgentTask({ ...payload, origin: 'ui' }));
 
 // ---------- suspended runs (parked calls) ----------
 // Approval resumes a suspended run from exactly where it stopped: the frozen
@@ -3312,6 +3344,7 @@ async function resumeSuspendedRun(runId) {
     return { ok: false, error: `Suspended run "${runId}" aged out before anyone decided — a decision nobody made in six hours is a decision not to.` };
   }
 
+  enterSession(record.sessionKey || sessionKeyFor(record));
   conversation = Array.isArray(record.conversation) ? record.conversation : [];
   for (const entry of record.parked || []) {
     if (!(entry.messageIndex >= 0 && entry.messageIndex < conversation.length)) continue;
@@ -3401,6 +3434,7 @@ function triggerToRequest(trigger) {
     subModel: trigger.subModel || runtimeSettings.scoutModel || 'qwen3:8b',
     onlineResearch: false,
     think: false,
+    origin: 'trigger',
     chatId: `trigger-${trigger.id}`,
     maxAgeMs: trigger.maxAgeMs,
   };
@@ -3457,6 +3491,7 @@ async function fireHeartbeat(trigger, now) {
       onlineResearch: false,
       think: false,
       heartbeat: { cwd },
+      origin: 'heartbeat',
       chatId: `heartbeat-${cwd}`,
     });
   } catch (err) {
@@ -3657,6 +3692,7 @@ ipcMain.handle('mission:resume', async (_e, { cwd, chatId, autoApprove, think, o
 });
 
 ipcMain.handle('chat:plan', async (_e, { model, subModel, goal, cwd, think, onlineResearch }) => {
+  enterSession('window');
   if (!model) return { ok: false, error: 'Select a planner model first.' };
   if (!goal?.trim()) return { ok: false, error: 'A planning goal is required.' };
   if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
@@ -3756,6 +3792,7 @@ ipcMain.handle('chat:reviewFix', async (_e, { coderModel, cwd, findings, autoApp
 });
 
 ipcMain.handle('chat:orchestrate', async (_e, { model, coderModel, subModel, goal, cwd, autoApprove, think, onlineResearch, plan: approvedPlan }) => {
+  enterSession('window');
   if (!model) return { ok: false, error: 'Select an orchestrator model first.' };
   if (!coderModel) return { ok: false, error: 'Select a coder model with /coder <name> first.' };
   if (!goal?.trim()) return { ok: false, error: 'An orchestration goal is required.' };
@@ -3911,6 +3948,8 @@ ipcMain.on('chat:stop', () => {
 });
 
 ipcMain.handle('chat:reset', () => {
+  enterSession('window');
+  sessions.forget('window');
   newSessionId();
   conversation = [];
   contextState = normalizeContextState();
@@ -4143,7 +4182,8 @@ ipcMain.handle('settings:save', (_e, value) => {
 
 // chat history support: the renderer saves/loads conversations, but the live
 // array lives here — these let it read the current one and swap in a stored one.
-ipcMain.handle('chat:get', () => conversation);
+// The window's conversation, never whichever session ran most recently.
+ipcMain.handle('chat:get', () => { enterSession('window'); return conversation; });
 
 ipcMain.handle('context:state', () => ({ ok: true, state: normalizeContextState(contextState) }));
 
@@ -4162,6 +4202,7 @@ ipcMain.handle('context:control', (_e, payload = {}) => {
 });
 
 ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextState, view = {}) => {
+  enterSession('window');
   newSessionId();
   conversation = Array.isArray(msgs) ? msgs : [];
   contextState = normalizeContextState(savedContextState);
@@ -4649,6 +4690,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
 }
 
 ipcMain.handle('chat:compact', async (_e, { model }) => {
+  enterSession('window');
   stopRequested = false;
   currentAbort = new AbortController();
   try {
@@ -4663,6 +4705,7 @@ ipcMain.handle('chat:compact', async (_e, { model }) => {
 
 // ---------- chat export ----------
 ipcMain.handle('chat:export', async () => {
+  enterSession('window');
   if (!conversation.length) return { ok: false, error: 'Nothing to export.' };
   const parts = [];
   for (const m of conversation) {
