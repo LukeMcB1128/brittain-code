@@ -251,3 +251,41 @@ test('a silent run is only called silent when it truly said nothing', () => {
 test('failures are reported whether or not the model spoke', () => {
   assert.match(renderResult({ ok: true, status: 'failed', error: 'ollama died', content: '' }, true), /Failed.*ollama died/s);
 });
+
+// --- compaction and degradation ---
+
+test('a successful compaction is invisible, because nothing was lost', () => {
+  assert.equal(renderEvent('stream:info', 'Context past 70% — auto-compacting…'), '');
+  assert.equal(renderEvent('stream:info', 'Compacted: summarized 40 messages, kept 12 verbatim'), '');
+  assert.equal(renderEvent('stream:info', 'Context is ~92% full before sending — auto-compacting first…'), '');
+  assert.equal(renderEvent('stream:state', 'compacting'), '');
+});
+
+test('a failed compaction is not invisible, because the run gets worse', () => {
+  // Silent, this is experienced as the bot quietly degrading for no reason.
+  const text = renderEvent('stream:info', 'Auto-compact failed (summary too thin) — continuing.');
+  assert.match(text, /could not summarise/);
+  assert.match(text, /answers may get worse/);
+  assert.match(text, /!stop/, 'it should say what to do about it');
+});
+
+test('a turn that stops mid-task says so, in words that mean something', () => {
+  // These are phrased for a console: "Detected again after recovery" names
+  // neither what was detected nor what it means for the person waiting.
+  for (const [line, expected] of [
+    ['Recovery compact failed (context too small) — stopping this turn.', /stopped here rather than continue badly/],
+    ['Detected again after recovery — stopping this turn. Consider switching models or starting a new session.', /started repeating myself/],
+    ['Model produced no output after 2 nudges — giving up on this turn. Send a message to continue.', /went quiet and would not continue/],
+  ]) {
+    const text = renderEvent('stream:info', line);
+    assert.match(text, expected);
+    assert.ok(!text.includes('this turn'), 'console phrasing should not leak into chat');
+  }
+});
+
+test('a nudge that is still trying stays quiet', () => {
+  // Recovery in progress is progress, not an interruption.
+  assert.equal(renderEvent('stream:info', 'Model stopped without output or a tool call — nudging it to continue (1/2)…'), '');
+  assert.equal(renderEvent('stream:info', 'Injected a commit-and-act directive (1/2) and retrying.'), '');
+  assert.equal(renderEvent('stream:info', 'Context compacted (kept 12 turns) — retrying this turn once.'), '');
+});

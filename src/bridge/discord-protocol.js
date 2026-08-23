@@ -112,12 +112,37 @@ function renderPending(records) {
 const RELAYED = new Set(['run:decisions', 'stream:message']);
 
 // Info lines worth breaking silence for. Everything else is bookkeeping.
+//
+// The test is not "is this interesting" but "does the person need to know".
+// A successful compaction is housekeeping — nothing was lost that they can act
+// on. A failed one is not: the run either carries on with a context it could
+// not trim, or stops mid-task. Left silent, both are experienced as the bot
+// quietly getting worse, or ending early, for no stated reason.
+//
+// Some of these are phrased for a console and mean nothing in a chat, so they
+// are rewritten rather than passed through.
 const NOTEWORTHY = [
-  /^Agent run failed:/i,
-  /^Deferred /,
-  /could not be read/i,
-  /^Trigger "/,
-  /^Heartbeat for /,
+  { match: /^Agent run failed:/i },
+  { match: /^Deferred / },
+  { match: /could not be read/i },
+  { match: /^Trigger "/ },
+  { match: /^Heartbeat for / },
+  {
+    match: /^Auto-compact failed/,
+    as: () => '⚠️ I could not summarise the earlier conversation to make room. Carrying on, but my answers may get worse — `!stop` and start fresh if they do.',
+  },
+  {
+    match: /^Recovery compact failed/,
+    as: () => '⚠️ I got stuck and could not reset myself, so I stopped here rather than continue badly.',
+  },
+  {
+    match: /^Detected again after recovery/,
+    as: () => '⚠️ I started repeating myself and could not shake it, so I stopped. Worth trying a different model, or starting a new conversation.',
+  },
+  {
+    match: /^Model produced no output after/,
+    as: () => '⚠️ The model went quiet and would not continue. Nothing more will happen on this one — send it again, or try a different model.',
+  },
 ];
 
 function renderEvent(channel, payload) {
@@ -127,7 +152,9 @@ function renderEvent(channel, payload) {
   if (channel === 'stream:message') return String(payload || '').trim();
   if (channel === 'stream:info') {
     const text = String(payload || '');
-    return NOTEWORTHY.some((pattern) => pattern.test(text)) ? text : '';
+    const rule = NOTEWORTHY.find((entry) => entry.match.test(text));
+    if (!rule) return '';
+    return rule.as ? rule.as(text) : text;
   }
   if (!RELAYED.has(channel)) return '';
   const parked = (payload?.parked || []).filter((entry) => !entry.decision);
