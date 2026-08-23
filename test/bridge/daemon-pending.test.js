@@ -50,3 +50,14 @@ test('the shipped config is inert until the user fills it in', () => {
   assert.match(bridge, /ownerIds: \[\]/);
   assert.match(bridge, /if \(!config\.enabled\) missing\.push/);
 });
+
+test('the bridge can reach you without being spoken to first', () => {
+  // The notifications that matter most are the unprompted ones — a run parking
+  // overnight. Waiting for the user to message first would drop exactly those.
+  const bridge = read('scripts/discord-bridge.js');
+  assert.match(bridge, /async function resolveNotifyChannel\(config\)/);
+  assert.match(bridge, /notifyChannelId/);
+  assert.match(bridge, /recipient_id: owner/, 'it opens a DM with the owner when no channel is configured');
+  assert.match(bridge, /attach\(config, \(\) => lastChannel \|\| notifyChannel\)/);
+  assert.match(bridge, /const notifyChannel = await resolveNotifyChannel\(config\);/);
+});

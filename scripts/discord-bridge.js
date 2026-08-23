@@ -48,6 +48,10 @@ const CONFIG_TEMPLATE = {
   ownerIds: [],
   // Empty means DMs with an owner only. Naming channels opts into a guild.
   channelIds: [],
+  // Where unprompted messages go — a run parking at 3am, a heartbeat's result.
+  // Left empty, the bridge opens a DM with the first owner and uses that, so
+  // it always has somewhere to reach you without being spoken to first.
+  notifyChannelId: '',
   // Where runs happen, and how much they may do without asking.
   cwd: '',
   policy: 'guarded',
@@ -90,6 +94,29 @@ async function send(config, channelId, text) {
     }
     if (!res.ok) console.error('Discord send failed:', res.status, await res.text());
   }
+}
+
+// A bot cannot message someone out of the blue without a channel to do it in,
+// and the interesting notifications are exactly the unprompted ones — a run
+// parking overnight. So resolve one at startup rather than waiting to be
+// spoken to: an explicit channel if configured, otherwise a DM with the first
+// owner. Opening a DM requires the bot and the owner to share a server, which
+// is why setup asks you to invite it to one.
+async function resolveNotifyChannel(config) {
+  if (config.notifyChannelId) return String(config.notifyChannelId);
+  const owner = String((config.ownerIds || [])[0] || '');
+  if (!owner) return '';
+  const res = await fetch(`${API}/users/@me/channels`, {
+    method: 'POST',
+    headers: { Authorization: `Bot ${config.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recipient_id: owner }),
+  });
+  if (!res.ok) {
+    console.error(`Could not open a DM with owner ${owner} (${res.status}). Unprompted notifications will go to the last channel you used.`);
+    console.error('A bot can only DM someone it shares a server with — invite it to one, or set notifyChannelId.');
+    return '';
+  }
+  return String((await res.json()).id || '');
 }
 
 // ---------- the daemon side ----------
@@ -202,9 +229,12 @@ async function handle(config, message, channelId) {
 
 // ---------- gateway ----------
 
-function connect(config) {
-  let lastChannel = '';
-  attach(config, () => lastChannel);
+function connect(config, notifyChannel) {
+  // Replies land where you spoke; unprompted messages fall back to the
+  // notification channel, so a run that parks while you are asleep still
+  // reaches you.
+  let lastChannel = notifyChannel || '';
+  attach(config, () => lastChannel || notifyChannel);
 
   let sequence = null;
   let heartbeat = null;
@@ -270,7 +300,9 @@ async function main() {
     process.exit(1);
   }
   console.log(`Daemon alive at ${daemon.socketPath(dir)}. Connecting to Discord…`);
-  connect(config);
+  const notifyChannel = await resolveNotifyChannel(config);
+  if (notifyChannel) console.log(`Unprompted notifications go to channel ${notifyChannel}.`);
+  connect(config, notifyChannel);
 }
 
 main();
