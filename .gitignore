@@ -8,6 +8,14 @@ RESEARCH_LOG.md
 results.json
 report.html
 .playwright-mcp/
+# Screenshots and other artefacts an MCP server drops in the repo root. Servers
+# now run in their own directory under the app's data folder, so this is a
+# second line of defence rather than the fix. Scoped to the root so build/ and
+# renderer/ assets are unaffected.
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp
 benchmark/fixtures/
 benchmark/runs/
 RELEASE_NOTES-1.4.1.md

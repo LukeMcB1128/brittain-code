@@ -2301,8 +2301,12 @@ async function handleSlash(raw) {
       const st = await window.api.mcpStatus();
       if (!arg) {
         if (!st.servers.length) return addInfo('No MCP servers configured.\nAdd them to ' + st.configPath + ' (same format as Claude Desktop) and restart the app.');
-        const lines = st.servers.map((sv) =>
-          `${sv.enabled ? '●' : '○'} ${sv.name} — ${sv.status}, ${sv.tools} tool${sv.tools === 1 ? '' : 's'}${sv.error ? ' — ' + sv.error : ''}`);
+        const lines = st.servers.flatMap((sv) => {
+          const row = `${sv.enabled ? '●' : '○'} ${sv.name} — ${sv.status}, ${sv.tools} tool${sv.tools === 1 ? '' : 's'}${sv.error ? ' — ' + sv.error : ''}`;
+          // Where a server writes anything it saves. Worth showing: a screenshot
+          // the model took is only useful if you can find it.
+          return sv.workingDirectory ? [row, `    files: ${sv.workingDirectory}`] : [row];
+        });
         return addInfo('MCP servers (● enabled / ○ disabled):\n' + lines.join('\n') + '\nMCP calls require approval unless "Auto-approve all MCP tool calls" is enabled in Settings.\nConfig: ' + st.configPath);
       }
       const m = arg.match(/^(on|off)\s+(.+)$/);

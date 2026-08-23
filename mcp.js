@@ -10,6 +10,7 @@
 // untrusted by default, regardless of AUTO-APPROVE.
 
 const { spawn } = require('child_process');
+const os = require('os');
 const mcpTrust = require('./src/main/mcp-trust');
 const fs = require('fs');
 const path = require('path');
@@ -23,10 +24,30 @@ function sanitizeName(s) {
   return String(s).replace(/[^a-zA-Z0-9_]/g, '_');
 }
 
+// Where a server's files land.
+//
+// An MCP server is a child process, and a child with no cwd inherits the app's
+// — which in development is this repository and in a packaged build is wherever
+// the bundle sits. Servers that write files (Playwright saving screenshots is
+// the obvious one) therefore scatter them through the source tree or the app
+// directory, named by whatever the model felt like calling them.
+//
+// Each server gets its own directory under the application data folder instead,
+// created on demand. A server that genuinely needs to run somewhere specific
+// can say so with "cwd" in mcp.json.
+function serverWorkingDirectory(userDataDir, name, config) {
+  if (config?.cwd) return String(config.cwd);
+  const target = path.join(userDataDir || os.tmpdir(), 'mcp', sanitizeName(name));
+  try { fs.mkdirSync(target, { recursive: true }); } catch {}
+  return target;
+}
+
 class McpServer {
-  constructor(name, config) {
+  constructor(name, config, userDataDir = '') {
     this.name = name;
     this.config = config;
+    this.userDataDir = userDataDir;
+    this.workingDirectory = serverWorkingDirectory(userDataDir, name, config);
     this.proc = null;
     this.nextId = 1;
     this.pending = new Map(); // id -> { resolve, reject, timer }
@@ -86,6 +107,7 @@ class McpServer {
     this.status = 'starting';
     try {
       this.proc = spawn(this.config.command, this.config.args || [], {
+        cwd: this.workingDirectory,
         env: { ...process.env, ...(this.config.env || {}) },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -168,7 +190,7 @@ class McpManager {
     const entries = Object.entries(this.loadConfig(userDataDir));
     const results = [];
     for (const [name, config] of entries) {
-      const server = new McpServer(name, config);
+      const server = new McpServer(name, config, userDataDir);
       this.servers.set(name, server);
       this.enabled.add(name);
       try {
@@ -257,6 +279,7 @@ class McpManager {
       status: s.status,
       tools: s.tools.length,
       enabled: this.enabled.has(name),
+      workingDirectory: s.workingDirectory || '',
       error: s.lastError || undefined,
     }));
   }
