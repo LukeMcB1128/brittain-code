@@ -4244,9 +4244,14 @@ ipcMain.handle('autonomy:promote', (_e, { policyId, toolName }) => {
 ipcMain.handle('mcp:trustAccept', (_e, serverName) => mcp.affirmTrust(String(serverName || '')));
 
 // ---------- discord bridge ----------
-ipcMain.handle('discord:state', () => {
+ipcMain.handle('discord:state', async () => {
   const { config, error } = readDiscordConfig(settingsUserDataDir);
+  // Whether a daemon is alive decides which process owns the connection, so
+  // "not running here" and "nothing is running it" are different answers and
+  // the window cannot tell them apart without asking.
+  const daemonOwns = await daemon.daemonAlive(settingsUserDataDir);
   return {
+    daemonOwns,
     ok: true,
     configPath: discordConfigPath(settingsUserDataDir),
     error,

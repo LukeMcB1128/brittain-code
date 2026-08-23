@@ -2459,7 +2459,11 @@ async function handleSlash(raw) {
       const lines = ['DISCORD BRIDGE', ''];
       lines.push(`Config:  ${state.configPath}`);
       if (state.error) lines.push(`         (could not be read: ${state.error})`);
-      lines.push(`Status:  ${state.running ? 'connected' : state.enabled ? 'enabled but not running in this process' : 'disabled'}`);
+      const status = state.running ? 'connected (this window)'
+        : !state.enabled ? 'disabled in discord.json'
+        : state.daemonOwns ? 'the daemon owns the connection — check its log, not this window'
+        : 'enabled, but nothing is running it yet (restart Brittain Code)';
+      lines.push(`Status:  ${status}`);
       if (state.missing?.length) lines.push(`Missing: ${state.missing.join(', ')}`);
       if (state.cwd) lines.push(`Runs in: ${state.cwd} under "${state.policy}"`);
       if (state.notifyChannel) lines.push(`Notifies: channel ${state.notifyChannel}`);
