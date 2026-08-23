@@ -1417,6 +1417,13 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
       exhaustedWithToolCalls = toolCalls.length > 0;
       conversation.push(assistantMsg);
+      // One event per completed assistant message, carrying the model's own
+      // words and nothing else. The window renders prose from the token stream,
+      // which is far too chatty to relay anywhere else; a client with no screen
+      // wants whole thoughts, in order, as they happen. Without this, a run that
+      // narrated its way through six steps arrived somewhere else as only its
+      // last paragraph.
+      if (content && content.trim()) sink.emit('stream:message', content.trim());
       if (content) lastContent = content;
       if (stats) lastStats = stats;
 

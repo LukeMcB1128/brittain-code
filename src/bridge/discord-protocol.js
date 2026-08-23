@@ -108,8 +108,8 @@ function renderPending(records) {
 // paragraphs they cannot act on. The answer itself arrives separately, when
 // the run returns it.
 //
-// So: relay interruptions, not progress.
-const RELAYED = new Set(['run:decisions']);
+// So: relay the model's own words and any interruption — never the machinery.
+const RELAYED = new Set(['run:decisions', 'stream:message']);
 
 // Info lines worth breaking silence for. Everything else is bookkeeping.
 const NOTEWORTHY = [
@@ -121,6 +121,10 @@ const NOTEWORTHY = [
 ];
 
 function renderEvent(channel, payload) {
+  // What the model actually said, as it says it. A long run narrates its way
+  // through several steps, and relaying only the last paragraph made a working
+  // agent look like a silent one.
+  if (channel === 'stream:message') return String(payload || '').trim();
   if (channel === 'stream:info') {
     const text = String(payload || '');
     return NOTEWORTHY.some((pattern) => pattern.test(text)) ? text : '';
@@ -171,18 +175,21 @@ function parseAnswer(reply, questions = []) {
 // The end of a run, as a person would want it: the answer first, then one line
 // of what it did. A run that changed nothing and said nothing still says so,
 // because silence is indistinguishable from a bridge that broke.
-function renderResult(result) {
+// `streamed` is whether the model's closing message already went out live. It
+// almost always has, now that whole messages are relayed as they happen — so
+// repeating it here would post everything twice.
+function renderResult(result, streamed = false) {
   if (!result?.ok) return `⚠️ ${result?.error || 'the run could not start'}`;
   if (result.queued) return `Busy — queued (${result.depth} waiting).`;
   if (result.status === 'suspended') return '';
 
   const parts = [];
-  const answer = String(result.content || '').trim();
+  const answer = streamed ? '' : String(result.content || '').trim();
   if (result.status === 'failed') parts.push(`⚠️ **Failed** — ${result.error || 'see the run report'}`);
   else if (result.status === 'stopped') parts.push('⏹️ Stopped.');
 
   if (answer) parts.push(answer);
-  else if (result.status === 'completed') parts.push('Done — the run finished without a closing message.');
+  else if (!streamed && result.status === 'completed') parts.push('Done — the run finished without a closing message.');
 
   const did = [];
   if (result.changed) did.push(`${result.changed} file${result.changed === 1 ? '' : 's'} changed`);

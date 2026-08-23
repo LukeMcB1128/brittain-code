@@ -60,6 +60,10 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   // owner answers it rather than starting a new run — which is what makes a
   // clarifying question feel like a conversation instead of a dead end.
   let awaitingQuestion = null;
+  // Whether the model has spoken during the current run. Its closing words go
+  // out live like everything else it says, so the end-of-run message must not
+  // repeat them.
+  let streamedThisRun = false;
 
   async function send(channelId, text) {
     if (!channelId) return;
@@ -165,6 +169,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
         // say. The alternative — narrating every step — turns a chat into a
         // console log nobody reads.
         await send(channelId, '🤖 On it…');
+        streamedThisRun = false;
         const res = await ask({
           cmd: 'run',
           payload: {
@@ -177,7 +182,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
         }, 0);
         // A suspension has already said what it is waiting on, so renderResult
         // returns nothing for it rather than repeating itself.
-        return send(channelId, renderResult(res));
+        return send(channelId, renderResult(res, streamedThisRun));
       }
       default: return;
     }
@@ -310,7 +315,9 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
           return;
         }
         const text = renderEvent(channel, payload);
-        if (text) send(target, text).catch(() => {});
+        if (!text) return;
+        if (channel === 'stream:message') streamedThisRun = true;
+        send(target, text).catch(() => {});
       });
       connect();
       return { notifyChannel };

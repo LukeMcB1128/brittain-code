@@ -215,3 +215,39 @@ test('a connection Discord refuses stops and explains, rather than looping', () 
   assert.match(client, /gateway = \{ state: 'ready', lastError: '' \}/);
   assert.match(client, /gateway = \{ state: 'failed'/);
 });
+
+// --- speaking as it works ---
+
+test('the model\'s own words go out as it says them', () => {
+  // A long run narrates its way through several steps. Relaying only the last
+  // paragraph made a working agent look like a silent one.
+  assert.equal(renderEvent('stream:message', '  Updated memory.md with two notes.  '),
+    'Updated memory.md with two notes.');
+  assert.equal(renderEvent('stream:message', '   '), '');
+});
+
+test('the machinery still stays out of it', () => {
+  // Relaying prose must not become an excuse to relay everything.
+  assert.equal(renderEvent('stream:token', 'Upd'), '');
+  assert.equal(renderEvent('stream:cleancontent', 'recovered text'), '');
+  assert.equal(renderEvent('stream:toolcall', { name: 'read_file' }), '');
+  assert.equal(renderEvent('stream:info', 'Agent run run-1 starting. Transcript: /x/y.log'), '');
+});
+
+test('a closing message already sent live is not repeated at the end', () => {
+  const result = { ok: true, status: 'completed', content: 'The repo has three files.', changed: 0, commands: 1 };
+  assert.match(renderResult(result, false), /three files/);
+  const afterStreaming = renderResult(result, true);
+  assert.ok(!afterStreaming.includes('three files'), 'the answer went out already');
+  assert.match(afterStreaming, /1 command/, 'the footer is still worth having');
+});
+
+test('a silent run is only called silent when it truly said nothing', () => {
+  assert.match(renderResult({ ok: true, status: 'completed', content: '' }, false), /without a closing message/);
+  // It spoke during the run and simply had no epilogue — that is not silence.
+  assert.ok(!renderResult({ ok: true, status: 'completed', content: '' }, true).includes('without a closing message'));
+});
+
+test('failures are reported whether or not the model spoke', () => {
+  assert.match(renderResult({ ok: true, status: 'failed', error: 'ollama died', content: '' }, true), /Failed.*ollama died/s);
+});

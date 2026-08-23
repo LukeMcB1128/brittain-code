@@ -44,3 +44,15 @@ test('a run that still says nothing does not come back blank', () => {
   assert.match(text, /finished without a closing message/);
   assert.match(text, /2 files changed/);
 });
+
+test('each completed assistant message is emitted as one event', () => {
+  const main = read('main.js');
+  // The window renders prose from the token stream, which is far too chatty to
+  // relay; a client with no screen wants whole thoughts, in order.
+  assert.match(main, /if \(content && content\.trim\(\)\) sink\.emit\('stream:message', content\.trim\(\)\);/);
+  assert.match(read('src/main/run-sink.js'), /'stream:message',/);
+  // Emitted before lastContent is updated, so the ordering of what a listener
+  // sees matches the order the model produced it.
+  const at = main.indexOf("sink.emit('stream:message'");
+  assert.ok(at > 0 && at < main.indexOf('if (content) lastContent = content;'));
+});

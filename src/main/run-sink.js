@@ -23,6 +23,9 @@ const RUN_CHANNELS = new Set([
   'stream:token',
   'stream:thinking',
   'stream:cleancontent',
+  // A completed assistant message. Distinct from the token stream: whole
+  // thoughts, for a listener that cannot render tokens.
+  'stream:message',
   'stream:toolcall',
   'stream:toolresult',
   'stream:subagent',
@@ -44,6 +47,7 @@ const TRANSCRIPT_CHANNELS = new Map([
   ['stream:toolcall', (payload) => `→ ${payload?.name || 'tool'}${summarizeArgs(payload?.args)}`],
   ['stream:toolresult', (payload) => `← ${payload?.name || 'tool'}: ${firstLine(payload?.result)}${payload?.denied ? ' (denied)' : ''}`],
   ['stream:subagent', (payload) => `· subagent: ${firstLine(payload?.text ?? payload)}`],
+  ['stream:message', (payload) => `\n${String(payload ?? '')}\n`],
   ['run:report', (payload) => `\n${String(payload?.report ?? payload ?? '')}`],
 ]);
 
