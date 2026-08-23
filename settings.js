@@ -14,6 +14,11 @@ const DEFAULT_SETTINGS = Object.freeze({
   defaultMode: 'last',
   codeModel: '',
   chatModel: '',
+  // The model last run from the UI. Not a preference anyone edits — it exists
+  // so callers with no window (the daemon, a trigger, the Discord bridge) can
+  // inherit whatever is selected in the app instead of failing with "select a
+  // model first" while a model is plainly selected.
+  lastModel: '',
   coderModel: '',
   scoutModel: '',
   codeThink: false,
@@ -79,6 +84,7 @@ function normalizeSettings(input = {}) {
     chatTemperature: clampNumber(merged.chatTemperature, DEFAULT_SETTINGS.chatTemperature, 0, 1.5),
     defaultMode: ['last', 'code', 'chat'].includes(merged.defaultMode) ? merged.defaultMode : DEFAULT_SETTINGS.defaultMode,
     codeModel: cleanText(merged.codeModel, 200),
+    lastModel: cleanText(merged.lastModel, 200),
     chatModel: cleanText(merged.chatModel, 200),
     coderModel: cleanText(merged.coderModel, 200),
     scoutModel: cleanText(merged.scoutModel, 200),

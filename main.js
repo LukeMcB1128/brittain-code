@@ -1630,6 +1630,7 @@ function contentWithAttachments(text, attachments) {
 
 ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, think, images, imageTypes, imageAttachments, files, subModel, onlineResearch, autoBranch }) => {
   const runMode = mode === 'chat' ? 'chat' : 'code';
+  rememberLastModel(model);
   if (runMode === 'code' && !cwd) return { ok: false, error: 'Pick a working directory first.' };
   if ((images?.length || 0) + (files?.length || 0) > MAX_ATTACHMENT_FILES) {
     return { ok: false, error: `Attach at most ${MAX_ATTACHMENT_FILES} files at once.` };
@@ -3001,6 +3002,16 @@ function normalizePolicyRoots(policy) {
   return { roots, rejectedRoots };
 }
 
+// Persist the model the UI just used, so a later run started from somewhere
+// without a window inherits it. Written only on change: this is on the path of
+// every message, and rewriting settings each time would be silly.
+function rememberLastModel(model) {
+  const name = String(model || '').trim();
+  if (!name || name === runtimeSettings.lastModel) return;
+  runtimeSettings = { ...runtimeSettings, lastModel: name };
+  try { saveSettings(settingsUserDataDir, runtimeSettings); } catch {}
+}
+
 // Projects already told about the workspace this session. A hint is worth
 // saying once; saying it after every unattended run is nagging.
 const workspaceHintShown = new Set();
@@ -3026,8 +3037,14 @@ async function runAgentTask(payload = {}) {
 
   const cwd = payload.cwd;
   if (!cwd) return { ok: false, error: 'Pick a working directory first.' };
-  const model = payload.model;
-  if (!model) return { ok: false, error: 'Select a model first.' };
+  // A caller with no window cannot know what the dropdown says, so fall back to
+  // the configured default and then to whatever was last run. Without this a
+  // Discord message failed with "select a model first" while a model was
+  // plainly selected in the app.
+  const model = payload.model || runtimeSettings.codeModel || runtimeSettings.lastModel;
+  if (!model) {
+    return { ok: false, error: 'No model to run with. Send one message from the app first, set a default in Settings, or put "model" in discord.json.' };
+  }
   const goal = String(payload.goal || '').trim();
   if (!goal) return { ok: false, error: 'An agent goal is required.' };
 
