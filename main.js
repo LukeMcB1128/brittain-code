@@ -19,7 +19,7 @@ const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessa
 const { readActiveMission, writeActiveMission, interruptRunningMission } = require('./missions');
 const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
-const { createHistoryStore } = require('./src/main/history-store');
+const { createHistoryStore, safeChatId } = require('./src/main/history-store');
 const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
 const { enqueue: enqueueRun, dequeue: dequeueRun, peek: peekQueue } = require('./src/main/run-queue');
@@ -3051,6 +3051,37 @@ function rememberLastModel(model) {
   try { saveSettings(settingsUserDataDir, runtimeSettings); } catch {}
 }
 
+// Persist a run's conversation under the chat it belongs to.
+//
+// Saving a chat was entirely the renderer's job, which is fine while every run
+// starts from a window and wrong the moment one does not: a run driven from
+// Discord pushed its messages into the conversation, streamed them to whatever
+// window happened to be open, and then lost them, because nothing on that path
+// ever writes to disk. It looked like history was deleting Discord messages;
+// it had simply never stored them.
+//
+// The title of an existing chat is left alone — a follow-up should not rename
+// the conversation it continues.
+async function persistRunHistory(chatId, { goal, cwd, model, onlineResearch }) {
+  const id = String(chatId || '').trim();
+  if (!id || !conversation.length) return;
+  try {
+    const existing = historyStore.list().find((entry) => safeChatId(entry.id) === safeChatId(id));
+    const summary = String(goal || '').replace(/\s+/g, ' ').trim();
+    await historyStore.save({
+      id,
+      title: existing?.title || (summary.length > 60 ? summary.slice(0, 60) + '…' : summary) || 'Agent run',
+      model: model || '',
+      mode: 'code',
+      cwd: cwd || '',
+      onlineResearch: !!onlineResearch,
+      timestamp: new Date().toISOString(),
+    }, conversation);
+  } catch {
+    // A history write that fails must not change the outcome of the run.
+  }
+}
+
 // Projects already told about the workspace this session. A hint is worth
 // saying once; saying it after every unattended run is nagging.
 const workspaceHintShown = new Set();
@@ -3228,6 +3259,9 @@ async function runAgentTask(payload = {}) {
       } catch {}
     }
     try { decisionsLog.record(settingsUserDataDir, finished, policyId); } catch {}
+    // Runs started from a window are saved by the renderer once it has a title;
+    // every other origin has to save itself or the transcript is lost on exit.
+    await persistRunHistory(payload.chatId, { goal, cwd, model, onlineResearch: payload.onlineResearch });
     const context = { goal, projectPath: cwd, status };
     const reportPath = runReportPath(finished.id);
     try {
