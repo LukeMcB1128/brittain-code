@@ -206,6 +206,16 @@ const sessions = createSessions('window');
 let activeSessionKey = 'window';
 
 function enterSession(key) {
+  const target = String(key || 'window');
+  // Never swap under a running loop. The agent loop reads `conversation` as a
+  // module variable on every step, so switching mid-run pushes the rest of that
+  // run's messages into somebody else's transcript and leaves both sessions
+  // holding a torn copy. It showed up as a run that had been working for
+  // minutes suddenly announcing it had no context.
+  if (currentAbort && target !== activeSessionKey) {
+    sink.emit('stream:info', `Ignored a session switch to "${target}" while a run is in progress.`);
+    return activeSessionKey;
+  }
   const current = { conversation, sessionId, contextState, onlineResearch: sessionOnlineResearch };
   const { changed, state } = sessions.switchTo(key, current);
   if (!changed) return activeSessionKey;
@@ -3179,7 +3189,11 @@ async function runAgentTask(payload = {}) {
   if (!preconditions.ok) return { ok: false, error: preconditions.error };
 
   // Each origin keeps its own history: a Discord thread, a trigger and the
-  // window are different conversations that happen to share a process.
+  // window are different conversations that happen to share a process. The
+  // previous session is handed back when this run finishes, so outside a run
+  // the window is always active and the renderer's handlers never have to
+  // think about which session they are looking at.
+  const callerSessionKey = activeSessionKey;
   enterSession(sessionKeyFor(payload));
 
   const previousPolicy = runtimeSettings.autonomyPolicy;
@@ -3321,6 +3335,9 @@ async function runAgentTask(payload = {}) {
     // Runs started from a window are saved by the renderer once it has a title;
     // every other origin has to save itself or the transcript is lost on exit.
     await persistRunHistory(payload.chatId, { goal, cwd, model, onlineResearch: payload.onlineResearch });
+    // Hand the session back. currentAbort is already null here, so the guard in
+    // enterSession does not block it.
+    enterSession(callerSessionKey);
     const context = { goal, projectPath: cwd, status };
     const reportPath = runReportPath(finished.id);
     try {
@@ -4210,7 +4227,11 @@ ipcMain.handle('settings:save', (_e, value) => {
 // chat history support: the renderer saves/loads conversations, but the live
 // array lives here — these let it read the current one and swap in a stored one.
 // The window's conversation, never whichever session ran most recently.
-ipcMain.handle('chat:get', () => { enterSession('window'); return conversation; });
+// The window's transcript, without becoming the window: this is called while
+// other sessions are running.
+ipcMain.handle('chat:get', () => (
+  activeSessionKey === 'window' ? conversation : (sessions.peek('window')?.conversation || [])
+));
 
 ipcMain.handle('context:state', () => ({ ok: true, state: normalizeContextState(contextState) }));
 

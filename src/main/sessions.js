@@ -48,6 +48,14 @@ function createSessions(initialKey = 'window') {
       return { changed: true, state: stored.get(target) || null };
     },
 
+    // Read a session's stored state without becoming it. Anything that only
+    // needs to look — returning the window's transcript to the renderer while a
+    // Discord run is mid-flight — must use this: switching would pull the
+    // conversation out from under the running loop.
+    peek(key) {
+      return stored.get(String(key || '')) || null;
+    },
+
     // Drop a session's stored history — used when a conversation is cleared, so
     // "reset" does not leave the old messages waiting to be restored later.
     forget(key) {

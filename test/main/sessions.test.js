@@ -76,7 +76,9 @@ test('every window entry point declares its session', () => {
     assert.ok(at > 0, `${handler} should exist`);
     assert.match(main.slice(at, at + 400), /enterSession\('window'\)/, `${handler} must declare its session`);
   }
-  assert.match(main, /ipcMain\.handle\('chat:get', \(\) => \{ enterSession\('window'\); return conversation; \}\)/);
+  // chat:get is the exception: it reads without switching, because it is
+  // called while other sessions are mid-run.
+  assert.match(main, /ipcMain\.handle\('chat:get', \(\) => \(/);
 });
 
 test('runs enter the session their origin names', () => {
@@ -98,4 +100,45 @@ test('the online latch travels with the session, not the process', () => {
   const main = read('main.js');
   assert.match(main, /onlineResearch: sessionOnlineResearch \}/, 'stashed on the way out');
   assert.match(main, /sessionOnlineResearch = !!state\?\.onlineResearch;/, 'restored on the way in');
+});
+
+// --- safety against concurrent access ---
+
+test('a session can be read without becoming it', () => {
+  const sessions = createSessions('window');
+  const windowState = { conversation: [{ role: 'user', content: 'in the app' }], sessionId: 's-win' };
+  sessions.switchTo('discord-42', windowState);
+
+  assert.deepEqual(sessions.peek('window'), windowState);
+  assert.equal(sessions.active(), 'discord-42', 'peeking must not change who is active');
+  assert.equal(sessions.peek('never-seen'), null);
+});
+
+test('a run in progress cannot have its conversation swapped away', () => {
+  // The agent loop reads the conversation as a module variable on every step,
+  // so a switch mid-run pushes the rest of that run into somebody else's
+  // transcript. It surfaced as a run that had worked for minutes suddenly
+  // announcing it had no context.
+  const main = read('main.js');
+  assert.match(main, /if \(currentAbort && target !== activeSessionKey\) \{/);
+  assert.match(main, /Ignored a session switch to/);
+});
+
+test('reading the window transcript never switches sessions', () => {
+  // chat:get is called by the renderer at arbitrary times, including while a
+  // Discord run is executing.
+  const main = read('main.js');
+  assert.match(main, /activeSessionKey === 'window' \? conversation : \(sessions\.peek\('window'\)\?\.conversation \|\| \[\]\)/);
+  assert.ok(!/ipcMain\.handle\('chat:get', \(\) => \{ enterSession/.test(main));
+});
+
+test('a run hands the session back when it finishes', () => {
+  // So the window is active whenever nothing is running, and the renderer's
+  // handlers never have to reason about which session they are looking at.
+  const main = read('main.js');
+  assert.match(main, /const callerSessionKey = activeSessionKey;/);
+  assert.match(main, /enterSession\(callerSessionKey\);/);
+  const task = main.slice(main.indexOf('async function runAgentTask'), main.indexOf("ipcMain.handle('agent:run'"));
+  assert.ok(task.indexOf('} finally {') < task.lastIndexOf('enterSession(callerSessionKey)'),
+    'the hand-back belongs in the finally, so an aborted run restores it too');
 });
