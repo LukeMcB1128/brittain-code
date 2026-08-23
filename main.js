@@ -4261,6 +4261,7 @@ ipcMain.handle('discord:state', async () => {
     missing: config ? validateDiscordConfig(config) : [],
     running: !!discordBridge,
     notifyChannel: discordBridge?.notifyChannel?.() || '',
+    identity: discordBridge?.identity?.() || null,
     cwd: config?.cwd || '',
     policy: config?.policy || '',
   };

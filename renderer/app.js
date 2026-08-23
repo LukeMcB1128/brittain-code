@@ -2467,6 +2467,19 @@ async function handleSlash(raw) {
       if (state.missing?.length) lines.push(`Missing: ${state.missing.join(', ')}`);
       if (state.cwd) lines.push(`Runs in: ${state.cwd} under "${state.policy}"`);
       if (state.notifyChannel) lines.push(`Notifies: channel ${state.notifyChannel}`);
+      if (state.identity?.username) lines.push(`Bot:      ${state.identity.username}, in ${state.identity.guilds} server(s)`);
+      // Being in no server is the usual reason a bot cannot be reached at all:
+      // Discord refuses to open a DM between two accounts with nothing in common.
+      if (state.identity && state.identity.guilds === 0) {
+        lines.push('',
+          '⚠ This bot is in no servers, so Discord will not let you DM it.',
+          '  Invite it: Developer Portal → your app → OAuth2 → URL Generator →',
+          '  scopes: bot, permissions: Send Messages + Read Message History.',
+          '  Open the generated URL and add it to any server you are in.');
+      }
+      if (state.identity && state.identity.guilds === null) {
+        lines.push('', '(Connected but no READY yet — if this persists, the token is likely wrong.)');
+      }
       lines.push('',
         'Message the bot a goal and it runs unattended; a parked call comes back to you',
         'as a message you can approve from anywhere. !help lists the commands.',

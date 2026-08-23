@@ -34,6 +34,10 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   let notifyChannel = '';
   let lastChannel = '';
   let stopped = false;
+  // Captured from READY. A bot that is in no server cannot be DMed at all —
+  // Discord refuses to open the channel — so this one number explains most of
+  // the ways setup goes wrong, and is worth surfacing rather than inferring.
+  let identity = { username: '', guilds: null };
 
   async function send(channelId, text) {
     if (!channelId) return;
@@ -156,6 +160,21 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
     }
   }
 
+  // Discord hides a DM channel until it holds a message, so a bridge that opens
+  // one silently leaves nothing to click — the bot is unreachable precisely
+  // because it has never spoken. Introduce it once per channel: enough to make
+  // the conversation exist, not enough to be noise on every restart.
+  async function introduce() {
+    if (!notifyChannel || !greetStore || greetStore.hasGreeted(notifyChannel)) return;
+    await send(notifyChannel, [
+      '**Brittain Code** is connected.',
+      `Send me a goal and I will run it unattended in \`${config.cwd}\` under **${config.policy}**.`,
+      'If a run hits something only you can approve, it pauses and asks here.',
+      '`!help` for commands.',
+    ].join('\n')).catch(() => {});
+    greetStore.markGreeted(notifyChannel);
+  }
+
   function connect() {
     if (stopped) return;
     let sequence = null;
@@ -181,7 +200,21 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       if (frame.op !== 0) return;
 
       if (frame.t === 'READY') {
-        log.log?.(`Discord bridge logged in as ${frame.d.user.username}. Owners: ${(config.ownerIds || []).join(', ')}.`);
+        identity = { username: frame.d.user?.username || '', guilds: (frame.d.guilds || []).length };
+        log.log?.(`Discord bridge logged in as ${identity.username}. Owners: ${(config.ownerIds || []).join(', ')}.`);
+        if (identity.guilds === 0) {
+          log.error?.('This bot is in no servers. Discord will not let you DM a bot you share no server with —');
+          log.error?.('invite it from the Developer Portal (OAuth2 → URL Generator → scopes: bot) and open that URL.');
+        } else {
+          log.log?.(`In ${identity.guilds} server(s).`);
+        }
+        // The DM channel could not be opened before login; with a server in
+        // common it can be now, so try again rather than staying unreachable.
+        if (!notifyChannel) {
+          notifyChannel = await resolveNotifyChannel();
+          lastChannel = lastChannel || notifyChannel;
+          await introduce();
+        }
         return;
       }
       if (frame.t !== 'MESSAGE_CREATE') return;
@@ -220,20 +253,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       // Replies land where you spoke; unprompted messages fall back to the
       // notification channel, so a run parking while you sleep still reaches you.
       lastChannel = notifyChannel;
-      // Discord hides a DM channel until it holds a message, so a bridge that
-      // opens one silently leaves nothing to click — the bot is unreachable
-      // precisely because it has never spoken. Introduce it once per channel:
-      // enough to make the conversation exist, not enough to be noise on every
-      // restart.
-      if (notifyChannel && greetStore && !greetStore.hasGreeted(notifyChannel)) {
-        await send(notifyChannel, [
-          '**Brittain Code** is connected.',
-          `Send me a goal and I will run it unattended in \`${config.cwd}\` under **${config.policy}**.`,
-          'If a run hits something only you can approve, it pauses and asks here.',
-          '`!help` for commands.',
-        ].join('\n')).catch(() => {});
-        greetStore.markGreeted(notifyChannel);
-      }
+      await introduce();
 
       unsubscribe = subscribe((channel, payload) => {
         const text = renderEvent(channel, payload);
@@ -250,6 +270,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       try { socket?.close(); } catch {}
     },
     notifyChannel: () => notifyChannel,
+    identity: () => ({ ...identity }),
   };
 }
 

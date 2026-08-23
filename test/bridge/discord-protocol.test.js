@@ -141,7 +141,19 @@ test('the bridge introduces itself so the DM exists to click', () => {
   const client = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'bridge', 'discord-client.js'), 'utf8');
   // Discord hides a DM channel until it holds a message, so a silently opened
   // one leaves the bot unreachable — findable nowhere in the sidebar.
-  assert.match(client, /greetStore && !greetStore\.hasGreeted\(notifyChannel\)/);
+  assert.match(client, /if \(!notifyChannel \|\| !greetStore \|\| greetStore\.hasGreeted\(notifyChannel\)\) return;/);
   assert.match(client, /greetStore\.markGreeted\(notifyChannel\)/);
   assert.match(client, /\*\*Brittain Code\*\* is connected/);
+});
+
+test('a bot in no servers says so, because it cannot be DMed at all', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const client = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'bridge', 'discord-client.js'), 'utf8');
+  // Discord refuses to open a DM between accounts with no server in common, so
+  // this one number explains most of the ways setup silently fails.
+  assert.match(client, /identity = \{ username: frame\.d\.user\?\.username \|\| '', guilds: \(frame\.d\.guilds \|\| \[\]\)\.length \}/);
+  assert.match(client, /This bot is in no servers/);
+  // And the DM open is retried after login, when a shared server may exist.
+  assert.match(client, /if \(!notifyChannel\) \{[\s\S]{0,200}?resolveNotifyChannel\(\)/);
 });
