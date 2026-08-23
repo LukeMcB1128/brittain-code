@@ -41,6 +41,12 @@ The agent can inspect and edit files, search source and locally installed docume
 
 If Ollama rejects malformed tool-call JSON, Brittain Code discards that call and retries generation once with strict formatting and THINK disabled. A second rejection stops safely with a concise model-format error; malformed arguments are never reconstructed or executed.
 
+### What a saved session records
+
+Alongside the transcript, a saved chat records the models it used, the working directory, and whether the session ever ran with **online research enabled** — shown as an `ONLINE` marker in the session list. That flag is a latch over the whole session rather than the state of the switch when the chat happened to be saved: research done an hour ago is still in the transcript after the toggle goes off, so a snapshot would file a session that plainly went online as local. It is stamped in the main process from the runs themselves, not from the sender.
+
+Opening such a session never re-enables online research. The record is provenance — it answers "was anything here reached over the network?" — and the switch always starts off, exactly as it does for a new chat.
+
 ### Model degradation detection
 
 Local models degrade before they fail loudly — glitch tokens, byte-fallback artifacts, self-talk leaking into written files, and runaway repetition. Brittain Code scans generated content and tool arguments for those signatures inside the streaming layer, so every caller (main agent, subagent, verifier, coder) is protected without per-call-site changes. A detected episode recovers with a context compaction — the "sanity reset" that empirically clears it — rather than silently writing corrupted code, and gives up honestly if it recurs.

@@ -35,6 +35,9 @@ function createHistoryStore({ userDataDir, runtimeMetadata }) {
         cwd: meta.cwd || '',
         think: !!meta.think,
         autoApprove: !!meta.autoApprove,
+        // In the index as well as the detail, so "did this session go online?"
+        // is answerable from the list without opening every chat file.
+        onlineResearch: !!meta.onlineResearch,
         timestamp: meta.timestamp || new Date().toISOString(),
       };
       const mainRuntime = await runtimeMetadata(meta.model || '');

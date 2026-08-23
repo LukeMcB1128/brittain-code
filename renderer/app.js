@@ -583,6 +583,15 @@ function renderChatItem(c) {
       model.textContent = c.model;
       main.appendChild(model);
     }
+    // Whether this session reached the network is worth seeing before opening
+    // it. Loading it still never turns the switch back on — see resetChatState.
+    if (c.onlineResearch) {
+      const online = document.createElement('span');
+      online.className = 'chat-online';
+      online.textContent = 'ONLINE';
+      online.title = 'This session ran with online research enabled at some point. Opening it does not re-enable it.';
+      main.appendChild(online);
+    }
 
     const del = document.createElement('button');
     del.className = 'chat-del';

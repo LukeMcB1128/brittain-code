@@ -153,8 +153,23 @@ const sink = createRunSink({ window: () => win });
 // Identifies the stretch of work whose ledgers belong together. Reset whenever
 // the conversation is cleared or replaced, so one file covers one session.
 let sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+// Whether this session ever ran with online research enabled.
+//
+// Sticky on purpose. The toggle's state when a chat happens to be saved is not
+// the same question: research the model did an hour ago is still in the
+// transcript after the switch goes off, so a snapshot would record "offline"
+// for a session that plainly went online. Reading it back later — was anything
+// here reached over the network? — needs the answer to be "at some point",
+// which only a latch can give.
+let sessionOnlineResearch = false;
+function noteOnlineResearch(enabled) {
+  if (enabled) sessionOnlineResearch = true;
+}
+
 function newSessionId() {
   sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  sessionOnlineResearch = false;
   return sessionId;
 }
 let updateService = null;
@@ -1654,6 +1669,7 @@ function contentWithAttachments(text, attachments) {
 ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, think, images, imageTypes, imageAttachments, files, subModel, onlineResearch, autoBranch }) => {
   const runMode = mode === 'chat' ? 'chat' : 'code';
   rememberLastModel(model);
+  noteOnlineResearch(onlineResearch);
   if (runMode === 'code' && !cwd) return { ok: false, error: 'Pick a working directory first.' };
   if ((images?.length || 0) + (files?.length || 0) > MAX_ATTACHMENT_FILES) {
     return { ok: false, error: `Attach at most ${MAX_ATTACHMENT_FILES} files at once.` };
@@ -3123,6 +3139,7 @@ async function runAgentTask(payload = {}) {
   await maybeAutoBranch(cwd, goal, true);
   await createCheckpoint(cwd);
 
+  noteOnlineResearch(!!payload.onlineResearch);
   if (!resume) conversation.push({ role: 'user', content: goal, displayContent: goal });
   stopRequested = false;
   currentAbort = new AbortController();
@@ -4143,7 +4160,13 @@ const ledgerStore = createLedgerStore({
 });
 
 ipcMain.handle('history:list', () => historyStore.list());
-ipcMain.handle('history:save', (_e, meta, convo) => historyStore.save(meta, convo));
+// The renderer sends the toggle as it stands; main knows whether the session
+// actually went online. The latch wins — a chat saved after the switch was
+// flipped off still went online, and the record should say so.
+ipcMain.handle('history:save', (_e, meta, convo) => historyStore.save({
+  ...meta,
+  onlineResearch: !!meta?.onlineResearch || sessionOnlineResearch,
+}, convo));
 ipcMain.handle('history:load', (_e, id) => historyStore.load(id));
 ipcMain.handle('history:delete', (_e, id) => historyStore.remove(id));
 
