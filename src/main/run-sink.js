@@ -30,6 +30,10 @@ const RUN_CHANNELS = new Set([
   'stream:done',
   'run:report',
   'run:decisions',
+  // A question is part of the run's narrative, not UI chatter: whoever is
+  // driving the run has to be able to answer it, and that is not always the
+  // window.
+  'question:request',
 ]);
 
 // Only these read as prose in a transcript. Tokens and stats are far too noisy

@@ -136,6 +136,38 @@ function renderEvent(channel, payload) {
   ].join('\n');
 }
 
+// A question from ask_user, put to whoever is driving the run.
+//
+// Options are numbered so a reply can be a digit rather than retyping a phrase
+// — on a phone that is the difference between answering and not bothering.
+function renderQuestion(payload) {
+  const questions = payload?.questions || [];
+  if (!questions.length) return '';
+  const lines = ['❓ **I need to know:**'];
+  questions.forEach((entry, index) => {
+    lines.push(questions.length > 1 ? `**${index + 1}.** ${entry.question}` : entry.question);
+    (entry.options || []).forEach((option, choice) => lines.push(`  \`${choice + 1}\` ${option}`));
+  });
+  lines.push('', questions.length > 1
+    ? 'Reply with one line per question.'
+    : 'Reply with your answer, or the number of an option.');
+  return lines.join('\n');
+}
+
+// A reply back into answers. A bare number picks that option; anything else is
+// taken literally, because a free-text answer is always valid even when options
+// were offered.
+function parseAnswer(reply, questions = []) {
+  const lines = String(reply || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  return questions.map((entry, index) => {
+    const raw = (questions.length === 1 ? String(reply || '').trim() : lines[index]) || '';
+    const options = entry.options || [];
+    const asNumber = /^\d+$/.test(raw) ? parseInt(raw, 10) : 0;
+    if (asNumber >= 1 && asNumber <= options.length) return options[asNumber - 1];
+    return raw;
+  });
+}
+
 // The end of a run, as a person would want it: the answer first, then one line
 // of what it did. A run that changed nothing and said nothing still says so,
 // because silence is indistinguishable from a bridge that broke.
@@ -163,5 +195,5 @@ function renderResult(result) {
 
 module.exports = {
   MAX_DISCORD_MESSAGE, HELP, RELAYED,
-  authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, NOTEWORTHY,
+  authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer, NOTEWORTHY,
 };

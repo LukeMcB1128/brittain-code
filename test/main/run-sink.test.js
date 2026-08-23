@@ -127,10 +127,15 @@ test('every channel a run emits is declared as a run channel', () => {
     'stream:toolresult', 'stream:stats', 'stream:done', 'run:report']) {
     assert.ok(RUN_CHANNELS.has(channel), `${channel} should be a run channel`);
   }
-  // Approval and question requests are interactive, not narrative — they need a
-  // human, so they must not be routed through a sink that may have no window.
+  // An approval genuinely needs the window: unattended, a risky call parks or
+  // defers rather than prompting, so requestApproval only ever matters when
+  // someone is sitting there.
   assert.equal(RUN_CHANNELS.has('approval:request'), false);
-  assert.equal(RUN_CHANNELS.has('question:request'), false);
+  // A question is different. ask_user is how a run asks the person who started
+  // it to clarify, and that person is not always at the window — a run driven
+  // from Discord has to be able to answer. Routed straight to win.webContents
+  // it asked into the void and the model was told the user had cancelled.
+  assert.equal(RUN_CHANNELS.has('question:request'), true);
 });
 
 test('no run channel bypasses the sink in main.js', () => {
@@ -142,10 +147,12 @@ test('no run channel bypasses the sink in main.js', () => {
   const leaked = direct.filter((channel) => RUN_CHANNELS.has(channel));
   assert.deepEqual(leaked, [], 'run output must go through the sink so a run can survive without a window');
 
-  // What legitimately still talks to the window directly: interactive prompts
-  // that require a human, and UI state that is not part of a run's narrative.
+  // What legitimately still talks to the window directly: the approval prompt,
+  // which is meaningless without someone watching, and UI state that is not
+  // part of a run's narrative. Questions are no longer on this list — they go
+  // through the sink so whoever is driving the run can answer.
   assert.deepEqual([...new Set(direct)].sort(), [
-    'approval:request', 'checkpoint:state', 'mission:update', 'question:request', 'updates:state',
+    'approval:request', 'checkpoint:state', 'mission:update', 'updates:state',
   ]);
 });
 

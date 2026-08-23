@@ -19,7 +19,7 @@
 // adds is that an approval can travel: a run parks on this machine and the
 // decision arrives from wherever the person is.
 
-const { authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, HELP } = require('./discord-protocol');
+const { authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer, HELP } = require('./discord-protocol');
 
 const API = 'https://discord.com/api/v10';
 
@@ -56,6 +56,10 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   // called. "The bridge is running" and "Discord accepted us" are different
   // facts and were being reported as one.
   let gateway = { state: 'starting', lastError: '' };
+  // An ask_user question waiting on a reply. The next ordinary message from an
+  // owner answers it rather than starting a new run — which is what makes a
+  // clarifying question feel like a conversation instead of a dead end.
+  let awaitingQuestion = null;
 
   async function send(channelId, text) {
     if (!channelId) return;
@@ -249,6 +253,17 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       }
       lastChannel = frame.d.channel_id;
       try {
+        // A pending question takes the next plain message. Bang-commands still
+        // work, so !stop is never swallowed by a question you would rather
+        // abandon than answer.
+        const content = String(frame.d.content || '').trim();
+        if (awaitingQuestion && content && !content.startsWith('!')) {
+          const { id, questions } = awaitingQuestion;
+          awaitingQuestion = null;
+          const res = await ask({ cmd: 'answer', payload: { id, answers: parseAnswer(content, questions) } });
+          if (!res.ok) await send(frame.d.channel_id, res.error);
+          return;
+        }
         await handle(frame.d, frame.d.channel_id);
       } catch (error) {
         log.error?.('Discord handler failed:', error);
@@ -285,9 +300,17 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       await introduce();
 
       unsubscribe = subscribe((channel, payload) => {
-        const text = renderEvent(channel, payload);
         const target = lastChannel || notifyChannel;
-        if (text && target) send(target, text).catch(() => {});
+        if (!target) return;
+        if (channel === 'question:request') {
+          const text = renderQuestion(payload);
+          if (!text) return;
+          awaitingQuestion = { id: payload.id, questions: payload.questions || [] };
+          send(target, text).catch(() => {});
+          return;
+        }
+        const text = renderEvent(channel, payload);
+        if (text) send(target, text).catch(() => {});
       });
       connect();
       return { notifyChannel };

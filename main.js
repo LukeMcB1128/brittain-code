@@ -401,6 +401,8 @@ function commandHandlers() {
     },
     resolve: ({ runId, index, approved }) => pendingStore.resolveCall(settingsUserDataDir, runId, index, !!approved),
     resume: ({ runId }) => resumeSuspendedRun(runId),
+    // ask_user, answered from wherever the run is being driven from.
+    answer: ({ id, answers }) => answerQuestion(id, answers),
     stop: () => {
       if (!currentAbort) return { ok: false, error: 'Nothing is running.' };
       stopRequested = true;
@@ -834,22 +836,43 @@ ipcMain.on('approval:response', (_e, { id, approved }) => {
 // ---------- question flow (ask_user tool) ----------
 const pendingQuestions = new Map();
 
+// A question nobody can answer must not hold a run open forever. With a window
+// there is always someone who might come back to it, so it waits indefinitely
+// as it always has; driven from elsewhere it gives up and tells the model the
+// question went unanswered.
+const REMOTE_QUESTION_TIMEOUT_MS = 10 * 60 * 1000;
+
 function requestAnswer(info) {
   return new Promise((resolve) => {
-    if (!win || win.isDestroyed?.()) return resolve(null);
+    const hasWindow = !!win && !win.isDestroyed?.();
+    // ask_user used to talk straight to the window, so a run started from
+    // Discord asked its question into the void and was told the user had
+    // cancelled. The question goes through the sink now, which reaches the
+    // window and every attached client alike.
+    const hasRemote = !!discordBridge || !!daemonServer;
+    if (!hasWindow && !hasRemote) return resolve(null);
+
     const id = Math.random().toString(36).slice(2);
-    pendingQuestions.set(id, resolve);
-    win.webContents.send('question:request', { id, ...info });
+    let timer = null;
+    const settle = (answer) => {
+      if (timer) clearTimeout(timer);
+      pendingQuestions.delete(id);
+      resolve(answer);
+    };
+    pendingQuestions.set(id, settle);
+    if (!hasWindow) timer = setTimeout(() => settle(null), REMOTE_QUESTION_TIMEOUT_MS);
+    sink.emit('question:request', { id, ...info });
   });
 }
 
-ipcMain.on('question:response', (_e, { id, answer }) => {
-  const resolve = pendingQuestions.get(id);
-  if (resolve) {
-    pendingQuestions.delete(id);
-    resolve(answer);
-  }
-});
+function answerQuestion(id, answer) {
+  const settle = pendingQuestions.get(String(id || ''));
+  if (!settle) return { ok: false, error: 'No question is waiting — it may have been answered already, or timed out.' };
+  settle(answer);
+  return { ok: true };
+}
+
+ipcMain.on('question:response', (_e, { id, answer }) => answerQuestion(id, answer));
 
 // ---------- streaming chat with ollama ----------
 async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS, recovery = { toolCallRetries: 0 }, temperature = runtimeSettings.codeTemperature) {
