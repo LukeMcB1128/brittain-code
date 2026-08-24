@@ -9,7 +9,7 @@ test('one predicate decides whether the agent is busy', () => {
   // The drain asked a narrower question than the thing it was handing work to,
   // which is what let the two disagree.
   const main = read('main.js');
-  assert.match(main, /function runInFlight\(\) \{\s*return !!currentAbort \|\| activeMission\?\.status === 'running';/);
+  assert.match(main, /function runInFlight\(\) \{[\s\S]{0,300}return !!currentAbort \|\| !!currentRun \|\| !!activeEventRoute \|\| activeMission\?\.status === 'running';/);
 });
 
 test('the queue does not dequeue work it cannot start', () => {
@@ -30,6 +30,12 @@ test('a finished run starts the next queued request without waiting a minute', (
   assert.match(task, /setImmediate\(\(\) => drainRunQueue\(\)/);
   assert.ok(task.indexOf('activeEventRoute = null') < task.indexOf('setImmediate(() => drainRunQueue()'),
     'the finished run must release its event route before the next run starts');
+});
+
+test('run ownership lasts through final history and delivery work', () => {
+  const main = read('main.js');
+  assert.match(main, /return !!currentAbort \|\| !!currentRun \|\| !!activeEventRoute/);
+  assert.match(main, /status: 'finishing'/);
 });
 
 test('the window cannot start a second run on top of one already going', () => {

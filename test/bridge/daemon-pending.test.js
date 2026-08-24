@@ -45,7 +45,7 @@ test('status reports an ordinary agent run as well as a mission', () => {
   const bridge = read('src/bridge/discord-client.js');
   assert.match(main, /run: currentRun \? \{/);
   assert.match(main, /goal: currentRun\.goal/);
-  assert.match(bridge, /res\.run\?\.status === 'running'/);
+  assert.match(bridge, /\['running', 'finishing'\]\.includes\(res\.run\.status\)/);
 });
 
 test('the bridge adds no authority of its own', () => {

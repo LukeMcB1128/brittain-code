@@ -39,7 +39,7 @@ test('a request arriving while busy is queued rather than refused', () => {
   // lives in one predicate, because two places asked it differently and the
   // queue livelocked when they disagreed.
   assert.match(body, /if \(runInFlight\(\)\) \{/);
-  assert.match(read('main.js'), /return !!currentAbort \|\| activeMission\?\.status === 'running';/);
+  assert.match(read('main.js'), /return !!currentAbort \|\| !!currentRun \|\| !!activeEventRoute \|\| activeMission\?\.status === 'running';/);
 });
 
 test('/agent always branches, checkpoints, and reports', () => {

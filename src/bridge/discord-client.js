@@ -155,7 +155,9 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       case 'status': {
         const res = await ask({ cmd: 'status' });
         if (!res.ok) return send(channelId, `Daemon: ${res.error}`);
-        const active = res.run?.status === 'running' ? res.run : res.mission?.status === 'running' ? res.mission : null;
+        const active = res.run && ['running', 'finishing'].includes(res.run.status)
+          ? res.run
+          : res.mission?.status === 'running' ? res.mission : null;
         return send(channelId, active
           ? `Running: ${active.goal || '(no goal)'}`
           : `Idle.${res.queued?.length ? ` ${res.queued.length} queued.` : ''}`);

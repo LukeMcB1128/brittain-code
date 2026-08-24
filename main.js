@@ -211,7 +211,10 @@ let activeSessionKey = 'window';
 // entry, handed it to runAgentTask, which saw the run in flight and put it
 // straight back. Every tick, forever.
 function runInFlight() {
-  return !!currentAbort || activeMission?.status === 'running';
+  // currentRun covers checkpoint preparation before the abort controller is
+  // installed. activeEventRoute covers final history and delivery work after
+  // it is removed. The full lifecycle is one exclusive operation.
+  return !!currentAbort || !!currentRun || !!activeEventRoute || activeMission?.status === 'running';
 }
 
 function enterSession(key) {
@@ -455,6 +458,12 @@ function commandHandlers() {
         origin: currentRun.origin || '',
         chatId: currentRun.chatId || '',
         startedAt: currentRun.startedAt,
+      } : activeEventRoute ? {
+        runId: activeEventRoute.runId,
+        status: 'finishing',
+        goal: activeEventRoute.goal || '',
+        origin: activeEventRoute.origin || '',
+        chatId: activeEventRoute.sessionKey || '',
       } : null,
       queued: peekQueue(settingsUserDataDir).map((entry) => entry.goal),
     }),
