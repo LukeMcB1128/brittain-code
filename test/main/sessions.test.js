@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { createSessions, sessionKeyFor } = require('../../src/main/sessions');
+const { createSessions, sessionKeyFor, loadSessionState } = require('../../src/main/sessions');
 const read = (name) => fs.readFileSync(path.join(__dirname, '..', '..', name), 'utf8');
 
 // --- routing ---
@@ -28,6 +28,22 @@ test('each origin is its own conversation', () => {
 test('an origin with no chat id still gets its own session', () => {
   assert.equal(sessionKeyFor({ origin: 'remote' }), 'remote');
   assert.equal(sessionKeyFor({ origin: 'remote', chatId: '  ' }), 'remote');
+});
+
+test('a saved headless session can be restored after restart', () => {
+  const conversation = [
+    { role: 'user', content: 'what did we learn?' },
+    { role: 'assistant', content: 'Use the school portal first.' },
+  ];
+  const history = {
+    load: (id) => id === 'discord-42'
+      ? { ok: true, chat: { conversation, onlineResearch: true, contextState: { projectPath: '/project', pinnedFiles: [] } } }
+      : { ok: false },
+  };
+  const restored = loadSessionState(history, 'discord-42');
+  assert.deepEqual(restored.conversation, conversation);
+  assert.equal(restored.onlineResearch, true);
+  assert.equal(loadSessionState(history, 'discord-missing'), null);
 });
 
 // --- swapping ---
@@ -90,6 +106,7 @@ test('runs enter the session their origin names', () => {
   assert.match(main, /run: \(payload\) => runAgentTask\(\{ \.\.\.payload, origin: payload\.origin \|\| 'remote' \}\)/);
   assert.match(main, /origin: 'trigger',/);
   assert.match(main, /origin: 'heartbeat',/);
+  assert.match(main, /loadSessionState\(historyStore, target\)/);
 });
 
 test('a suspended run resumes into the session it was suspended from', () => {
@@ -101,7 +118,7 @@ test('a suspended run resumes into the session it was suspended from', () => {
 test('the online latch travels with the session, not the process', () => {
   const main = read('main.js');
   assert.match(main, /onlineResearch: sessionOnlineResearch \}/, 'stashed on the way out');
-  assert.match(main, /sessionOnlineResearch = !!state\?\.onlineResearch;/, 'restored on the way in');
+  assert.match(main, /sessionOnlineResearch = !!restored\?\.onlineResearch;/, 'restored on the way in');
 });
 
 // --- safety against concurrent access ---

@@ -20,7 +20,7 @@ const { readActiveMission, writeActiveMission, interruptRunningMission } = requi
 const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore, safeChatId } = require('./src/main/history-store');
-const { createSessions, sessionKeyFor } = require('./src/main/sessions');
+const { createSessions, sessionKeyFor, loadSessionState } = require('./src/main/sessions');
 const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
 const { enqueue: enqueueRun, dequeue: dequeueRun, peek: peekQueue, cancel: cancelQueuedRuns } = require('./src/main/run-queue');
@@ -230,16 +230,17 @@ function enterSession(key) {
   const current = { conversation, sessionId, contextState, onlineResearch: sessionOnlineResearch };
   const { changed, state } = sessions.switchTo(key, current);
   if (!changed) return activeSessionKey;
+  const restored = state || (target !== 'window' ? loadSessionState(historyStore, target) : null);
   activeSessionKey = sessions.active();
-  conversation = state?.conversation || [];
-  contextState = state?.contextState || normalizeContextState();
+  conversation = restored?.conversation || [];
+  contextState = restored?.contextState || normalizeContextState();
   // The online latch belongs to the session, not the process: a Discord thread
   // that never went online must not inherit the claim from a window session
   // that did, and must not lose its own when the window takes over again.
-  sessionOnlineResearch = !!state?.onlineResearch;
+  sessionOnlineResearch = !!restored?.onlineResearch;
   // Last, and deliberately: newSessionId clears the latch, so a fresh session
   // starts clean while a restored one keeps the claim set above.
-  sessionId = state?.sessionId || newSessionId();
+  sessionId = restored?.sessionId || newSessionId();
   return activeSessionKey;
 }
 let contextState = normalizeContextState();

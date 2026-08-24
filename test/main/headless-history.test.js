@@ -47,6 +47,11 @@ test('the transcript round-trips under a headless chat id', async () => {
   assert.equal(history.list().some((entry) => entry.id === 'discord-42'), true);
 });
 
+test('a saved Discord transcript is loaded when its in-memory session is absent', () => {
+  const main = read('main.js');
+  assert.match(main, /const restored = state \|\| \(target !== 'window' \? loadSessionState\(historyStore, target\) : null\);/);
+});
+
 test('a follow-up does not rename the conversation it continues', async () => {
   const history = store();
   await history.save({ id: 'discord-42', title: 'what is in the repo?', model: 'm', mode: 'code' }, [{ role: 'user', content: 'a' }]);

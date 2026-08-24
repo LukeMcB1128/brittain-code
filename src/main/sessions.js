@@ -28,6 +28,20 @@ function sessionKeyFor(payload = {}) {
   return chatId || String(origin);
 }
 
+// The in-memory registry is empty after a restart, but headless conversations
+// are saved under their stable chat id. Restore that record on first use so a
+// Discord follow-up continues the conversation instead of starting over.
+function loadSessionState(historyStore, key) {
+  if (!historyStore || typeof historyStore.load !== 'function') return null;
+  const loaded = historyStore.load(String(key || ''));
+  if (!loaded?.ok || !loaded.chat) return null;
+  return {
+    conversation: Array.isArray(loaded.chat.conversation) ? loaded.chat.conversation : [],
+    contextState: loaded.chat.contextState || null,
+    onlineResearch: !!loaded.chat.onlineResearch,
+  };
+}
+
 function createSessions(initialKey = 'window') {
   const stored = new Map();
   let active = String(initialKey);
@@ -64,4 +78,4 @@ function createSessions(initialKey = 'window') {
   };
 }
 
-module.exports = { createSessions, sessionKeyFor };
+module.exports = { createSessions, sessionKeyFor, loadSessionState };
