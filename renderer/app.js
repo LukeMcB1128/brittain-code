@@ -1201,6 +1201,19 @@ function addDecisionLog({ runId, policy, decisions = [], deferred = [], parked =
 
 window.api.onRunDecisions(addDecisionLog);
 
+// A run someone started from Discord or a trigger drives this window's output
+// but not its controls, so without this the app sits at "idle" while text
+// streams in, and the input stays enabled for a send that will be refused.
+window.api.onExternalRun(({ active, origin, goal }) => {
+  if (active) {
+    startRun();
+    setState(`${origin === 'heartbeat' ? 'heartbeat' : origin === 'trigger' ? 'trigger' : 'remote'} run`);
+    addInfo(`A run started from ${origin === 'remote' ? 'Discord' : origin}: ${goal}`);
+  } else {
+    endRun();
+  }
+});
+
 function scrollDown() {
   chat.scrollTop = chat.scrollHeight;
 }

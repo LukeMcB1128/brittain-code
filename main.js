@@ -205,6 +205,15 @@ let conversation = [];            // ollama-format messages, excluding system
 const sessions = createSessions('window');
 let activeSessionKey = 'window';
 
+// Is the agent busy right now? Several places asked this in slightly different
+// ways and one of them asked wrongly, which livelocked the run queue: the drain
+// checked only for a running mission, so during an ordinary run it dequeued an
+// entry, handed it to runAgentTask, which saw the run in flight and put it
+// straight back. Every tick, forever.
+function runInFlight() {
+  return !!currentAbort || activeMission?.status === 'running';
+}
+
 function enterSession(key) {
   const target = String(key || 'window');
   // Never swap under a running loop. The agent loop reads `conversation` as a
@@ -213,7 +222,9 @@ function enterSession(key) {
   // holding a torn copy. It showed up as a run that had been working for
   // minutes suddenly announcing it had no context.
   if (currentAbort && target !== activeSessionKey) {
-    sink.emit('stream:info', `Ignored a session switch to "${target}" while a run is in progress.`);
+    // Console only: a guard against a programming mistake, not news for
+    // whoever is waiting on the run.
+    console.log(`Ignored a session switch to "${target}" while a run is in progress.`);
     return activeSessionKey;
   }
   const current = { conversation, sessionId, contextState, onlineResearch: sessionOnlineResearch };
@@ -1735,6 +1746,14 @@ function contentWithAttachments(text, attachments) {
 }
 
 ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, think, images, imageTypes, imageAttachments, files, subModel, onlineResearch, autoBranch }) => {
+  // A run started elsewhere — Discord, a trigger — does not put this window
+  // into its busy state, so nothing stopped someone typing here while one was
+  // already going. Two loops then shared one conversation and one abort
+  // controller, and the window's message landed in whichever session happened
+  // to be active. Refuse instead.
+  if (runInFlight()) {
+    return { ok: false, error: 'Something is already running. Stop it first, or wait for it to finish.' };
+  }
   enterSession('window');
   const runMode = mode === 'chat' ? 'chat' : 'code';
   rememberLastModel(model);
@@ -3160,7 +3179,7 @@ async function runAgentTask(payload = {}) {
   // Decision A: a request arriving while something is already running is queued,
   // not refused. It expires rather than running hours late, and is
   // re-checkpointed when it actually starts.
-  if (currentAbort || activeMission?.status === 'running') {
+  if (runInFlight()) {
     // A resume restores a serialized conversation into the live session; it
     // cannot sit in the queue behind other work. Try again when idle.
     if (payload.resumeRecord) return { ok: false, error: 'Busy — resume the suspended run when the current one finishes.' };
@@ -3205,6 +3224,14 @@ async function runAgentTask(payload = {}) {
   // think about which session they are looking at.
   const callerSessionKey = activeSessionKey;
   enterSession(sessionKeyFor(payload));
+
+  // A window that does not know a run is happening shows "idle", leaves its
+  // input enabled, and invites exactly the concurrent send that is refused
+  // above. Tell it who is driving.
+  const foreign = (payload.origin || 'ui') !== 'ui';
+  if (foreign && win && !win.isDestroyed()) {
+    win.webContents.send('run:external', { active: true, origin: payload.origin, goal });
+  }
 
   const previousPolicy = runtimeSettings.autonomyPolicy;
   runtimeSettings = { ...runtimeSettings, autonomyPolicy: policyId };
@@ -3348,6 +3375,9 @@ async function runAgentTask(payload = {}) {
     // Hand the session back. currentAbort is already null here, so the guard in
     // enterSession does not block it.
     enterSession(callerSessionKey);
+    if (foreign && win && !win.isDestroyed()) {
+      win.webContents.send('run:external', { active: false, origin: payload.origin, goal });
+    }
     const context = { goal, projectPath: cwd, status };
     const reportPath = runReportPath(finished.id);
     try {
@@ -3588,7 +3618,7 @@ async function fireDueTriggers(now = new Date()) {
 // A queued run is checkpointed and branched at dequeue, inside runAgentTask,
 // rather than against the tree it was queued against hours earlier.
 async function drainRunQueue() {
-  if (activeMission?.status === 'running') return;
+  if (runInFlight()) return;
   const { entry, expired } = dequeueRun(settingsUserDataDir);
   for (const stale of expired) {
     sink.emit('stream:info', `Skipped queued run "${stale.goal}" — it aged out before anything could run it.`);

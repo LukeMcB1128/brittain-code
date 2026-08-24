@@ -151,8 +151,11 @@ test('no run channel bypasses the sink in main.js', () => {
   // which is meaningless without someone watching, and UI state that is not
   // part of a run's narrative. Questions are no longer on this list — they go
   // through the sink so whoever is driving the run can answer.
+  // run:external is window controls, not run narrative: it tells this window
+  // that something else is driving it so the UI stops claiming to be idle.
+  // Pointless to send anywhere but a window, which is the test for this list.
   assert.deepEqual([...new Set(direct)].sort(), [
-    'approval:request', 'checkpoint:state', 'mission:update', 'updates:state',
+    'approval:request', 'checkpoint:state', 'mission:update', 'run:external', 'updates:state',
   ]);
 });
 

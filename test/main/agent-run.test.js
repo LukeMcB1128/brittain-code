@@ -35,8 +35,11 @@ test('/agent is a single agent loop, not the mission pipeline', () => {
 test('a request arriving while busy is queued rather than refused', () => {
   const body = agentHandler();
   assert.match(body, /enqueueRun\(settingsUserDataDir, payload\)/);
-  assert.match(body, /if \(currentAbort \|\| activeMission\?\.status === 'running'\)/,
-    'busy means any run in flight, not only a mission');
+  // Busy means any run in flight, not only a mission. That distinction now
+  // lives in one predicate, because two places asked it differently and the
+  // queue livelocked when they disagreed.
+  assert.match(body, /if \(runInFlight\(\)\) \{/);
+  assert.match(read('main.js'), /return !!currentAbort \|\| activeMission\?\.status === 'running';/);
 });
 
 test('/agent always branches, checkpoints, and reports', () => {

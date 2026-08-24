@@ -60,6 +60,7 @@ contextBridge.exposeInMainWorld('api', {
   onCheckpointState: (cb) => ipcRenderer.on('checkpoint:state', (_e, d) => cb(d)),
   onRunReport: (cb) => ipcRenderer.on('run:report', (_e, d) => cb(d)),
   onRunDecisions: (cb) => ipcRenderer.on('run:decisions', (_e, d) => cb(d)),
+  onExternalRun: (cb) => ipcRenderer.on('run:external', (_e, d) => cb(d)),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   updateState: () => ipcRenderer.invoke('updates:state'),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),

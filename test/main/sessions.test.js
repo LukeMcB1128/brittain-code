@@ -74,7 +74,9 @@ test('every window entry point declares its session', () => {
   for (const handler of ['chat:send', 'chat:loop', 'chat:reset', 'chat:load', 'chat:compact', 'chat:plan', 'chat:orchestrate', 'chat:export']) {
     const at = main.indexOf(`ipcMain.handle('${handler}'`);
     assert.ok(at > 0, `${handler} should exist`);
-    assert.match(main.slice(at, at + 400), /enterSession\('window'\)/, `${handler} must declare its session`);
+    // A wider window than you might expect: chat:send now refuses a concurrent
+    // run before it touches session state at all.
+    assert.match(main.slice(at, at + 900), /enterSession\('window'\)/, `${handler} must declare its session`);
   }
   // chat:get is the exception: it reads without switching, because it is
   // called while other sessions are mid-run.
