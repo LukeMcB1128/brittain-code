@@ -39,6 +39,62 @@ const FATAL_CLOSE = {
 // GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
 const INTENTS = (1 << 9) | (1 << 12) | (1 << 15);
 
+// Discord REST calls for one channel must stay in order. Each channel gets its
+// own promise tail, so a slow reply in one DM does not block another channel.
+// A rate-limited part is retried in place. Advancing to the next part would
+// silently remove text from the answer.
+function createDiscordSender({ token, fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), log = console }) {
+  const tails = new Map();
+
+  async function deliver(channelId, text) {
+    if (!channelId) return false;
+    let sentAny = false;
+    for (const part of chunk(text)) {
+      if (!part.trim()) continue;
+      for (;;) {
+        let res;
+        try {
+          res = await fetchImpl(`${API}/channels/${channelId}/messages`, {
+            method: 'POST',
+            headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: part }),
+          });
+        } catch (error) {
+          log.error?.('Discord send failed:', String(error.message || error));
+          return false;
+        }
+        if (res.status === 429) {
+          const retry = Number((await res.json())?.retry_after || 1);
+          await sleep(retry * 1000);
+          continue;
+        }
+        if (!res.ok) {
+          log.error?.('Discord send failed:', res.status, await res.text());
+          return false;
+        }
+        sentAny = true;
+        break;
+      }
+    }
+    return sentAny;
+  }
+
+  return function send(channelId, text) {
+    const key = String(channelId || '');
+    const previous = tails.get(key) || Promise.resolve();
+    const task = previous.catch(() => {}).then(() => deliver(key, text)).catch((error) => {
+      log.error?.('Discord send failed:', String(error.message || error));
+      return false;
+    });
+    let tracked;
+    tracked = task.finally(() => {
+      if (tails.get(key) === tracked) tails.delete(key);
+    });
+    tails.set(key, tracked);
+    return task;
+  };
+}
+
 // `ask(message, timeoutMs)` runs one daemon command and resolves its reply.
 // `subscribe(fn)` receives run events and returns an unsubscribe function.
 function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = console }) {
@@ -58,25 +114,8 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   // Questions and streamed replies belong to a specific Discord run. Global
   // flags let a second channel answer or suppress the first channel's result.
   const awaitingQuestions = new Map();
-  const streamedRuns = new Set();
-
-  async function send(channelId, text) {
-    if (!channelId) return;
-    for (const part of chunk(text)) {
-      if (!part.trim()) continue;
-      const res = await fetch(`${API}/channels/${channelId}/messages`, {
-        method: 'POST',
-        headers: { Authorization: `Bot ${config.token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: part }),
-      });
-      if (res.status === 429) {
-        const retry = Number((await res.json())?.retry_after || 1);
-        await new Promise((resolve) => setTimeout(resolve, retry * 1000));
-        continue;
-      }
-      if (!res.ok) log.error?.('Discord send failed:', res.status, await res.text());
-    }
-  }
+  const streamedRuns = new Map();
+  const send = createDiscordSender({ token: config.token, log });
 
   // A bot cannot message someone out of the blue without a channel to do it in,
   // and the notifications worth having are exactly the unprompted ones — a run
@@ -189,7 +228,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
         }, 0);
         // A suspension has already said what it is waiting on, so renderResult
         // returns nothing for it rather than repeating itself.
-        const streamed = !!res.runId && streamedRuns.has(res.runId);
+        const streamed = res.runId ? await (streamedRuns.get(res.runId) || false) : false;
         if (res.runId) streamedRuns.delete(res.runId);
         return send(channelId, renderResult(res, streamed));
       }
@@ -323,9 +362,16 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
           return;
         }
         const text = renderEvent(channel, payload);
-        if (!text) return;
-        if (channel === 'stream:message' && route.runId) streamedRuns.add(route.runId);
-        send(target, text).catch(() => {});
+        if (!text) {
+          if (channel === 'stream:done' && route.runId) {
+            const timer = setTimeout(() => streamedRuns.delete(route.runId), 60_000);
+            timer.unref?.();
+          }
+          return;
+        }
+        const delivery = send(target, text);
+        if (channel === 'stream:message' && route.runId) streamedRuns.set(route.runId, delivery);
+        delivery.catch(() => {});
       });
       connect();
       return { notifyChannel };
@@ -341,4 +387,4 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   };
 }
 
-module.exports = { createDiscordBridge, INTENTS };
+module.exports = { createDiscordBridge, createDiscordSender, INTENTS };
