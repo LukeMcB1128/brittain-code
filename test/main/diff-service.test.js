@@ -29,6 +29,10 @@ test('Diff v2 separates staged, unstaged, and untracked files', async (t) => {
 
   const result = await createDiffService({ gitRun }).get(cwd);
   assert.equal(result.ok, true);
+  assert.deepEqual(result.scope, {
+    label: 'Working tree vs HEAD',
+    note: 'Includes staged, unstaged, and untracked changes, including changes that existed before the latest agent run.',
+  });
   assert.deepEqual(result.sections.map((section) => [section.id, section.files.map((file) => file.path)]), [
     ['staged', ['staged.txt']],
     ['unstaged', ['unstaged.txt']],

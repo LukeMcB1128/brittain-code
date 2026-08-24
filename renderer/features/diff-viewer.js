@@ -52,6 +52,13 @@
     body.className = 'diff-v2';
     body.replaceChildren();
 
+    if (result.scope) {
+      const scope = element(documentRef, 'div', 'diff-scope');
+      scope.appendChild(element(documentRef, 'strong', 'diff-scope-label', result.scope.label));
+      scope.appendChild(element(documentRef, 'span', 'diff-scope-note', result.scope.note));
+      body.appendChild(scope);
+    }
+
     const layout = element(documentRef, 'div', 'diff-layout');
     const navigation = element(documentRef, 'nav', 'diff-navigation');
     const content = element(documentRef, 'div', 'diff-content');

@@ -131,6 +131,10 @@ function createDiffService({ gitRun }) {
       const files = sections.flatMap((section) => section.files);
       return {
         ok: true,
+        scope: {
+          label: 'Working tree vs HEAD',
+          note: 'Includes staged, unstaged, and untracked changes, including changes that existed before the latest agent run.',
+        },
         sections,
         totals: {
           files: files.length,

@@ -4,15 +4,31 @@
 }
 
 #overlay-body.diff-v2 {
+  display: flex;
+  flex-direction: column;
   padding: 0;
   white-space: normal;
   word-break: normal;
 }
 
+.diff-scope {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.diff-scope-label { color: var(--accent); white-space: nowrap; }
+.diff-scope-note { overflow-wrap: anywhere; }
+
 .diff-layout {
   display: grid;
+  flex: 1 1 auto;
   grid-template-columns: minmax(190px, 260px) 1fr;
-  height: 100%;
   min-height: 0;
 }
 

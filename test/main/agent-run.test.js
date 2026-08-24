@@ -130,15 +130,14 @@ test('a mission runs without a Git repo instead of failing on the checkpoint', (
   assert.match(main, /ran without a Git repository, so there is no checkpoint to resume/);
 });
 
-test('a moved file reads as a move, not as deletion', () => {
-  // git diff only sees tracked paths, so a file renamed to a path git does not
-  // know about shows as a deletion with nothing on the other side. A run that
-  // reorganised a folder reported "2 files changed, 26 deletions(-)", which
-  // reads as data loss.
+test('the run report compares two complete snapshots', () => {
+  // The checkpoint can contain files that are still untracked in the real
+  // index. Comparing through that index reports them as deleted and then new.
+  // The checkpoint service uses its own index so each file appears once.
   const main = read('main.js');
   const report = main.slice(main.indexOf('async function emitRunReport'), main.indexOf('async function emitRunReport') + 1800);
-  assert.match(report, /ls-files', '--others', '--exclude-standard'/);
-  assert.match(report, /new, untracked:/);
-  // Scoped to the project like the diff above it, for the same reason.
-  assert.match(report, /'--exclude-standard', '--', '\.'\], cwd\)/);
+  assert.match(report, /checkpointService\.diffStat\(cwd\)/);
+  assert.match(report, /no net file changes since the run checkpoint/);
+  assert.match(report, /if \(hasNetFileChanges\) lines\.push\('UNDO is available/);
+  assert.doesNotMatch(report, /new, untracked:/);
 });

@@ -50,6 +50,35 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
     }
   }
 
+  // Compare the current files with the checkpoint through a temporary index.
+  // A checkpoint includes files that were untracked when the run started. A
+  // normal `git diff <checkpoint>` uses the real index, where those files are
+  // still untracked, so Git reports each one twice: deleted from the checkpoint
+  // and new in the working tree. Seeding a temporary index from the checkpoint
+  // and adding the current files gives Git two complete snapshots to compare.
+  async function diffStat(cwd) {
+    const target = lastCheckpoint;
+    if (!target || target.cwd !== cwd) {
+      return { ok: false, out: '', err: 'No checkpoint for this folder in this session.' };
+    }
+    const temporaryIndex = path.join(
+      getTempDirectory(),
+      'brittain-diff-' + Date.now() + '-' + Math.random().toString(36).slice(2),
+    );
+    const env = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
+    try {
+      const read = await gitRun(['read-tree', target.ref], cwd, env);
+      if (!read.ok) return read;
+      const add = await gitRun(['add', '-A', '--', '.'], cwd, env);
+      if (!add.ok) return add;
+      return gitRun(['diff', '--cached', '--stat', target.ref, '--', '.'], cwd, env);
+    } catch (error) {
+      return { ok: false, out: '', err: String(error.message || error) };
+    } finally {
+      try { fs.unlinkSync(temporaryIndex); } catch {}
+    }
+  }
+
   async function undo(cwd) {
     const target = lastCheckpoint;
     if (!target || target.cwd !== cwd) {
@@ -87,7 +116,7 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
     return true;
   }
 
-  return { adopt, create, current: () => lastCheckpoint, prune, undo };
+  return { adopt, create, current: () => lastCheckpoint, diffStat, prune, undo };
 }
 
 module.exports = { createCheckpointService };

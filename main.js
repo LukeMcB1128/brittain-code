@@ -1717,31 +1717,22 @@ async function emitRunReport(cwd, runLog) {
   if (!runLog || (!runLog.mutations.size && !runLog.commands.length)) return; // read-only turns stay quiet
   const lines = ['\u2501 RUN REPORT \u2501'];
   let diffPart = '';
+  let comparedWithCheckpoint = false;
   const lastCheckpoint = checkpointService.current();
   if (lastCheckpoint && lastCheckpoint.cwd === cwd) {
-    // Scope to cwd: when the project folder sits INSIDE a larger repo (e.g.
-    // ~/Downloads is itself a repo), an unscoped diff reports every pending
-    // change anywhere in that repo — unrelated projects included.
-    const stat = await gitRun(['diff', '--stat', lastCheckpoint.ref, '--', '.'], cwd);
+    const stat = await checkpointService.diffStat(cwd);
+    comparedWithCheckpoint = stat.ok;
     if (stat.ok && stat.out.trim()) diffPart = stat.out.trim().split('\n').slice(-11).join('\n');
-
-    // git diff only sees tracked paths, so a file moved to a new name shows as
-    // a deletion and nothing else: a reorganisation reads as data loss. Listing
-    // what arrived untracked is what makes a move look like a move.
-    const untracked = await gitRun(['ls-files', '--others', '--exclude-standard', '--', '.'], cwd);
-    if (untracked.ok && untracked.out.trim()) {
-      const added = untracked.out.trim().split('\n').filter(Boolean);
-      const shown = added.slice(0, 10).join(', ');
-      diffPart += (diffPart ? '\n' : '') + `new, untracked: ${shown}${added.length > 10 ? ` (+${added.length - 10} more)` : ''}`;
-    }
   }
+  const hasNetFileChanges = !!diffPart || (!comparedWithCheckpoint && runLog.mutations.size > 0);
   if (diffPart) lines.push(diffPart);
+  else if (comparedWithCheckpoint) lines.push('no net file changes since the run checkpoint');
   else if (runLog.mutations.size) lines.push('files touched: ' + [...runLog.mutations].slice(0, 10).join(', '));
   if (runLog.commands.length) {
     lines.push(`commands (${runLog.commands.length}): ` + runLog.commands.slice(0, 3).map((c) => (c.length > 60 ? c.slice(0, 60) + '\u2026' : c)).join('  \u00b7  '));
   }
   lines.push(runLog.verified ? '\u2713 a verification command was run' : '\u26a0 NOT VERIFIED \u2014 no test/check command ran this turn');
-  if (runLog.mutations.size) lines.push('UNDO is available in the status bar.');
+  if (hasNetFileChanges) lines.push('UNDO is available in the status bar.');
   sink.emit('stream:info', lines.join('\n'));
   sink.emit('run:report', { cwd, mutations: runLog.mutations.size });
 }
