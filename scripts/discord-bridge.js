@@ -46,7 +46,7 @@ function subscribeOverSocket(listener) {
         if (!line) continue;
         try {
           const message = JSON.parse(line);
-          if (message.event) listener(message.event, message.payload);
+          if (message.event) listener(message.event, message.payload, message.metadata || null);
         } catch {}
       }
     });

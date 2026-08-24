@@ -19,7 +19,7 @@
 // adds is that an approval can travel: a run parks on this machine and the
 // decision arrives from wherever the person is.
 
-const { authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer, HELP } = require('./discord-protocol');
+const { authorize, parseCommand, eventTarget, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer, HELP } = require('./discord-protocol');
 
 const API = 'https://discord.com/api/v10';
 
@@ -46,7 +46,6 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   let heartbeat = null;
   let unsubscribe = null;
   let notifyChannel = '';
-  let lastChannel = '';
   let stopped = false;
   // Captured from READY. A bot that is in no server cannot be DMed at all —
   // Discord refuses to open the channel — so this one number explains most of
@@ -56,14 +55,10 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   // called. "The bridge is running" and "Discord accepted us" are different
   // facts and were being reported as one.
   let gateway = { state: 'starting', lastError: '' };
-  // An ask_user question waiting on a reply. The next ordinary message from an
-  // owner answers it rather than starting a new run — which is what makes a
-  // clarifying question feel like a conversation instead of a dead end.
-  let awaitingQuestion = null;
-  // Whether the model has spoken during the current run. Its closing words go
-  // out live like everything else it says, so the end-of-run message must not
-  // repeat them.
-  let streamedThisRun = false;
+  // Questions and streamed replies belong to a specific Discord run. Global
+  // flags let a second channel answer or suppress the first channel's result.
+  const awaitingQuestions = new Map();
+  const streamedRuns = new Set();
 
   async function send(channelId, text) {
     if (!channelId) return;
@@ -170,7 +165,6 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
         // say. The alternative — narrating every step — turns a chat into a
         // console log nobody reads.
         await send(channelId, '🤖 On it…');
-        streamedThisRun = false;
         const res = await ask({
           cmd: 'run',
           payload: {
@@ -179,11 +173,16 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
             policy: config.policy,
             model: config.model || undefined,
             chatId: `discord-${channelId}`,
+            origin: 'discord',
+            requestId: String(message.id || ''),
+            replyChannelId: String(channelId),
           },
         }, 0);
         // A suspension has already said what it is waiting on, so renderResult
         // returns nothing for it rather than repeating itself.
-        return send(channelId, renderResult(res, streamedThisRun));
+        const streamed = !!res.runId && streamedRuns.has(res.runId);
+        if (res.runId) streamedRuns.delete(res.runId);
+        return send(channelId, renderResult(res, streamed));
       }
       default: return;
     }
@@ -242,7 +241,6 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
         // common it can be now, so try again rather than staying unreachable.
         if (!notifyChannel) {
           notifyChannel = await resolveNotifyChannel();
-          lastChannel = lastChannel || notifyChannel;
           await introduce();
         }
         return;
@@ -257,15 +255,15 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
         log.log?.(`Discord bridge ignored a message: ${allowed.reason}`);
         return;
       }
-      lastChannel = frame.d.channel_id;
       try {
         // A pending question takes the next plain message. Bang-commands still
         // work, so !stop is never swallowed by a question you would rather
         // abandon than answer.
         const content = String(frame.d.content || '').trim();
+        const awaitingQuestion = awaitingQuestions.get(frame.d.channel_id);
         if (awaitingQuestion && content && !content.startsWith('!')) {
           const { id, questions } = awaitingQuestion;
-          awaitingQuestion = null;
+          awaitingQuestions.delete(frame.d.channel_id);
           const res = await ask({ cmd: 'answer', payload: { id, answers: parseAnswer(content, questions) } });
           if (!res.ok) await send(frame.d.channel_id, res.error);
           return;
@@ -300,24 +298,24 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
     async start() {
       stopped = false;
       notifyChannel = await resolveNotifyChannel();
-      // Replies land where you spoke; unprompted messages fall back to the
-      // notification channel, so a run parking while you sleep still reaches you.
-      lastChannel = notifyChannel;
+      // Prompted replies use the destination captured on their run. Scheduled
+      // work uses the notification channel, so it can still reach you first.
       await introduce();
 
-      unsubscribe = subscribe((channel, payload) => {
-        const target = lastChannel || notifyChannel;
+      unsubscribe = subscribe((channel, payload, metadata = null) => {
+        const route = metadata || {};
+        const target = eventTarget(route, notifyChannel);
         if (!target) return;
         if (channel === 'question:request') {
           const text = renderQuestion(payload);
           if (!text) return;
-          awaitingQuestion = { id: payload.id, questions: payload.questions || [] };
+          awaitingQuestions.set(target, { id: payload.id, runId: route.runId || '', questions: payload.questions || [] });
           send(target, text).catch(() => {});
           return;
         }
         const text = renderEvent(channel, payload);
         if (!text) return;
-        if (channel === 'stream:message') streamedThisRun = true;
+        if (channel === 'stream:message' && route.runId) streamedRuns.add(route.runId);
         send(target, text).catch(() => {});
       });
       connect();

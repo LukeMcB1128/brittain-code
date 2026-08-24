@@ -70,7 +70,7 @@ test('the bridge can reach you without being spoken to first', () => {
   assert.match(bridge, /async function resolveNotifyChannel\(\)/);
   assert.match(bridge, /notifyChannelId/);
   assert.match(bridge, /recipient_id: owner/, 'it opens a DM with the owner when no channel is configured');
-  assert.match(bridge, /const target = lastChannel \|\| notifyChannel;/, 'unprompted events fall back to the notify channel');
+  assert.match(bridge, /const target = eventTarget\(route, notifyChannel\);/, 'each event resolves its declared destination');
   assert.match(bridge, /notifyChannel = await resolveNotifyChannel\(\);/);
 });
 

@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, MAX_DISCORD_MESSAGE,
+  authorize, parseCommand, eventTarget, chunk, renderPending, renderEvent, renderResult, MAX_DISCORD_MESSAGE,
 } = require('../../src/bridge/discord-protocol');
 
 const config = { ownerIds: ['111'], channelIds: ['999'] };
@@ -67,6 +67,14 @@ test('approve and deny default to every parked call', () => {
   assert.deepEqual(parseCommand('!approve'), { kind: 'resolve', approved: true, selector: 'all' });
   assert.deepEqual(parseCommand('!approve 2'), { kind: 'resolve', approved: true, selector: '2' });
   assert.deepEqual(parseCommand('!deny all'), { kind: 'resolve', approved: false, selector: 'all' });
+});
+
+test('run events return only to their declared Discord destination', () => {
+  assert.equal(eventTarget({ origin: 'discord', replyChannelId: 'channel-1' }, 'notify'), 'channel-1');
+  assert.equal(eventTarget({ origin: 'ui', replyChannelId: 'channel-1' }, 'notify'), '');
+  assert.equal(eventTarget({ origin: 'remote' }, 'notify'), '');
+  assert.equal(eventTarget({ origin: 'trigger' }, 'notify'), 'notify');
+  assert.equal(eventTarget({ origin: 'heartbeat' }, 'notify'), 'notify');
 });
 
 // --- rendering ---

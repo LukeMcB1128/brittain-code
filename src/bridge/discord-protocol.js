@@ -56,6 +56,15 @@ function parseCommand(content) {
   }
 }
 
+// A run event carries its own destination. App work has no Discord target and
+// must stay in the app. Scheduled work is the one intentional exception: it is
+// unprompted, so it uses the configured notification channel.
+function eventTarget(metadata, notifyChannel = '') {
+  if (metadata?.origin === 'discord' && metadata.replyChannelId) return String(metadata.replyChannelId);
+  if (metadata?.origin === 'trigger' || metadata?.origin === 'heartbeat') return String(notifyChannel || '');
+  return '';
+}
+
 const HELP = [
   '**Brittain Code**',
   'Send anything and I run it as a task. No prefix needed.',
@@ -229,5 +238,5 @@ function renderResult(result, streamed = false) {
 
 module.exports = {
   MAX_DISCORD_MESSAGE, HELP, RELAYED,
-  authorize, parseCommand, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer, NOTEWORTHY,
+  authorize, parseCommand, eventTarget, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer, NOTEWORTHY,
 };

@@ -423,12 +423,16 @@ const daemonStartedAt = new Date().toISOString();
 // Discord bridge — registers here. One tap on sink.emit feeds them all, so the
 // sink itself stays unaware of who is listening.
 const runEventListeners = new Set();
+let activeEventRoute = null;
+let activeEventSequence = 0;
 function tapRunEvents() {
   const originalEmit = sink.emit;
-  sink.emit = (channel, payload) => {
+  sink.emit = (channel, payload, routeOverride) => {
     originalEmit(channel, payload);
+    const route = routeOverride === undefined ? activeEventRoute : routeOverride;
+    const metadata = route ? { ...route, sequence: ++activeEventSequence } : null;
     for (const listener of runEventListeners) {
-      try { listener(channel, payload); } catch {}
+      try { listener(channel, payload, metadata); } catch {}
     }
   };
 }
@@ -548,8 +552,8 @@ app.whenReady().then(async () => {
     // unix socket. The run sink already drops renderer sends harmlessly.
     const handlers = commandHandlers();
     daemonServer = daemon.startServer(settingsUserDataDir, handlers);
-    runEventListeners.add((channel, payload) => {
-      try { daemonServer.broadcast(channel, payload); } catch {}
+    runEventListeners.add((channel, payload, metadata) => {
+      try { daemonServer.broadcast(channel, payload, metadata); } catch {}
     });
     startTriggerScheduler();
     startDiscordBridge(handlers);
@@ -3265,6 +3269,15 @@ async function runAgentTask(payload = {}) {
     run.id = resume.runId;
     run.parked = resume.parked || [];
   }
+  activeEventSequence = 0;
+  activeEventRoute = {
+    runId: run.id,
+    requestId: payload.requestId || '',
+    origin: payload.origin || 'ui',
+    sessionKey: activeSessionKey,
+    replyChannelId: payload.replyChannelId || '',
+    goal,
+  };
   run.transcriptPath = resume?.transcriptPath
     || path.join(settingsUserDataDir || app.getPath('userData'), 'runs', `${run.id}.log`);
   sink.configure({ targets: ['renderer', 'file'], transcriptPath: run.transcriptPath });
@@ -3359,6 +3372,8 @@ async function runAgentTask(payload = {}) {
           goal, cwd, model,
           sessionKey: activeSessionKey,
           origin: payload.origin || '',
+          requestId: payload.requestId || '',
+          replyChannelId: payload.replyChannelId || '',
           subModel: payload.subModel || 'qwen3:8b',
           think: !!payload.think,
           onlineResearch: !!payload.onlineResearch,
@@ -3427,8 +3442,9 @@ async function runAgentTask(payload = {}) {
       sink.emit('stream:info', 'This project has no .brittain/ workspace — /workspace init keeps memory in the repo (visible in diffs) and enables heartbeat runs.');
     }
     sink.done();
+    activeEventRoute = null;
   }
-  return { ok: true, status, content: finalContent, ...summary };
+  return { ok: true, runId: run.id, status, content: finalContent, ...summary };
 }
 
 ipcMain.handle('agent:run', async (_e, payload = {}) => runAgentTask({ ...payload, origin: 'ui' }));

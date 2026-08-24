@@ -77,9 +77,9 @@ function startServer(userDataDir, handlers) {
   });
   server.listen(target);
 
-  function broadcast(channel, payload) {
+  function broadcast(channel, payload, metadata = null) {
     if (!attached.size) return;
-    const line = JSON.stringify({ event: channel, payload }) + '\n';
+    const line = JSON.stringify({ event: channel, payload, metadata }) + '\n';
     for (const socket of attached) {
       try { socket.write(line); } catch { attached.delete(socket); }
     }
