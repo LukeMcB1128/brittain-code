@@ -25,6 +25,14 @@ test('a run may wait indefinitely; only run does', () => {
   assert.match(bridge, /ask\(\{ cmd: 'status' \}\)/, 'status keeps the default deadline');
 });
 
+test('status reports an ordinary agent run as well as a mission', () => {
+  const main = read('main.js');
+  const bridge = read('src/bridge/discord-client.js');
+  assert.match(main, /run: currentRun \? \{/);
+  assert.match(main, /goal: currentRun\.goal/);
+  assert.match(bridge, /res\.run\?\.status === 'running'/);
+});
+
 test('the bridge adds no authority of its own', () => {
   const bridge = read('src/bridge/discord-client.js');
   // It must not execute anything itself, or reach past the daemon.

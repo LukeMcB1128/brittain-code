@@ -440,7 +440,19 @@ function commandHandlers() {
   return {
     ping: () => ({ ok: true, pid: process.pid, startedAt: daemonStartedAt }),
     run: (payload) => runAgentTask({ ...payload, origin: payload.origin || 'remote' }),
-    status: () => ({ ok: true, mission: activeMission, queued: peekQueue(settingsUserDataDir).map((entry) => entry.goal) }),
+    status: () => ({
+      ok: true,
+      mission: activeMission,
+      run: currentRun ? {
+        runId: currentRun.id,
+        status: 'running',
+        goal: currentRun.goal || currentRun.label || '',
+        origin: currentRun.origin || '',
+        chatId: currentRun.chatId || '',
+        startedAt: currentRun.startedAt,
+      } : null,
+      queued: peekQueue(settingsUserDataDir).map((entry) => entry.goal),
+    }),
     // The park loop, served remotely. This is what lets an approval travel: a
     // run parks here, the decision is made from wherever the person is, and
     // the run resumes on this machine with the arguments it froze.
@@ -750,12 +762,15 @@ let currentRun = null;
 // The last run's record outlives it, so the tray is still readable afterwards.
 let lastFinishedRun = null;
 
-function beginRun({ attended = true, transcriptPath = '', label = '', cwd = '' } = {}) {
+function beginRun({ attended = true, transcriptPath = '', label = '', cwd = '', goal = '', origin = '', chatId = '' } = {}) {
   currentRun = {
     id: `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     label,
     attended,
     cwd,
+    goal,
+    origin,
+    chatId,
     startedAt: new Date().toISOString(),
     decisions: [],
     // Calls held for a human decision while the run suspends: name, frozen
@@ -3238,7 +3253,14 @@ async function runAgentTask(payload = {}) {
   // A resume continues the suspended run's identity: same id, same transcript,
   // and the parked entries already decided carry over into the record.
   const resume = payload.resumeRecord || null;
-  const run = beginRun({ attended: false, label: resume ? 'agent-resume' : 'agent', cwd });
+  const run = beginRun({
+    attended: false,
+    label: resume ? 'agent-resume' : 'agent',
+    cwd,
+    goal,
+    origin: payload.origin || 'ui',
+    chatId: payload.chatId || '',
+  });
   if (resume) {
     run.id = resume.runId;
     run.parked = resume.parked || [];

@@ -46,7 +46,7 @@ test('/agent always branches, checkpoints, and reports', () => {
   const body = agentHandler();
   assert.match(body, /maybeAutoBranch\(cwd, goal, true\)/, 'an unattended run branches for undo where it can');
   assert.match(body, /await createCheckpoint\(cwd\)/);
-  assert.match(body, /beginRun\(\{ attended: false/);
+  assert.match(body, /beginRun\(\{\s*attended: false/);
   assert.match(body, /renderRunReport\(finished, context\)/);
   assert.match(body, /notifyRunFinished\(/);
   // The report and decision log are emitted from a finally block, so a run that
@@ -56,7 +56,7 @@ test('/agent always branches, checkpoints, and reports', () => {
 
 test('the run is treated as unattended so an ask becomes a defer, not a hang', () => {
   const main = read('main.js');
-  assert.match(main, /beginRun\(\{ attended: false/, 'the agent run declares itself unattended');
+  assert.match(main, /beginRun\(\{\s*attended: false/, 'the agent run declares itself unattended');
   // resolveToolCall reads attended from the run context rather than a caller
   // flag, so every tool call in the loop knows nobody is watching.
   assert.match(main, /const attended = currentRun \? currentRun\.attended : true;/);
