@@ -23,7 +23,7 @@ const { createHistoryStore, safeChatId } = require('./src/main/history-store');
 const { createSessions, sessionKeyFor } = require('./src/main/sessions');
 const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
-const { enqueue: enqueueRun, dequeue: dequeueRun, peek: peekQueue } = require('./src/main/run-queue');
+const { enqueue: enqueueRun, dequeue: dequeueRun, peek: peekQueue, cancel: cancelQueuedRuns } = require('./src/main/run-queue');
 const { readTriggers, dueTriggers, validateTrigger, ensureConfig: ensureTriggerConfig, configPath: triggerConfigPath } = require('./src/main/triggers');
 const { decide: decideAutonomy, getPolicy, listPolicies, policyForLegacyAutoApprove, loadCustomPolicies, checkPreconditions, ensureConfig: ensureAutonomyConfig, narrowPolicy, BUILT_IN: BUILT_IN_POLICIES } = require('./src/main/autonomy');
 const workspace = require('./src/main/workspace');
@@ -479,11 +479,22 @@ function commandHandlers() {
     resume: ({ runId }) => resumeSuspendedRun(runId),
     // ask_user, answered from wherever the run is being driven from.
     answer: ({ id, answers }) => answerQuestion(id, answers),
-    stop: () => {
-      if (!currentAbort) return { ok: false, error: 'Nothing is running.' };
-      stopRequested = true;
-      currentAbort.abort();
-      return { ok: true };
+    stop: ({ chatId = '', cancelQueued = false } = {}) => {
+      const cancelled = cancelQueued && chatId
+        ? cancelQueuedRuns(settingsUserDataDir, (entry) => entry.chatId === chatId).removed
+        : [];
+      const stopping = !!currentAbort;
+      if (stopping) {
+        stopRequested = true;
+        currentAbort.abort();
+      }
+      if (!stopping && !cancelled.length) return { ok: false, error: 'Nothing is running or queued for this conversation.' };
+      return {
+        ok: true,
+        stopping,
+        activeGoal: currentRun?.goal || '',
+        cancelledQueued: cancelled.map((entry) => ({ id: entry.id, goal: entry.goal })),
+      };
     },
   };
 }

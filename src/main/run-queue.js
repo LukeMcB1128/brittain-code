@@ -99,7 +99,20 @@ function clear(userDataDir) {
   writeQueue(userDataDir, []);
 }
 
+// Remove only work owned by the caller that cancelled it. A Discord stop in
+// one channel must not erase a trigger or a request from another channel.
+function cancel(userDataDir, predicate) {
+  const removed = [];
+  const kept = [];
+  for (const entry of readQueue(userDataDir)) {
+    if (typeof predicate === 'function' && predicate(entry)) removed.push(entry);
+    else kept.push(entry);
+  }
+  if (removed.length) writeQueue(userDataDir, kept);
+  return { removed, remaining: kept };
+}
+
 module.exports = {
-  enqueue, dequeue, peek, clear, readQueue, queuePath, isExpired,
+  enqueue, dequeue, peek, clear, cancel, readQueue, queuePath, isExpired,
   DEFAULT_MAX_AGE_MS, MAX_ENTRIES,
 };

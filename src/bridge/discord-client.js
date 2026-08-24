@@ -156,8 +156,17 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       }
 
       case 'stop': {
-        const res = await ask({ cmd: 'stop' });
-        return send(channelId, res.ok ? 'Stopping after the current operation.' : res.error);
+        const res = await ask({
+          cmd: 'stop',
+          payload: { chatId: `discord-${channelId}`, cancelQueued: true },
+        });
+        if (!res.ok) return send(channelId, res.error);
+        const parts = [];
+        if (res.stopping) parts.push('Stopping after the current operation.');
+        if (res.cancelledQueued?.length) {
+          parts.push(`Cancelled ${res.cancelledQueued.length} queued request${res.cancelledQueued.length === 1 ? '' : 's'} from this conversation.`);
+        }
+        return send(channelId, parts.join('\n'));
       }
 
       case 'run': {

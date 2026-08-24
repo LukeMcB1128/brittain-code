@@ -16,6 +16,13 @@ test('the daemon serves the park loop, which is what lets an approval travel', (
   assert.match(handlers, /resume: \(\{ runId \}\) => resumeSuspendedRun\(runId\)/);
 });
 
+test('Discord stop also cancels queued work from the same conversation', () => {
+  const main = read('main.js');
+  const bridge = read('src/bridge/discord-client.js');
+  assert.match(main, /cancelQueuedRuns\(settingsUserDataDir, \(entry\) => entry\.chatId === chatId\)/);
+  assert.match(bridge, /chatId: `discord-\$\{channelId\}`,[\s\S]{0,80}cancelQueued: true/);
+});
+
 test('a run may wait indefinitely; only run does', () => {
   // A run's reply arrives when the agent finishes, which is minutes away — but
   // a status or pending query that hangs forever would wedge the bridge.

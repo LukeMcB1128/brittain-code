@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { enqueue, dequeue, peek, clear, queuePath, DEFAULT_MAX_AGE_MS, MAX_ENTRIES } = require('../../src/main/run-queue');
+const { enqueue, dequeue, peek, clear, cancel, queuePath, DEFAULT_MAX_AGE_MS, MAX_ENTRIES } = require('../../src/main/run-queue');
 
 function withDir(run) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brittain-queue-'));
@@ -91,6 +91,17 @@ test('entries without a trigger id are never de-duplicated against each other', 
     enqueue(dir, request({ goal: 'one-off a' }));
     enqueue(dir, request({ goal: 'one-off b' }));
     assert.equal(peek(dir).length, 2);
+  });
+});
+
+test('cancelling one conversation keeps unrelated queued work', () => {
+  withDir((dir) => {
+    enqueue(dir, request({ goal: 'discord one', chatId: 'discord-1' }));
+    enqueue(dir, request({ goal: 'discord two', chatId: 'discord-2' }));
+    enqueue(dir, request({ goal: 'scheduled', triggerId: 'nightly', chatId: 'trigger-nightly' }));
+    const result = cancel(dir, (entry) => entry.chatId === 'discord-1');
+    assert.deepEqual(result.removed.map((entry) => entry.goal), ['discord one']);
+    assert.deepEqual(peek(dir).map((entry) => entry.goal), ['discord two', 'scheduled']);
   });
 });
 
