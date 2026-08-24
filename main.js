@@ -4590,7 +4590,7 @@ ipcMain.handle('daemon:install', async () => {
     const plistPath = daemon.launchAgentPath();
     const appPath = app.isPackaged ? '' : app.getAppPath();
     fs.mkdirSync(path.dirname(plistPath), { recursive: true });
-    fs.writeFileSync(plistPath, daemon.launchAgentPlist(process.execPath, appPath), 'utf8');
+    fs.writeFileSync(plistPath, daemon.launchAgentPlist(process.execPath, appPath, { logDir: settingsUserDataDir }), 'utf8');
     await new Promise((resolve) => {
       const child = spawn('launchctl', ['load', '-w', plistPath], { stdio: 'ignore' });
       child.on('close', resolve);

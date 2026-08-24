@@ -119,11 +119,33 @@ function launchAgentPath() {
   return path.join(require('os').homedir(), 'Library', 'LaunchAgents', 'com.brittain.code.daemon.plist');
 }
 
-function launchAgentPlist(execPath, appPath) {
+// launchd hands a job a minimal PATH — /usr/bin:/bin:/usr/sbin:/sbin — which
+// contains no node. MCP servers are spawned as `npx ...`, so under launchd they
+// simply fail to start while working perfectly when the app is opened normally.
+// The PATH the installer is running with is the one that works, so carry it
+// over, with the usual node locations as a floor in case the installer's own
+// PATH was inherited from launchd too.
+function daemonPath(currentPath = process.env.PATH || '') {
+  const floor = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+  const seen = new Set();
+  return [...String(currentPath).split(':'), ...floor]
+    .map((entry) => entry.trim())
+    .filter((entry) => entry && !seen.has(entry) && seen.add(entry))
+    .join(':');
+}
+
+// KeepAlive is unconditional on purpose. The first version restarted only on
+// failure, so a single clean exit left the daemon dead — the job sat at
+// "runs = 1, last exit code = 0" for days while the app still reported it as
+// installed. A thing called a daemon should come back.
+function launchAgentPlist(execPath, appPath, { logDir = '', env = process.env } = {}) {
   // Dev runs need the app path argument (electron <app> --headless); a
   // packaged app's binary takes --headless alone.
   const args = [execPath, ...(appPath ? [appPath] : []), '--headless']
     .map((value) => `    <string>${value}</string>`).join('\n');
+  const logs = logDir ? `
+  <key>StandardOutPath</key><string>${path.join(logDir, 'daemon.out.log')}</string>
+  <key>StandardErrorPath</key><string>${path.join(logDir, 'daemon.err.log')}</string>` : '';
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -133,11 +155,18 @@ function launchAgentPlist(execPath, appPath) {
   <array>
 ${args}
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>${daemonPath(env.PATH)}</string>
+  </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <!-- Restart whenever it exits, for any reason. ThrottleInterval stops a
+       broken build from spinning. -->
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>${logs}
 </dict>
 </plist>
 `;
 }
 
-module.exports = { socketPath, daemonAlive, startServer, sendCommand, launchAgentPath, launchAgentPlist };
+module.exports = { socketPath, daemonAlive, startServer, sendCommand, launchAgentPath, launchAgentPlist, daemonPath };
