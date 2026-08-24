@@ -52,6 +52,13 @@ function parseCommand(content) {
     case 'resume': return { kind: 'resume', runId: argument };
     case 'stop': return { kind: 'stop' };
     case 'run': return argument ? { kind: 'run', goal: argument } : { kind: 'error', error: 'Usage: !run <goal>' };
+    // Session housekeeping, mirroring the slash commands in the app. These act
+    // on this channel's conversation, not on whatever the window has open.
+    case 'compact': return { kind: 'compact' };
+    case 'clear': case 'new': return { kind: 'clear' };
+    case 'usage': case 'context': return { kind: 'usage' };
+    case 'ledger': return { kind: 'ledger' };
+    case 'memory': return { kind: 'memory' };
     default: return { kind: 'error', error: `Unknown command "!${word}". !help for the list.` };
   }
 }
@@ -74,6 +81,13 @@ const HELP = [
   '`!resume` — carry on after deciding',
   '`!status` — am I busy?',
   '`!stop` — stop what I am doing',
+  '',
+  '**This conversation**',
+  '`!compact` — summarise the older half to free up room',
+  '`!clear` — start fresh, forgetting what we have said here',
+  '`!usage` — how full the context is',
+  '`!ledger` — files changed and commands run',
+  '`!memory` — what I have remembered about this project',
 ].join('\n');
 
 // Discord hard-caps a message at 2000 characters. Splitting on line boundaries
@@ -208,6 +222,31 @@ function parseAnswer(reply, questions = []) {
   });
 }
 
+// Compaction, reported the way it matters to someone in a chat: what it did to
+// the room, not the internal description. A failure says why.
+function renderCompaction(result) {
+  if (!result?.ok) return `⚠️ Could not compact: ${result?.error || 'unknown reason'}`;
+  const before = Number(result.beforeTokens || 0);
+  const after = Number(result.approxTokens || 0);
+  const saved = before && after && before > after ? ` — ${Math.round((1 - after / before) * 100)}% smaller` : '';
+  return `🗜️ Compacted${saved}. ${result.description || 'Older messages summarised; recent ones kept as they were.'}`;
+}
+
+function renderUsage(result, contextLength = 0) {
+  if (!result?.ok) return `⚠️ ${result?.error || 'could not read usage'}`;
+  const tokens = Number(result.approxTokens || 0);
+  const limit = Number(contextLength || 0);
+  const share = limit ? ` of ${limit.toLocaleString()} (${Math.round((tokens / limit) * 100)}%)` : '';
+  return `${result.messages} message(s), about ${tokens.toLocaleString()} tokens${share}.`;
+}
+
+function renderMemory(result) {
+  if (!result?.ok) return `⚠️ ${result?.error || 'could not read memory'}`;
+  const content = String(result.content || '').trim();
+  if (!content) return 'Nothing remembered for this project yet.';
+  return [`**Remembered**${result.inRepo ? ' (in the repo)' : ''}:`, '', content].join('\n');
+}
+
 // The end of a run, as a person would want it: the answer first, then one line
 // of what it did. A run that changed nothing and said nothing still says so,
 // because silence is indistinguishable from a bridge that broke.
@@ -238,5 +277,6 @@ function renderResult(result, streamed = false) {
 
 module.exports = {
   MAX_DISCORD_MESSAGE, HELP, RELAYED,
-  authorize, parseCommand, eventTarget, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer, NOTEWORTHY,
+  authorize, parseCommand, eventTarget, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer,
+  renderCompaction, renderUsage, renderMemory, NOTEWORTHY,
 };

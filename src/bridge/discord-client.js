@@ -19,7 +19,8 @@
 // adds is that an approval can travel: a run parks on this machine and the
 // decision arrives from wherever the person is.
 
-const { authorize, parseCommand, eventTarget, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer, HELP } = require('./discord-protocol');
+const { authorize, parseCommand, eventTarget, chunk, renderPending, renderEvent, renderResult, renderQuestion, parseAnswer,
+  renderCompaction, renderUsage, renderMemory, HELP } = require('./discord-protocol');
 
 const API = 'https://discord.com/api/v10';
 
@@ -145,6 +146,12 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
     }
   }
 
+  // The same key runAgentTask derives for a run from this channel, so
+  // housekeeping and runs agree on which conversation they mean.
+  function sessionKeyFor(channelId) {
+    return `discord-${channelId}`;
+  }
+
   async function handle(message, channelId) {
     const command = parseCommand(message.content);
     switch (command.kind) {
@@ -195,6 +202,38 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
         await send(channelId, `▶️ Resuming ${record.runId}…`);
         const res = await ask({ cmd: 'resume', payload: { runId: record.runId } }, 0);
         return send(channelId, res.ok ? `Finished: ${res.status}` : `Resume failed: ${res.error}`);
+      }
+
+      // Session housekeeping. Each names this channel's conversation, so a
+      // compact here never touches whatever the app has open.
+      case 'compact': {
+        await send(channelId, '🗜️ Summarising the older half…');
+        const res = await ask({ cmd: 'compact', payload: { sessionKey: sessionKeyFor(channelId), model: config.model || undefined } }, 0);
+        return send(channelId, renderCompaction(res));
+      }
+
+      case 'clear': {
+        const res = await ask({ cmd: 'clear', payload: { sessionKey: sessionKeyFor(channelId) } });
+        if (!res.ok) return send(channelId, `⚠️ ${res.error}`);
+        return send(channelId, res.cleared
+          ? `Cleared ${res.cleared} message(s). Starting fresh — I have forgotten what we said here.`
+          : 'Already empty. Nothing to clear.');
+      }
+
+      case 'usage': {
+        const res = await ask({ cmd: 'usage', payload: { sessionKey: sessionKeyFor(channelId) } });
+        return send(channelId, renderUsage(res, res.metrics?.contextLength));
+      }
+
+      case 'ledger': {
+        const res = await ask({ cmd: 'ledger', payload: { sessionKey: sessionKeyFor(channelId) } });
+        if (!res.ok) return send(channelId, `⚠️ ${res.error}`);
+        return send(channelId, res.empty ? 'Nothing changed or ran in this conversation yet.' : res.rendered);
+      }
+
+      case 'memory': {
+        const res = await ask({ cmd: 'memory', payload: { cwd: config.cwd } });
+        return send(channelId, renderMemory(res));
       }
 
       case 'stop': {

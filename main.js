@@ -489,6 +489,46 @@ function commandHandlers() {
     resume: ({ runId }) => resumeSuspendedRun(runId),
     // ask_user, answered from wherever the run is being driven from.
     answer: ({ id, answers }) => answerQuestion(id, answers),
+
+    // Session housekeeping, for a caller with no window. Each names the
+    // conversation it means, because a Discord thread asking to be compacted
+    // must not compact whatever the app happens to have open.
+    compact: ({ sessionKey, model }) => withSession(sessionKey, async () => {
+      if (!conversation.length) return { ok: false, error: 'Nothing to compact yet.' };
+      stopRequested = false;
+      currentAbort = new AbortController();
+      try {
+        return await compactConversation(model || runtimeSettings.codeModel || runtimeSettings.lastModel, currentAbort.signal);
+      } finally {
+        currentAbort = null;
+      }
+    }),
+
+    clear: ({ sessionKey }) => withSession(sessionKey, () => {
+      const had = conversation.length;
+      conversation = [];
+      newSessionId();
+      return { ok: true, cleared: had };
+    }),
+
+    usage: ({ sessionKey }) => withSession(sessionKey, () => ({
+      ok: true,
+      messages: conversation.length,
+      approxTokens: estimateTokens(modelReadyMessages(conversation)),
+      metrics: { ...usage.metrics },
+    })),
+
+    ledger: ({ sessionKey }) => withSession(sessionKey, () => {
+      const built = buildLedger(conversation);
+      return { ok: true, empty: isEmptyLedger(built), rendered: renderLedger(built) };
+    }),
+
+    memory: ({ cwd }) => ({
+      ok: true,
+      path: cwd ? memoryPath(cwd) : '',
+      content: cwd ? readMemory(cwd) : '',
+      inRepo: cwd ? workspace.hasWorkspace(cwd) : false,
+    }),
     stop: ({ chatId = '', cancelQueued = false } = {}) => {
       const cancelled = cancelQueued && chatId
         ? cancelQueuedRuns(settingsUserDataDir, (entry) => entry.chatId === chatId).removed
@@ -507,6 +547,24 @@ function commandHandlers() {
       };
     },
   };
+}
+
+// Run something inside another session and put the previous one back.
+//
+// The commands a person sends from Discord — compact this, clear that, what has
+// it done — are about *their* conversation, not whichever one the window is
+// showing. Everything here therefore has to name a session, and none of it can
+// run while an agent run is in flight: switching under a live loop is exactly
+// the tearing that enterSession refuses.
+async function withSession(key, fn) {
+  if (runInFlight()) return { ok: false, error: 'Something is running right now. Try again when it finishes, or !stop it.' };
+  const previous = activeSessionKey;
+  enterSession(key);
+  try {
+    return await fn();
+  } finally {
+    enterSession(previous);
+  }
 }
 
 // Starts the Discord bridge in this process when discord.json enables it.
