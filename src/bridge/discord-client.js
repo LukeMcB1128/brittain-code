@@ -115,6 +115,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   // flags let a second channel answer or suppress the first channel's result.
   const awaitingQuestions = new Map();
   const streamedRuns = new Map();
+  const queuedRequests = new Set();
   const send = createDiscordSender({ token: config.token, log });
 
   // A bot cannot message someone out of the blue without a channel to do it in,
@@ -226,6 +227,10 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
             replyChannelId: String(channelId),
           },
         }, 0);
+        if (res.queued) {
+          if (message.id) queuedRequests.add(String(message.id));
+          return send(channelId, renderResult(res, false));
+        }
         // A suspension has already said what it is waiting on, so renderResult
         // returns nothing for it rather than repeating itself.
         const streamed = res.runId ? await (streamedRuns.get(res.runId) || false) : false;
@@ -359,6 +364,17 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
           if (!text) return;
           awaitingQuestions.set(target, { id: payload.id, runId: route.runId || '', questions: payload.questions || [] });
           send(target, text).catch(() => {});
+          return;
+        }
+        if (channel === 'stream:done' && route.requestId && queuedRequests.has(route.requestId)) {
+          queuedRequests.delete(route.requestId);
+          const finishQueued = async () => {
+            const streamed = route.runId ? await (streamedRuns.get(route.runId) || false) : false;
+            if (route.runId) streamedRuns.delete(route.runId);
+            const result = renderResult(payload, streamed);
+            if (result) await send(target, result);
+          };
+          finishQueued().catch(() => {});
           return;
         }
         const text = renderEvent(channel, payload);

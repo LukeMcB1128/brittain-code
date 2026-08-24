@@ -23,6 +23,14 @@ test('Discord stop also cancels queued work from the same conversation', () => {
   assert.match(bridge, /chatId: `discord-\$\{channelId\}`,[\s\S]{0,80}cancelQueued: true/);
 });
 
+test('a queued Discord request receives its eventual completion', () => {
+  const bridge = read('src/bridge/discord-client.js');
+  const main = read('main.js');
+  assert.match(bridge, /queuedRequests\.add\(String\(message\.id\)\)/);
+  assert.match(bridge, /channel === 'stream:done'[\s\S]{0,220}queuedRequests\.has\(route\.requestId\)/);
+  assert.match(main, /sink\.done\(\{ ok: true, runId: run\.id, status, content: finalContent, \.\.\.summary \}\)/);
+});
+
 test('a run may wait indefinitely; only run does', () => {
   // A run's reply arrives when the agent finishes, which is minutes away — but
   // a status or pending query that hangs forever would wedge the bridge.

@@ -3453,8 +3453,14 @@ async function runAgentTask(payload = {}) {
       workspaceHintShown.add(cwd);
       sink.emit('stream:info', 'This project has no .brittain/ workspace — /workspace init keeps memory in the repo (visible in diffs) and enables heartbeat runs.');
     }
-    sink.done();
+    sink.done({ ok: true, runId: run.id, status, content: finalContent, ...summary });
     activeEventRoute = null;
+    // Do not make a person wait for the minute scheduler after the active run
+    // finishes. setImmediate lets the current caller receive its final result
+    // before the next queued run starts emitting events.
+    setImmediate(() => drainRunQueue().catch((err) => {
+      sink.emit('stream:info', `Queued run failed: ${String(err.message || err)}`);
+    }));
   }
   return { ok: true, runId: run.id, status, content: finalContent, ...summary };
 }

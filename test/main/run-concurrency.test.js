@@ -24,6 +24,14 @@ test('the queue does not dequeue work it cannot start', () => {
   assert.ok(drain.indexOf('runInFlight()') < drain.indexOf('dequeueRun'));
 });
 
+test('a finished run starts the next queued request without waiting a minute', () => {
+  const main = read('main.js');
+  const task = main.slice(main.indexOf('async function runAgentTask'), main.indexOf("ipcMain.handle('agent:run'"));
+  assert.match(task, /setImmediate\(\(\) => drainRunQueue\(\)/);
+  assert.ok(task.indexOf('activeEventRoute = null') < task.indexOf('setImmediate(() => drainRunQueue()'),
+    'the finished run must release its event route before the next run starts');
+});
+
 test('the window cannot start a second run on top of one already going', () => {
   // A run started elsewhere does not set this window's busy state, so nothing
   // stopped a send landing mid-run. Two loops then shared one conversation and
