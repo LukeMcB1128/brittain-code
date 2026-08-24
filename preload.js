@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld('api', {
   discordOpenConfig: () => ipcRenderer.invoke('discord:openConfig'),
   daemonStatus: () => ipcRenderer.invoke('daemon:status'),
   daemonInstall: () => ipcRenderer.invoke('daemon:install'),
+  daemonStart: () => ipcRenderer.invoke('daemon:start'),
+  daemonStop: () => ipcRenderer.invoke('daemon:stop'),
   daemonUninstall: () => ipcRenderer.invoke('daemon:uninstall'),
   usageGet: () => ipcRenderer.invoke('usage:get'),
   mcpStatus: () => ipcRenderer.invoke('mcp:status'),

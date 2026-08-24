@@ -1965,7 +1965,7 @@ const SLASH_HELP = [
   '/auto <request> — select the best compatible installed model and run the request',
   '/agent [--policy <name>] <goal> — run unattended: always branched, always checkpointed, always reported',
   '/agent trigger [list|new|run <id>|enable <id>|disable <id>] — scheduled unattended runs; enable/disable are for project (.brittain) triggers',
-  '/agent daemon [status|install|uninstall] — the headless runtime that keeps triggers firing with the app closed',
+  '/agent daemon [status|start|stop|install|uninstall] — the headless runtime that keeps triggers firing with the app closed',
   '/pending [approve|deny [<run>] [n|all]|resume [<run>]] — parked calls from suspended unattended runs; the run id is optional when only one is waiting',
   '/policies [edit|promote <policy> <tool>] — autonomy policies, held calls, and evidence-backed promotion suggestions',
   '/discord [edit] — bridge a Discord bot to the agent so it is reachable from a phone',
@@ -2609,7 +2609,20 @@ async function handleSlash(raw) {
         }
         if (sub === 'uninstall') {
           const res = await window.api.daemonUninstall();
-          return res.ok ? addInfo('Daemon uninstalled.') : addError(res.error);
+          return res.ok ? addInfo('Daemon stopped and uninstalled. It will not return at login.') : addError(res.error);
+        }
+        if (sub === 'start' || sub === 'restart') {
+          const res = await window.api.daemonStart();
+          return res.ok
+            ? addInfo('Daemon is running and answering. It owns the trigger scheduler and the Discord bridge from here on.')
+            : addError(res.error);
+        }
+        if (sub === 'stop') {
+          const res = await window.api.daemonStop();
+          if (!res.ok) return addError(res.error);
+          return addInfo(res.wasLoaded
+            ? 'Daemon stopped. Triggers and the Discord bridge move back to this window; /agent daemon start brings it back.'
+            : 'Daemon was not running. Nothing to stop.');
         }
         const res = await window.api.daemonStatus();
         return showOverlay('AGENT DAEMON', [
@@ -2619,6 +2632,7 @@ async function handleSlash(raw) {
           '',
           'The daemon is the headless runtime: triggers and heartbeats keep firing with every window closed.',
           '/agent daemon install to set it up (opt-in; runs at login).',
+          '/agent daemon start · stop — control it without reinstalling.',
         ].join('\n'));
       }
 

@@ -48,3 +48,58 @@ test('a packaged app takes no app-path argument', () => {
   assert.match(packaged, /<string>--headless<\/string>/);
   assert.equal((packaged.match(/<string>\/Applications/g) || []).length, 1);
 });
+
+// --- start and stop ---
+
+const { launchctlArgs, LAUNCH_LABEL } = require('../../src/main/daemon');
+const fs = require('node:fs');
+const path = require('node:path');
+const read = (name) => fs.readFileSync(path.join(__dirname, '..', '..', name), 'utf8');
+
+test('stopping a KeepAlive job means unloading it', () => {
+  // `launchctl stop` on a KeepAlive job gets it restarted a second later, which
+  // is the entire point of KeepAlive. bootout is the one that actually stops.
+  assert.deepEqual(launchctlArgs('stop', { uid: 501 }), ['bootout', `gui/501/${LAUNCH_LABEL}`]);
+  assert.deepEqual(launchctlArgs('start', { uid: 501, plistPath: '/p.plist' }), ['bootstrap', 'gui/501', '/p.plist']);
+  assert.throws(() => launchctlArgs('frobnicate', { uid: 501 }), /unknown launchctl action/);
+});
+
+test('start doubles as restart', () => {
+  // bootstrap refuses if the label is already loaded, and after editing the
+  // plist a stale one is exactly what is loaded.
+  const main = read('main.js');
+  const body = main.slice(main.indexOf('async function startDaemon'), main.indexOf('ipcMain.handle(\'daemon:install\''));
+  assert.match(body, /await launchctl\('stop'\);\s*\n\s*const started = await launchctl\('start', plistPath\)/);
+});
+
+test('start reports whether it is answering, not whether a command was issued', () => {
+  // A daemon that loads and then exits is the exact failure this feature is
+  // for; "installed" was already reported for one that had been dead for days.
+  const main = read('main.js');
+  const body = main.slice(main.indexOf('async function startDaemon'), main.indexOf("ipcMain.handle('daemon:install'"));
+  assert.match(body, /await daemon\.daemonAlive\(settingsUserDataDir\)/);
+  assert.match(body, /nothing answered on the socket within 5s/);
+  assert.match(body, /daemon\.err\.log/, 'and points at the log that explains it');
+});
+
+test('start refuses when there is nothing installed to start', () => {
+  const main = read('main.js');
+  assert.match(main, /The daemon is not installed\. \/agent daemon install first\./);
+});
+
+test('stop verifies the daemon actually stopped', () => {
+  const main = read('main.js');
+  const body = main.slice(main.indexOf("ipcMain.handle('daemon:stop'"), main.indexOf("ipcMain.handle('daemon:stop'") + 700);
+  assert.match(body, /const alive = await daemon\.daemonAlive/);
+  assert.match(body, /It is still answering/);
+  // Stopping something that was not running is not an error.
+  assert.match(read('renderer/app.js'), /Daemon was not running\. Nothing to stop\./);
+});
+
+test('/agent daemon start and stop are wired through', () => {
+  assert.match(read('renderer/app.js'), /if \(sub === 'start' \|\| sub === 'restart'\)/);
+  assert.match(read('renderer/app.js'), /if \(sub === 'stop'\)/);
+  assert.match(read('preload.js'), /daemonStart: \(\) => ipcRenderer\.invoke\('daemon:start'\)/);
+  assert.match(read('preload.js'), /daemonStop: \(\) => ipcRenderer\.invoke\('daemon:stop'\)/);
+  assert.match(read('renderer/app.js'), /\/agent daemon \[status\|start\|stop\|install\|uninstall\]/);
+});

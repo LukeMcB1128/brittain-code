@@ -4582,36 +4582,97 @@ ipcMain.handle('daemon:status', async () => ({
 // Opt-in only, from an explicit user command — never on app install. In a dev
 // checkout the LaunchAgent runs `electron <app> --headless`; packaged, the app
 // binary itself.
-ipcMain.handle('daemon:install', async () => {
-  if (process.platform !== 'darwin') {
-    return { ok: false, error: 'Daemon install is macOS-only for now (launchd). On Windows, run the app with --headless from a Scheduled Task.' };
+// One launchctl invocation, resolving to its exit code and whatever it said.
+// Errors are worth keeping: "Bootstrap failed: 5: Input/output error" is the
+// difference between a diagnosable problem and a silent no-op.
+function launchctl(action, plistPath = '') {
+  return new Promise((resolve) => {
+    let args;
+    try { args = daemon.launchctlArgs(action, { plistPath }); }
+    catch (err) { return resolve({ ok: false, output: String(err.message || err) }); }
+    const child = spawn('launchctl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    child.stdout?.on('data', (chunk) => { output += chunk; });
+    child.stderr?.on('data', (chunk) => { output += chunk; });
+    child.on('close', (code) => resolve({ ok: code === 0, code, output: output.trim() }));
+    child.on('error', (err) => resolve({ ok: false, output: String(err.message || err) }));
+  });
+}
+
+function daemonUnavailable() {
+  return process.platform !== 'darwin'
+    ? { ok: false, error: 'Daemon control is macOS-only for now (launchd). On Windows, run the app with --headless from a Scheduled Task.' }
+    : null;
+}
+
+// Load the job and wait for it to answer. Booting out first makes this both
+// "start" and "restart": bootstrap refuses outright if the label is already
+// loaded, and after editing the plist a stale one is exactly what is loaded.
+async function startDaemon() {
+  const plistPath = daemon.launchAgentPath();
+  if (!fs.existsSync(plistPath)) {
+    return { ok: false, error: 'The daemon is not installed. /agent daemon install first.' };
   }
+  await launchctl('stop');
+  const started = await launchctl('start', plistPath);
+  if (!started.ok) return { ok: false, error: `launchctl could not start it: ${started.output || 'no output'}` };
+
+  // Report what actually happened rather than that a command was issued. A
+  // daemon that loads and then exits is the failure this whole feature exists
+  // to make visible.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (await daemon.daemonAlive(settingsUserDataDir)) return { ok: true, plistPath };
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return {
+    ok: false,
+    error: 'launchctl accepted it but nothing answered on the socket within 5s. See daemon.err.log in the application data folder.',
+  };
+}
+
+ipcMain.handle('daemon:install', async () => {
+  const unavailable = daemonUnavailable();
+  if (unavailable) return unavailable;
   try {
     const plistPath = daemon.launchAgentPath();
     const appPath = app.isPackaged ? '' : app.getAppPath();
     fs.mkdirSync(path.dirname(plistPath), { recursive: true });
     fs.writeFileSync(plistPath, daemon.launchAgentPlist(process.execPath, appPath, { logDir: settingsUserDataDir }), 'utf8');
-    await new Promise((resolve) => {
-      const child = spawn('launchctl', ['load', '-w', plistPath], { stdio: 'ignore' });
-      child.on('close', resolve);
-      child.on('error', resolve);
-    });
-    return { ok: true, plistPath };
+    return await startDaemon();
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
 });
 
-ipcMain.handle('daemon:uninstall', async () => {
-  if (process.platform !== 'darwin') return { ok: false, error: 'Daemon install is macOS-only for now.' };
+ipcMain.handle('daemon:start', async () => {
+  const unavailable = daemonUnavailable();
+  if (unavailable) return unavailable;
   try {
-    const plistPath = daemon.launchAgentPath();
-    await new Promise((resolve) => {
-      const child = spawn('launchctl', ['unload', '-w', plistPath], { stdio: 'ignore' });
-      child.on('close', resolve);
-      child.on('error', resolve);
-    });
-    try { fs.unlinkSync(plistPath); } catch {}
+    return await startDaemon();
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+// Stopping a KeepAlive job means unloading it: `launchctl stop` would get it
+// restarted a second later, which is the whole point of KeepAlive. The plist
+// stays on disk, so this is "stop", not "uninstall" — but it also means the
+// daemon will not come back at next login until it is started again.
+ipcMain.handle('daemon:stop', async () => {
+  const unavailable = daemonUnavailable();
+  if (unavailable) return unavailable;
+  const stopped = await launchctl('stop');
+  const alive = await daemon.daemonAlive(settingsUserDataDir);
+  if (alive) return { ok: false, error: `It is still answering. launchctl said: ${stopped.output || 'nothing'}` };
+  return { ok: true, wasLoaded: stopped.ok };
+});
+
+ipcMain.handle('daemon:uninstall', async () => {
+  const unavailable = daemonUnavailable();
+  if (unavailable) return unavailable;
+  try {
+    await launchctl('stop');
+    try { fs.unlinkSync(daemon.launchAgentPath()); } catch {}
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };

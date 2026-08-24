@@ -115,6 +115,21 @@ function sendCommand(userDataDir, message, timeoutMs = 10_000) {
 
 // ---------- LaunchAgent install (macOS; opt-in, never on app install) ----------
 
+const LAUNCH_LABEL = 'com.brittain.code.daemon';
+
+// launchctl argument lists, kept here so they can be checked without spawning
+// anything. bootstrap/bootout rather than load/unload: the older verbs are
+// deprecated and, more usefully, bootout actually stops a KeepAlive job —
+// `launchctl stop` on one just gets it restarted a second later.
+function launchctlArgs(action, { uid = process.getuid?.() ?? 0, plistPath = '' } = {}) {
+  switch (action) {
+    case 'stop': return ['bootout', `gui/${uid}/${LAUNCH_LABEL}`];
+    case 'start': return ['bootstrap', `gui/${uid}`, plistPath];
+    case 'status': return ['print', `gui/${uid}/${LAUNCH_LABEL}`];
+    default: throw new Error(`unknown launchctl action "${action}"`);
+  }
+}
+
 function launchAgentPath() {
   return path.join(require('os').homedir(), 'Library', 'LaunchAgents', 'com.brittain.code.daemon.plist');
 }
@@ -169,4 +184,4 @@ ${args}
 `;
 }
 
-module.exports = { socketPath, daemonAlive, startServer, sendCommand, launchAgentPath, launchAgentPlist, daemonPath };
+module.exports = { socketPath, daemonAlive, startServer, sendCommand, launchAgentPath, launchAgentPlist, daemonPath, launchctlArgs, LAUNCH_LABEL };
