@@ -620,6 +620,40 @@ button.deny { border-color: var(--red); color: var(--red); }
 .q-input:focus { border-color: var(--accent); }
 
 /* ---------- attachments ---------- */
+#attachment-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  pointer-events: none;
+  background: rgba(17, 18, 20, 0.78);
+  border: 3px solid var(--accent);
+}
+
+#attachment-drop-overlay.hidden { display: none; }
+
+#attachment-drop-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: min(520px, 100%);
+  padding: 30px 24px;
+  border: 2px dashed var(--accent);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  text-align: center;
+}
+
+#attachment-drop-box strong {
+  color: var(--accent);
+  font-size: 18px;
+  letter-spacing: 2px;
+}
+
 #attachment-preview {
   display: flex;
   align-items: center;
@@ -677,6 +711,8 @@ button.deny { border-color: var(--red); color: var(--red); }
 }
 
 .file-chip button:hover { color: var(--red); border-color: var(--red); }
+
+.attachment-loading { color: var(--accent); }
 
 .msg-images {
   display: flex;

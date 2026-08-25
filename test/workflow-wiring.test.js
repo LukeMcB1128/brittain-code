@@ -164,7 +164,13 @@ test('general attachments are wired from the picker through local extraction and
   const packageJson = JSON.parse(source('package.json'));
 
   assert.match(html, /id="attach-btn"/);
+  assert.match(html, /id="attachment-drop-overlay"/);
+  assert.match(html, /features\/attachment-drop\.js/);
   assert.match(html, /application\/pdf/);
+  assert.match(renderer, /document\.addEventListener\('drop'/);
+  assert.match(renderer, /AttachmentDrop\.filesFromTransfer\(e\.dataTransfer\)/);
+  assert.match(renderer, /attachmentSlotsUsed\(\) >= MAX_ATTACHMENTS/);
+  assert.match(renderer, /if \(pendingAttachmentReads\) return addError/);
   assert.match(renderer, /files,\n\s+\}\);/);
   assert.match(renderer, /msg\.attachments \|\| \[\]/);
   assert.match(main, /extractFileAttachments\(files/);
@@ -281,4 +287,3 @@ test('Context viewer is structured with 2-column layout and wired through render
   assert.match(renderer, /showContextInspector/);
   assert.match(main, /ipcMain\.handle\('context:inspect'/);
 });
-

@@ -784,6 +784,9 @@ function renderConversation(conversation) {
 const MAX_ATTACHMENTS = 6;
 const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const IMAGE_TYPE_BY_EXTENSION = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+};
 const DOCUMENT_EXTENSIONS = new Set([
   'pdf', 'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml',
   'xml', 'html', 'htm', 'css', 'scss', 'less', 'js', 'mjs', 'cjs', 'jsx', 'ts',
@@ -793,25 +796,69 @@ const DOCUMENT_EXTENSIONS = new Set([
 ]);
 let pendingImages = []; // { name, type, size, dataUrl }
 let pendingFiles = []; // { name, type, size, dataUrl }
+let pendingAttachmentReads = 0;
 
 $('attach-btn').addEventListener('click', () => $('attach-file').click());
 
 $('attach-file').addEventListener('change', (e) => {
-  for (const file of e.target.files) addAttachment(file);
+  addAttachments(e.target.files);
   e.target.value = '';
 });
 
 input.addEventListener('paste', (e) => {
-  for (const item of e.clipboardData.items) {
-    if (item.type.startsWith('image/')) {
-      e.preventDefault();
-      addAttachment(item.getAsFile());
-    }
-  }
+  const images = Array.from(e.clipboardData?.items || [])
+    .filter((item) => item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+  if (!images.length) return;
+  e.preventDefault();
+  addAttachments(images);
 });
+
+// Dropping a file on an Electron page normally navigates the window to that
+// file. Capture file drags at the document boundary, show one clear target,
+// and feed the files into the same path as the ATTACH button and paste.
+const attachmentDropOverlay = $('attachment-drop-overlay');
+function showAttachmentDropOverlay(visible) {
+  attachmentDropOverlay.classList.toggle('hidden', !visible);
+  attachmentDropOverlay.setAttribute('aria-hidden', String(!visible));
+}
+
+document.addEventListener('dragenter', (e) => {
+  if (!window.AttachmentDrop.hasFilePayload(e.dataTransfer)) return;
+  e.preventDefault();
+  showAttachmentDropOverlay(true);
+});
+
+document.addEventListener('dragover', (e) => {
+  if (!window.AttachmentDrop.hasFilePayload(e.dataTransfer)) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  showAttachmentDropOverlay(true);
+});
+
+document.addEventListener('dragleave', (e) => {
+  if (e.relatedTarget && document.documentElement.contains(e.relatedTarget)) return;
+  showAttachmentDropOverlay(false);
+});
+
+document.addEventListener('drop', (e) => {
+  if (!window.AttachmentDrop.hasFilePayload(e.dataTransfer)) return;
+  e.preventDefault();
+  showAttachmentDropOverlay(false);
+  addAttachments(window.AttachmentDrop.filesFromTransfer(e.dataTransfer));
+  input.focus();
+});
+
+window.addEventListener('blur', () => showAttachmentDropOverlay(false));
+window.addEventListener('dragend', () => showAttachmentDropOverlay(false));
 
 function attachmentCount() {
   return pendingImages.length + pendingFiles.length;
+}
+
+function attachmentSlotsUsed() {
+  return attachmentCount() + pendingAttachmentReads;
 }
 
 function fileExtension(name) {
@@ -821,24 +868,49 @@ function fileExtension(name) {
 
 function addAttachment(file) {
   if (!file) return;
-  if (attachmentCount() >= MAX_ATTACHMENTS) return addError(`Attach at most ${MAX_ATTACHMENTS} files at once.`);
+  if (attachmentSlotsUsed() >= MAX_ATTACHMENTS) return addError(`Attach at most ${MAX_ATTACHMENTS} files at once.`);
   if (!file.size) return addError(`${file.name || 'Attachment'} is empty.`);
   if (file.size > MAX_ATTACHMENT_SIZE) return addError(`${file.name || 'Attachment'} is larger than 15 MB.`);
-  const isImage = IMAGE_TYPES.has(file.type);
-  const isDocument = file.type === 'application/pdf' || file.type.startsWith('text/') || DOCUMENT_EXTENSIONS.has(fileExtension(file.name));
+  const fileType = String(file.type || '').toLowerCase();
+  const inferredImageType = IMAGE_TYPE_BY_EXTENSION[fileExtension(file.name)] || '';
+  const imageType = IMAGE_TYPES.has(fileType) ? fileType : inferredImageType;
+  const isImage = !!imageType;
+  const isDocument = fileType === 'application/pdf' || fileType.startsWith('text/') || DOCUMENT_EXTENSIONS.has(fileExtension(file.name));
   if (!isImage && !isDocument) return addError(`${file.name || 'Attachment'} is not a supported image, PDF, text, or code file.`);
   const reader = new FileReader();
+  pendingAttachmentReads += 1;
+  renderAttachmentPreview();
   reader.onload = () => {
     const attachment = {
       name: file.name || (isImage ? 'pasted-image' : 'attachment'),
-      type: file.type || (fileExtension(file.name) === 'pdf' ? 'application/pdf' : 'text/plain'),
+      type: imageType || fileType || (fileExtension(file.name) === 'pdf' ? 'application/pdf' : 'text/plain'),
       size: file.size,
       dataUrl: reader.result,
     };
     (isImage ? pendingImages : pendingFiles).push(attachment);
+  };
+  reader.onerror = () => addError(`${file.name || 'Attachment'} could not be read.`);
+  reader.onloadend = () => {
+    pendingAttachmentReads = Math.max(0, pendingAttachmentReads - 1);
     renderAttachmentPreview();
   };
-  reader.readAsDataURL(file);
+  try {
+    reader.readAsDataURL(file);
+  } catch (error) {
+    pendingAttachmentReads = Math.max(0, pendingAttachmentReads - 1);
+    renderAttachmentPreview();
+    addError(`${file.name || 'Attachment'} could not be read: ${error.message || error}`);
+  }
+}
+
+function addAttachments(files) {
+  for (const file of Array.from(files || [])) {
+    if (attachmentSlotsUsed() >= MAX_ATTACHMENTS) {
+      addError(`Attach at most ${MAX_ATTACHMENTS} files at once.`);
+      break;
+    }
+    addAttachment(file);
+  }
 }
 
 function formatFileSize(bytes) {
@@ -850,7 +922,7 @@ function formatFileSize(bytes) {
 function renderAttachmentPreview() {
   const strip = $('attachment-preview');
   strip.innerHTML = '';
-  strip.classList.toggle('hidden', !attachmentCount());
+  strip.classList.toggle('hidden', !attachmentCount() && !pendingAttachmentReads);
   pendingImages.forEach((attachment, index) => {
     const wrap = document.createElement('div');
     wrap.className = 'img-thumb';
@@ -885,6 +957,12 @@ function renderAttachmentPreview() {
     chip.appendChild(remove);
     strip.appendChild(chip);
   });
+  if (pendingAttachmentReads) {
+    const loading = document.createElement('div');
+    loading.className = 'file-chip attachment-loading';
+    loading.textContent = `Adding ${pendingAttachmentReads} attachment${pendingAttachmentReads === 1 ? '' : 's'}…`;
+    strip.appendChild(loading);
+  }
 }
 
 // ---------- sending ----------
@@ -900,6 +978,7 @@ stopBtn.addEventListener('click', () => window.api.stop());
 async function send() {
   const text = input.value.trim();
   const missionControl = /^\/mission\s+(?:status|stop|resume)\s*$/i.test(text);
+  if (pendingAttachmentReads) return addError('Wait for the attachment to finish loading.');
   if ((!text && !attachmentCount()) || (busy && !missionControl)) return;
   if (text.startsWith('/')) {
     input.value = '';
