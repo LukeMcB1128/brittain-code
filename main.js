@@ -4291,6 +4291,10 @@ ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch 
         index: i,
         role: msg.role,
         toolName: msg.tool_name || null,
+        toolCalls: msg.tool_calls || original?.tool_calls || null,
+        content: typeof msg.content === 'string' ? msg.content : (original?.content != null ? String(original.content) : ''),
+        pinned: !!original?.pinned,
+        excluded: !!original?.excludedFromInference,
         tokens: estimateTokens(msg),
         preview: String(msg.content || '').slice(0, 140),
         flags,
@@ -4301,17 +4305,34 @@ ipcMain.handle('context:inspect', async (_e, { model, cwd, mode, onlineResearch 
     // Tool schemas are part of every request and are usually the largest single
     // component in code mode, so they belong in the total the inspector reports.
     const toolDefs = activeToolDefs(chatMode, onlineResearch) || [];
-    const mcpCount = mcp.toolDefs().length;
+    const mcpDefs = mcp.toolDefs() || [];
+    const mcpToolNames = new Set(mcpDefs.map((def) => def.function?.name || def.name));
+    const tools = toolDefs.map((def) => {
+      const name = def.function?.name || def.name || '';
+      return {
+        name,
+        description: def.function?.description || def.description || '',
+        fromMcp: mcpToolNames.has(name),
+        parameters: def.function?.parameters || def.parameters || null,
+        tokens: estimateTokens(def),
+      };
+    });
+    const mcpCount = mcpDefs.length;
     const toolTokens = toolDefs.length ? estimateTokens(toolDefs) : 0;
     const totalTokens = systemTokens + toolTokens + rows.reduce((sum, r) => sum + r.tokens, 0);
 
     return {
       ok: true,
+      model: model || '',
+      mode: mode || (chatMode ? 'chat' : 'code'),
+      cwd: cwd || '',
+      onlineResearch: !!onlineResearch,
       systemPrompt: prompt,
       systemTokens,
       toolTokens,
       toolCount: toolDefs.length,
       mcpToolCount: mcpCount,
+      tools,
       rows,
       totalTokens,
       contextLength,

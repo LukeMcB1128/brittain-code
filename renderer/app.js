@@ -2329,25 +2329,8 @@ async function handleSlash(raw) {
     }
 
     case 'context': {
-      const res = await window.api.contextInspect({ model: modelSelect.value, cwd, mode: appMode, onlineResearch: onlineResearchToggle.checked });
-      if (!res.ok) return addError(res.error);
-      const toolLabel = res.toolCount
-        ? `TOOL SCHEMAS  — ${res.toolTokens.toLocaleString()} tok (${res.toolCount} definitions${res.mcpToolCount ? `, ${res.mcpToolCount} from MCP` : ''})`
-        : 'TOOL SCHEMAS  — 0 tok (no tools sent in this mode)';
-      const lines = [
-        `SYSTEM PROMPT — ${res.systemTokens.toLocaleString()} tok`,
-        toolLabel,
-        '',
-        `${res.messageCount} message(s) in conversation:`,
-      ];
-      res.rows.forEach((r, i) => {
-        const label = r.toolName ? `${r.role} [${r.toolName}]` : r.role;
-        const flagStr = r.flags.length ? `  ⚠ ${r.flags.join(', ')}` : '';
-        lines.push(`${String(i + 1).padStart(3)}. ${label.padEnd(18)} ~${String(r.tokens).padStart(6)} tok  "${r.preview}"${flagStr}`);
-      });
-      if (res.pinnedFiles.length) lines.push('', 'PINNED FILES:', ...res.pinnedFiles.map((file) => `  ${file}`));
-      lines.push('', `TOTAL: ~${res.totalTokens.toLocaleString()} / ${res.contextLength.toLocaleString()} tok (${res.percentUsed}% of window)`);
-      return showOverlay('CONTEXT — what will actually be sent', lines.join('\n'));
+      await showContextInspector();
+      return;
     }
 
     case 'pin':
@@ -2880,11 +2863,71 @@ $('commit-btn').addEventListener('click', () => {
   input.focus();
 });
 
+async function showContextInspector() {
+  const res = await window.api.contextInspect({
+    model: modelSelect.value,
+    cwd,
+    mode: appMode,
+    onlineResearch: onlineResearchToggle.checked,
+  });
+  if (!res.ok) return addError(res.error || 'Failed to inspect context.');
+
+  const handleControl = async (payload) => {
+    if (busy) {
+      addError('Wait for the current run to finish before changing context controls.');
+      return false;
+    }
+    const ctrlRes = await window.api.contextControl(payload);
+    if (!ctrlRes.ok) {
+      addError(ctrlRes.error);
+      return false;
+    }
+    const updated = await window.api.contextInspect({
+      model: modelSelect.value,
+      cwd,
+      mode: appMode,
+      onlineResearch: onlineResearchToggle.checked,
+    });
+    if (updated.ok && window.ContextViewer) {
+      window.ContextViewer.show(updated, { $, hideOverlay, onControl: handleControl });
+    }
+    return true;
+  };
+
+  if (window.ContextViewer) {
+    window.ContextViewer.show(res, { $, hideOverlay, onControl: handleControl });
+  } else {
+    const toolLabel = res.toolCount
+      ? `TOOL SCHEMAS  — ${res.toolTokens.toLocaleString()} tok (${res.toolCount} definitions${res.mcpToolCount ? `, ${res.mcpToolCount} from MCP` : ''})`
+      : 'TOOL SCHEMAS  — 0 tok (no tools sent in this mode)';
+    const lines = [
+      `SYSTEM PROMPT — ${res.systemTokens.toLocaleString()} tok`,
+      toolLabel,
+      '',
+      `${res.messageCount} message(s) in conversation:`,
+    ];
+    res.rows.forEach((r, i) => {
+      const label = r.toolName ? `${r.role} [${r.toolName}]` : r.role;
+      const flagStr = r.flags?.length ? `  ⚠ ${r.flags.join(', ')}` : '';
+      lines.push(`${String(i + 1).padStart(3)}. ${label.padEnd(18)} ~${String(r.tokens).padStart(6)} tok  "${r.preview}"${flagStr}`);
+    });
+    if (res.pinnedFiles?.length) lines.push('', 'PINNED FILES:', ...res.pinnedFiles.map((file) => `  ${file}`));
+    lines.push('', `TOTAL: ~${res.totalTokens.toLocaleString()} / ${res.contextLength.toLocaleString()} tok (${res.percentUsed}% of window)`);
+    showOverlay('CONTEXT — what will actually be sent', lines.join('\n'));
+  }
+}
+
+const ctxSummaryEl = $('ctx-summary');
+if (ctxSummaryEl) ctxSummaryEl.addEventListener('click', showContextInspector);
+const ctxBarWrapEl = $('ctx-bar-wrap');
+if (ctxBarWrapEl) ctxBarWrapEl.addEventListener('click', showContextInspector);
+
 // ---------- overlay ----------
 function showOverlay(title, text, opts = {}) {
   $('overlay-title').textContent = title;
   $('overlay-box').classList.remove('recommendations-overlay');
   $('overlay-box').classList.remove('diff-v2-overlay');
+  $('overlay-box').classList.remove('context-v2-overlay');
   const body = $('overlay-body');
   body.className = '';
   body.replaceChildren();

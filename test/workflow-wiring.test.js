@@ -269,3 +269,16 @@ test('structured review can send selected findings to the coder', () => {
   assert.match(main, /ipcMain\.handle\('chat:reviewFix'/);
   assert.match(main, /await createCheckpoint\(cwd\)/);
 });
+
+test('Context viewer is structured with 2-column layout and wired through renderer', () => {
+  const html = source('renderer/index.html');
+  const renderer = source('renderer/app.js');
+  const main = source('main.js');
+
+  assert.match(html, /features\/context-viewer\.js/);
+  assert.match(html, /styles\/context-viewer\.css/);
+  assert.match(renderer, /window\.ContextViewer\.show/);
+  assert.match(renderer, /showContextInspector/);
+  assert.match(main, /ipcMain\.handle\('context:inspect'/);
+});
+
