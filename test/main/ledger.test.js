@@ -20,6 +20,7 @@ test('a denial is recognised from the sentence the app actually writes', () => {
   assert.equal(outcomeOf('The user cancelled the question. Stop and wait.'), 'denied');
   assert.equal(outcomeOf('Cancelled by user.'), 'denied');
   assert.equal(outcomeOf('Error: no exact match for old_string'), 'error');
+  assert.equal(outcomeOf('[MCP auto-approved] MCP tool error: selector did not match'), 'error');
   assert.equal(outcomeOf('Wrote 42 lines to main.js'), 'ok');
 });
 

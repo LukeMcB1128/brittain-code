@@ -39,6 +39,7 @@ function loadSessionState(historyStore, key) {
     conversation: Array.isArray(loaded.chat.conversation) ? loaded.chat.conversation : [],
     contextState: loaded.chat.contextState || null,
     onlineResearch: !!loaded.chat.onlineResearch,
+    usage: loaded.chat.runMetrics || null,
   };
 }
 

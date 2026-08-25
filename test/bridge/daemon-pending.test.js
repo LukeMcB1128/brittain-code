@@ -26,7 +26,7 @@ test('Discord stop also cancels queued work from the same conversation', () => {
 test('a queued Discord request receives its eventual completion', () => {
   const bridge = read('src/bridge/discord-client.js');
   const main = read('main.js');
-  assert.match(bridge, /queuedRequests\.add\(String\(message\.id\)\)/);
+  assert.match(bridge, /queuedRequests\.set\(String\(message\.id\), String\(channelId\)\)/);
   assert.match(bridge, /channel === 'stream:done'[\s\S]{0,220}queuedRequests\.has\(route\.requestId\)/);
   assert.match(main, /sink\.done\(\{ ok: true, runId: run\.id, status, content: finalContent, \.\.\.summary \}\)/);
 });

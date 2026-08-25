@@ -46,6 +46,20 @@ test('housekeeping refuses while a run is in flight', () => {
   assert.match(body, /\} finally \{\s*enterSession\(previous\);/);
 });
 
+test('clear removes durable history, queued work, and bridge-local state', () => {
+  const main = read('main.js');
+  const clearBody = main.slice(main.indexOf('clear: ({ sessionKey })'), main.indexOf('usage: ({ sessionKey })'));
+  assert.match(clearBody, /cancelQueuedRuns\(settingsUserDataDir/);
+  assert.match(clearBody, /historyStore\.remove\(key\)/);
+  assert.match(clearBody, /contextState = normalizeContextState\(\)/);
+  assert.match(clearBody, /usage = freshUsage\(\)/);
+
+  const client = read('src/bridge/discord-client.js');
+  assert.match(client, /awaitingQuestions\.delete\(channelId\)/);
+  assert.match(client, /queuedRequests = new Map\(\)/);
+  assert.match(client, /queuedRequests\.delete\(requestId\)/);
+});
+
 test('compaction is reported as what it did to the room', () => {
   const text = renderCompaction({ ok: true, beforeTokens: 40000, approxTokens: 12000, description: 'kept 8 turns verbatim' });
   assert.match(text, /70% smaller/);

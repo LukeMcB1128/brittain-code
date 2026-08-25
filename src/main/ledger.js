@@ -50,7 +50,7 @@ function outcomeOf(result) {
   if (/^\s*This call needs the user's approval\b/i.test(text)) return 'denied';
   if (/^\s*This tool call was not permitted\b/i.test(text)) return 'denied';
   if (/^\s*This parked call was approved, but re-validation\b/i.test(text)) return 'denied';
-  if (/^\s*Error:/i.test(text)) return 'error';
+  if (/^\s*(?:\[MCP auto-approved\]\s*)?(?:MCP tool error:|Error:)/i.test(text)) return 'error';
   return 'ok';
 }
 

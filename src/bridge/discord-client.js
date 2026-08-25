@@ -116,7 +116,9 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
   // flags let a second channel answer or suppress the first channel's result.
   const awaitingQuestions = new Map();
   const streamedRuns = new Map();
-  const queuedRequests = new Set();
+  // Keep the channel as well as the request ID. A fresh-session command must
+  // remove queued reply bookkeeping for only that Discord conversation.
+  const queuedRequests = new Map();
   const send = createDiscordSender({ token: config.token, log });
 
   // A bot cannot message someone out of the blue without a channel to do it in,
@@ -215,9 +217,14 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       case 'clear': {
         const res = await ask({ cmd: 'clear', payload: { sessionKey: sessionKeyFor(channelId) } });
         if (!res.ok) return send(channelId, `⚠️ ${res.error}`);
-        return send(channelId, res.cleared
-          ? `Cleared ${res.cleared} message(s). Starting fresh — I have forgotten what we said here.`
-          : 'Already empty. Nothing to clear.');
+        awaitingQuestions.delete(channelId);
+        for (const [requestId, requestChannel] of queuedRequests) {
+          if (requestChannel === String(channelId)) queuedRequests.delete(requestId);
+        }
+        if (res.cleared || res.cancelledQueued?.length) {
+          return send(channelId, `Starting fresh.${res.cleared ? ` Cleared ${res.cleared} message(s).` : ''}${res.cancelledQueued?.length ? ` Cancelled ${res.cancelledQueued.length} queued request(s).` : ''} I have forgotten what we said here.`);
+        }
+        return send(channelId, 'Already empty. Nothing to clear.');
       }
 
       case 'usage': {
@@ -269,7 +276,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
           },
         }, 0);
         if (res.queued) {
-          if (message.id) queuedRequests.add(String(message.id));
+          if (message.id) queuedRequests.set(String(message.id), String(channelId));
           return send(channelId, renderResult(res, false));
         }
         // A suspension has already said what it is waiting on, so renderResult

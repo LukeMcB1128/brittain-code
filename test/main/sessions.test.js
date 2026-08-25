@@ -37,12 +37,13 @@ test('a saved headless session can be restored after restart', () => {
   ];
   const history = {
     load: (id) => id === 'discord-42'
-      ? { ok: true, chat: { conversation, onlineResearch: true, contextState: { projectPath: '/project', pinnedFiles: [] } } }
+      ? { ok: true, chat: { conversation, onlineResearch: true, runMetrics: { metrics: { toolCalls: 4 } }, contextState: { projectPath: '/project', pinnedFiles: [] } } }
       : { ok: false },
   };
   const restored = loadSessionState(history, 'discord-42');
   assert.deepEqual(restored.conversation, conversation);
   assert.equal(restored.onlineResearch, true);
+  assert.equal(restored.usage.metrics.toolCalls, 4);
   assert.equal(loadSessionState(history, 'discord-missing'), null);
 });
 
@@ -117,8 +118,15 @@ test('a suspended run resumes into the session it was suspended from', () => {
 
 test('the online latch travels with the session, not the process', () => {
   const main = read('main.js');
-  assert.match(main, /onlineResearch: sessionOnlineResearch \}/, 'stashed on the way out');
+  assert.match(main, /onlineResearch: sessionOnlineResearch, usage \}/, 'stashed on the way out');
   assert.match(main, /sessionOnlineResearch = !!restored\?\.onlineResearch;/, 'restored on the way in');
+});
+
+test('usage travels with the session and is saved for headless conversations', () => {
+  const main = read('main.js');
+  assert.match(main, /onlineResearch: sessionOnlineResearch, usage \}/, 'usage is stashed on the way out');
+  assert.match(main, /usage = restored\?\.usage \? restoreUsage\(restored\.usage\) : freshUsage\(\)/, 'usage is restored or starts empty');
+  assert.match(main, /runMetrics: usage,/, 'headless history stores the usage record');
 });
 
 // --- safety against concurrent access ---

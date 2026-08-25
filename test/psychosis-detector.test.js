@@ -75,6 +75,26 @@ test('psychosis: thinking-channel scan only checks glitch tokens, never self-tal
   assert.match(hit.reason, /full-width/);
 });
 
+test('psychosis: raw channel markers and task-loss phrases trigger context recovery', () => {
+  const marker = scanThinkingForPsychosis('<|channel>thought\nThe user has not asked anything yet.', { value: 0 });
+  assert.ok(marker);
+  assert.match(marker.reason, /channel marker/);
+  assert.equal(marker.recovery, 'compact');
+
+  const reset = scanThinkingForPsychosis("The user hasn't provided a specific task yet. I should wait for instructions.", { value: 0 });
+  assert.ok(reset);
+  assert.match(reset.reason, /task was lost/);
+  assert.equal(reset.recovery, 'compact');
+
+  const visibleReset = scanContentForPsychosis('The user has not given any instructions.', { value: 0 });
+  assert.ok(visibleReset);
+  assert.match(visibleReset.reason, /task was lost/);
+
+  const anythingReset = scanThinkingForPsychosis("The user hasn't asked anything yet.", { value: 0 });
+  assert.ok(anythingReset);
+  assert.match(anythingReset.reason, /task was lost/);
+});
+
 test('psychosis: PsychosisDetectedError carries reason as message and excerpt separately', () => {
   const err = new PsychosisDetectedError('repetition loop detected', 'const x = 1;');
   assert.equal(err.name, 'PsychosisDetectedError');
