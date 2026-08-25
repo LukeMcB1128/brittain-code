@@ -10,6 +10,12 @@
     return Number(num || 0).toLocaleString();
   }
 
+  function displayToolName(name) {
+    return (global.ToolNames && typeof global.ToolNames.displayToolName === 'function')
+      ? global.ToolNames.displayToolName(name)
+      : name;
+  }
+
   function parseTextLines(text) {
     const lines = String(text ?? '').split('\n');
     return lines.map((line, index) => ({
@@ -300,7 +306,8 @@
       result.tools.forEach((t) => {
         const toolItem = element(documentRef, 'div', 'context-tool-item');
         const toolHead = element(documentRef, 'div', 'context-tool-head');
-        const toolName = element(documentRef, 'span', 'context-tool-name', t.name);
+        const toolName = element(documentRef, 'span', 'context-tool-name', displayToolName(t.name));
+        toolName.title = t.name;
         toolHead.appendChild(toolName);
         if (t.fromMcp) {
           toolHead.appendChild(element(documentRef, 'span', 'context-flag flag-mcp', 'MCP'));
@@ -379,7 +386,7 @@
       const navLeft = element(documentRef, 'span', 'context-nav-left');
       const roleInit = element(documentRef, 'span', `context-role-initial role-${r.role}`, roleInitial(r.role));
       const msgNum = element(documentRef, 'span', 'context-nav-num', `#${i + 1}`);
-      const previewText = r.toolName ? `[${r.toolName}] ${r.preview}` : (r.preview || '(empty)');
+      const previewText = r.toolName ? `[${displayToolName(r.toolName)}] ${r.preview}` : (r.preview || '(empty)');
       const labelText = element(documentRef, 'span', 'context-nav-label', previewText);
       labelText.title = previewText;
       navLeft.appendChild(roleInit);
@@ -417,7 +424,8 @@
       const summary = element(documentRef, 'summary', 'context-card-summary');
       const cardLeft = element(documentRef, 'div', 'context-summary-left');
       const turnNum = element(documentRef, 'span', 'context-msg-num', `#${i + 1}`);
-      const roleBadge = element(documentRef, 'span', `context-role-badge role-${r.role}`, r.toolName ? `${r.role.toUpperCase()} [${r.toolName}]` : r.role.toUpperCase());
+      const roleBadge = element(documentRef, 'span', `context-role-badge role-${r.role}`, r.toolName ? `${r.role.toUpperCase()} [${displayToolName(r.toolName)}]` : r.role.toUpperCase());
+      if (r.toolName) roleBadge.title = r.toolName;
       const previewSpan = element(documentRef, 'span', 'context-preview-text', `"${r.preview || ''}"`);
       cardLeft.appendChild(turnNum);
       cardLeft.appendChild(roleBadge);
@@ -477,7 +485,9 @@
         r.toolCalls.forEach((call) => {
           const callItem = element(documentRef, 'div', 'context-tool-call-item');
           const fnName = call.function?.name || call.name || 'tool';
-          callItem.appendChild(element(documentRef, 'span', 'context-tool-call-name', `→ ${fnName}`));
+          const fnNameEl = element(documentRef, 'span', 'context-tool-call-name', `→ ${displayToolName(fnName)}`);
+          fnNameEl.title = fnName;
+          callItem.appendChild(fnNameEl);
           const args = call.function?.arguments || call.arguments;
           if (args) {
             const argsText = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
@@ -543,6 +553,7 @@
   const api = {
     element,
     formatTokens,
+    displayToolName,
     parseTextLines,
     filterRows,
     roleInitial,

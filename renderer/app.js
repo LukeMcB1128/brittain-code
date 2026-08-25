@@ -772,7 +772,8 @@ function renderConversation(conversation) {
         decorateContextControls(card, msg, index);
         chat.appendChild(card);
       } else {
-        addMessage('tool', `[${msg.tool_name}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text), null, [], { message: msg, index });
+        const replayDisplay = window.ToolNames ? window.ToolNames.displayToolName(msg.tool_name) : msg.tool_name;
+        addMessage('tool', `[${replayDisplay}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text), null, [], { message: msg, index });
       }
     }
   });
@@ -1291,7 +1292,9 @@ window.api.onSubagent((d) => {
     scrollDown();
   } else if (d.phase === 'tool' && currentSubCard) {
     const line = document.createElement('div');
-    line.textContent = '· ' + d.name + '  ' + shortArgs(d.name, d.args || {});
+    const subDisplay = window.ToolNames ? window.ToolNames.displayToolName(d.name) : d.name;
+    line.textContent = '· ' + subDisplay + '  ' + shortArgs(d.name, d.args || {});
+    line.title = d.name;
     currentSubCard.querySelector('.sub-log').appendChild(line);
     scrollDown();
   } else if (d.phase === 'done' && currentSubCard) {
@@ -1333,14 +1336,18 @@ window.api.onToolCall(({ name, args }) => {
   finalizeAssistant(); // markdown-render the finished bubble; next tokens start a fresh one
   toolCount++;
   $('tool-count').textContent = String(toolCount);
-  setState('tool: ' + name);
+  const displayName = window.ToolNames ? window.ToolNames.displayToolName(name) : name;
+  setState('tool: ' + displayName);
 
   const card = document.createElement('div');
   card.className = 'tool';
   card.dataset.tool = name;
   const head = document.createElement('div');
   head.className = 'tool-head';
-  head.innerHTML = `<span>${name}</span><span class="args"></span><span class="status">running…</span>`;
+  head.innerHTML = `<span></span><span class="args"></span><span class="status">running…</span>`;
+  const nameEl = head.firstElementChild;
+  nameEl.textContent = displayName;
+  nameEl.title = name;
   head.querySelector('.args').textContent = shortArgs(name, args);
   head.addEventListener('click', () => {
     if (card.classList.contains('has-result')) card.classList.toggle('collapsed');
@@ -1563,7 +1570,8 @@ let pendingApprovalId = null;
 
 window.api.onApprovalRequest(({ id, name, args, network, sensitive, destructive, financial }) => {
   pendingApprovalId = id;
-  $('approval-tool').textContent = (financial ? '💳 SPENDING — ' : network ? 'ONLINE REQUEST — ' : sensitive ? 'SENSITIVE READ — ' : destructive ? 'DESTRUCTIVE — ' : 'APPROVE ') + name.toUpperCase() + '?';
+  const approvalDisplay = window.ToolNames ? window.ToolNames.displayToolName(name) : name;
+  $('approval-tool').textContent = (financial ? '💳 SPENDING — ' : network ? 'ONLINE REQUEST — ' : sensitive ? 'SENSITIVE READ — ' : destructive ? 'DESTRUCTIVE — ' : 'APPROVE ') + approvalDisplay.toUpperCase() + '?';
   $('approval-detail').textContent =
     name === 'web_search' ? `This query will be sent to DuckDuckGo:\n\n${args.query}\n\nDomains: ${(args.allowed_domains || []).join(', ') || '(unrestricted)'}`
     : name === 'web_fetch' ? `This public URL will be requested and its text returned to the model:\n\n${args.url}`
@@ -2343,7 +2351,7 @@ async function handleSlash(raw) {
           .map((message, index) => message.pinned ? `${index + 1} (${message.role})` : '')
           .filter(Boolean);
         const excludedTools = conversation
-          .map((message, index) => message.excludedFromInference ? `${index + 1} (${message.tool_name || 'tool'})` : '')
+          .map((message, index) => message.excludedFromInference ? `${index + 1} (${(window.ToolNames ? window.ToolNames.displayToolName(message.tool_name) : message.tool_name) || 'tool'})` : '')
           .filter(Boolean);
         return addInfo([
           `Pinned messages: ${pinnedMessages.join(', ') || '(none)'}`,
@@ -2907,7 +2915,7 @@ async function showContextInspector() {
       `${res.messageCount} message(s) in conversation:`,
     ];
     res.rows.forEach((r, i) => {
-      const label = r.toolName ? `${r.role} [${r.toolName}]` : r.role;
+      const label = r.toolName ? `${r.role} [${window.ToolNames ? window.ToolNames.displayToolName(r.toolName) : r.toolName}]` : r.role;
       const flagStr = r.flags?.length ? `  ⚠ ${r.flags.join(', ')}` : '';
       lines.push(`${String(i + 1).padStart(3)}. ${label.padEnd(18)} ~${String(r.tokens).padStart(6)} tok  "${r.preview}"${flagStr}`);
     });
