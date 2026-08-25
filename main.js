@@ -122,7 +122,7 @@ function stripOldImages(msgs) {
 }
 
 function modelReadyMessages(msgs) {
-  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, pinned, excludedFromInference, compactionRecord, ...message }) => {
+  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, pinned, excludedFromInference, compactionRecord, meta, ...message }) => {
     if (excludedFromInference && message.role === 'tool') {
       return { ...message, content: '[Tool result content excluded from inference by the user.]' };
     }
@@ -1517,6 +1517,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           deliberationNudges++;
           conversation.push({
             role: 'user',
+            meta: 'nudge',
             content: 'You are planning in circles instead of acting. Stop deliberating now. Do not re-evaluate your approach again. Take the single smallest concrete action that tests your current best hypothesis — call one tool (read the actual file rather than reasoning about it, or make one minimal edit) — then reassess from the real result.',
           });
           sink.emit('stream:info', `Injected a commit-and-act directive (${deliberationNudges}/2) and retrying.`);
@@ -1583,6 +1584,9 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           sink.emit('stream:info', `Model stopped without output or a tool call — nudging it to continue (${emptyNudges}/2)…`);
           conversation.push({
             role: 'user',
+            // Written by the loop, not by a person. Marked so the transcript
+            // does not later replay it as something the user said.
+            meta: 'nudge',
             content: 'You stopped without any visible output or tool call. Continue the task now: make your next tool call, or write your final summary if the task is complete.',
           });
           continue;
@@ -5024,14 +5028,18 @@ async function compactConversation(model, signal = currentAbort?.signal) {
       ...pinnedConversation,
       {
         role: 'user',
+        // The whole compaction block is bookkeeping the model must read and a
+        // person should not have to scroll past as though it were dialogue.
+        meta: 'compaction',
         content: notice
           + (/devstral/i.test(model)
             ? ' REMINDER: act only via tool calls (write_file/edit_file/read_file/run_command) — markdown code blocks in replies do nothing.'
             : ''),
       },
-      ...(ledgerText ? [{ role: 'assistant', content: ledgerText }] : []),
+      ...(ledgerText ? [{ role: 'assistant', meta: 'compaction', content: ledgerText }] : []),
       ...(degraded ? [] : [{
         role: 'assistant',
+        meta: 'compaction',
         content: 'Summary of the conversation so far:\n\n' + summary,
         compactionRecord: true,
       }]),

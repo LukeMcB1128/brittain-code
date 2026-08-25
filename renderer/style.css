@@ -1095,6 +1095,23 @@ button.mini:disabled {
   opacity: 0.75;
 }
 
+/* Bookkeeping the app wrote into the transcript: present, foldable, and
+   visibly not part of the conversation. */
+.context-block > summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+.context-block[open] > summary { margin-bottom: 6px; }
+.context-block-body {
+  border-left: 2px solid currentColor;
+  padding-left: 10px;
+  opacity: 0.75;
+  font-size: 12px;
+}
+
 /* ---------- startup message ---------- */
 #startup-message {
   position: absolute;

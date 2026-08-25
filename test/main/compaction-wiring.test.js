@@ -48,8 +48,11 @@ test('a compacted record is marked so the next compaction carries it forward', (
   const body = compactConversationSource();
   assert.match(body, /compactionRecord: true/);
   assert.match(body, /message\?\.compactionRecord/, 'the prior record must be found again');
-  assert.match(source('main.js'), /excludedFromInference, compactionRecord, \.\.\.message/,
-    'the marker must be stripped before messages reach the model');
+  // Both bookkeeping markers are stripped on the way out: compactionRecord so
+  // the next compaction can find the prior record, meta so the renderer can
+  // tell machine-written messages from dialogue. Neither is the model's business.
+  assert.match(source('main.js'), /excludedFromInference, compactionRecord, meta, \.\.\.message/,
+    'the markers must be stripped before messages reach the model');
 });
 
 test('the ledger is persisted at compaction and a failed write does not fail the compaction', () => {

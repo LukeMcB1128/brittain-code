@@ -746,6 +746,14 @@ function renderConversation(conversation) {
   chat.innerHTML = '';
   missionCard = null;
   conversation.forEach((msg, index) => {
+    // Messages the app wrote to itself — the compaction block, a nudge back to
+    // work — are not dialogue. Replaying them with YOU and MODEL labels claims
+    // the user said things they never typed, and buries the real conversation
+    // under bookkeeping. They stay visible, but folded and marked as machinery.
+    if (msg.meta) {
+      addContextBlock(msg);
+      return;
+    }
     if (msg.role === 'user') {
       const imgs = (msg.images || []).map((b, i) => `data:${msg.imageTypes?.[i] || 'image/png'};base64,${b}`);
       const shownText = msg.displayContent || (msg.attachments?.length ? '(attached files)' : msg.content) || (imgs.length ? '(image)' : '');
@@ -1118,6 +1126,26 @@ function scheduleMarkdownRender() {
     renderMarkdown(currentAssistant, currentAssistantRaw);
     if (nearBottom) scrollDown();
   });
+}
+
+// Bookkeeping the app inserted into the transcript, folded away by default.
+const META_LABELS = {
+  compaction: 'CONTEXT — earlier conversation compacted',
+  nudge: 'CONTEXT — the app prompted the model to continue',
+};
+
+function addContextBlock(msg) {
+  const details = document.createElement('details');
+  details.className = 'msg info context-block';
+  const summary = document.createElement('summary');
+  summary.textContent = META_LABELS[msg.meta] || 'CONTEXT';
+  details.appendChild(summary);
+  const body = document.createElement('div');
+  body.className = 'context-block-body';
+  renderMarkdown(body, String(msg.content || ''));
+  details.appendChild(body);
+  chat.appendChild(details);
+  return details;
 }
 
 function addMessage(role, text, images, attachments = [], context = null) {
