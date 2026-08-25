@@ -83,7 +83,7 @@ const HELP = [
   '`!stop` — stop what I am doing',
   '',
   '**This conversation**',
-  '`!compact` — summarise the older half to free up room',
+  '`!compact` — summarize the older half to free up room',
   '`!clear` — start fresh, forgetting what we have said here',
   '`!usage` — how full the context is',
   '`!ledger` — files changed and commands run',
@@ -152,7 +152,7 @@ const NOTEWORTHY = [
   { match: /^Heartbeat for / },
   {
     match: /^Auto-compact failed/,
-    as: () => '⚠️ I could not summarise the earlier conversation to make room. Carrying on, but my answers may get worse — `!stop` and start fresh if they do.',
+    as: () => '⚠️ I could not summarize the earlier conversation to make room. Carrying on, but my answers may get worse — `!stop` and start fresh if they do.',
   },
   {
     match: /^Recovery compact failed/,
@@ -229,7 +229,7 @@ function renderCompaction(result) {
   const before = Number(result.beforeTokens || 0);
   const after = Number(result.approxTokens || 0);
   const saved = before && after && before > after ? ` — ${Math.round((1 - after / before) * 100)}% smaller` : '';
-  return `🗜️ Compacted${saved}. ${result.description || 'Older messages summarised; recent ones kept as they were.'}`;
+  return `🗜️ Compacted${saved}. ${result.description || 'Older messages summarized; recent ones kept as they were.'}`;
 }
 
 function renderUsage(result, contextLength = 0) {

@@ -272,7 +272,7 @@ test('a successful compaction is invisible, because nothing was lost', () => {
 test('a failed compaction is not invisible, because the run gets worse', () => {
   // Silent, this is experienced as the bot quietly degrading for no reason.
   const text = renderEvent('stream:info', 'Auto-compact failed (summary too thin) — continuing.');
-  assert.match(text, /could not summarise/);
+  assert.match(text, /could not summarize/);
   assert.match(text, /answers may get worse/);
   assert.match(text, /!stop/, 'it should say what to do about it');
 });

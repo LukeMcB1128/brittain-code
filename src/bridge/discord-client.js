@@ -207,7 +207,7 @@ function createDiscordBridge({ config, ask, subscribe, greetStore = null, log = 
       // Session housekeeping. Each names this channel's conversation, so a
       // compact here never touches whatever the app has open.
       case 'compact': {
-        await send(channelId, '🗜️ Summarising the older half…');
+        await send(channelId, '🗜️ Summarizing the older half…');
         const res = await ask({ cmd: 'compact', payload: { sessionKey: sessionKeyFor(channelId), model: config.model || undefined } }, 0);
         return send(channelId, renderCompaction(res));
       }

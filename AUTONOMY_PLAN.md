@@ -93,7 +93,7 @@ quiet: 22:00-07:00
 ---
 
 - [ ] If CI on the default branch is red, diagnose and write a report. Do not push.
-- [ ] If any dependency has a published advisory, summarise it in the report.
+- [ ] If any dependency has a published advisory, summarize it in the report.
 - [ ] If TODO.md has an item marked `@agent`, do it.
 ```
 
