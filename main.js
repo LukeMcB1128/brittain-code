@@ -1924,6 +1924,19 @@ ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, th
   } catch (error) {
     return { ok: false, error: error.message || String(error) };
   }
+  // A scanned PDF has no text to send, only rendered pages. They travel the
+  // same route as any other image attachment, so the one thing that changes is
+  // that the model now has to be able to see.
+  const scannedPages = fileAttachments.flatMap((file) => file.images || []);
+  if (scannedPages.length && !(await supportsVision(model))) {
+    const scans = fileAttachments.filter((file) => file.scanned).map((file) => file.name).join(', ');
+    return {
+      ok: false,
+      error: `${scans} is a scan with no text layer, so it can only be read as images — and ${model} cannot see images.`
+        + ' Pick a vision-capable model (qwen2.5vl, llava, gemma3) and try again.',
+    };
+  }
+
   if (runMode === 'code') {
     await maybeAutoBranch(cwd, text, !!autoBranch);
     await createCheckpoint(cwd); // silent; enables UNDO RUN
@@ -1933,11 +1946,14 @@ ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, th
     content: contentWithAttachments(text, fileAttachments),
     displayContent: String(text || '').trim(),
   };
-  if (validatedImages.images.length) userMsg.images = validatedImages.images;
+  const allImages = [...validatedImages.images, ...scannedPages];
+  if (allImages.length) userMsg.images = allImages;
   if (validatedImages.imageTypes.length) userMsg.imageTypes = validatedImages.imageTypes;
   const attachmentMetadata = [
     ...validatedImages.metadata,
-    ...fileAttachments.map(({ text: _text, ...metadata }) => metadata),
+    // Drop both the text and the rendered pages: metadata is stored with the
+    // chat, and megabytes of base64 in a history file helps nobody.
+    ...fileAttachments.map(({ text: _text, images: _images, ...metadata }) => metadata),
   ];
   if (attachmentMetadata.length) userMsg.attachments = attachmentMetadata;
   conversation.push(userMsg);

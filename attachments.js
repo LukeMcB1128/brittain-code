@@ -69,6 +69,40 @@ function matchesImageSignature(buffer, type) {
   return false;
 }
 
+// A scan has no text layer, so there is nothing to extract — but the pages are
+// perfectly readable images, and the app already knows how to send images to a
+// vision model. Rendering is capped: a long scan at readable resolution will
+// eat a context window far faster than the same document as text.
+const MAX_RENDERED_PAGES = 8;
+const RENDER_SCALE = 2;
+
+async function renderPdfPages(buffer, limit = MAX_RENDERED_PAGES) {
+  const [{ renderPageAsImage, getDocumentProxy }, canvas] = await Promise.all([
+    import('unpdf'),
+    import('@napi-rs/canvas'),
+  ]);
+  const data = new Uint8Array(buffer);
+  const document = await getDocumentProxy(data);
+  const total = document.numPages;
+  const wanted = Math.min(total, limit);
+  const images = [];
+  for (let page = 1; page <= wanted; page++) {
+    // Re-reading the source per page: unpdf consumes the typed array it is
+    // handed, so sharing one across calls renders the first page and then
+    // fails on an empty buffer.
+    const rendered = await renderPageAsImage(new Uint8Array(buffer), page, {
+      scale: RENDER_SCALE,
+      canvasImport: () => canvas,
+    });
+    const png = Buffer.from(rendered);
+    if (png.length > MAX_ATTACHMENT_BYTES) {
+      throw new Error(`page ${page} renders larger than 15 MB; try a lower-resolution scan`);
+    }
+    images.push(png.toString('base64'));
+  }
+  return { images, total, rendered: wanted };
+}
+
 async function extractPdfText(buffer) {
   if (buffer.subarray(0, 5).toString('ascii') !== '%PDF-') throw new Error('does not appear to be a valid PDF');
   const { extractText } = await import('unpdf');
@@ -79,7 +113,15 @@ async function extractPdfText(buffer) {
     .join('\n\n')
     .trim();
   if (!text.replace(/\[Page \d+\]/g, '').trim()) {
-    throw new Error('contains no selectable text; scanned PDFs need OCR, which is not supported yet');
+    const { images, total, rendered } = await renderPdfPages(buffer);
+    if (!images.length) throw new Error('contains no selectable text and no pages could be rendered');
+    return {
+      scanned: true,
+      images,
+      pages: total,
+      text: `[Scanned document: no text layer. ${rendered} of ${total} page(s) attached as images.`
+        + `${rendered < total ? ` Pages ${rendered + 1}-${total} were not rendered.` : ''}]`,
+    };
   }
   return { text, pages: Number(result.totalPages) || pages.length };
 }
@@ -110,10 +152,13 @@ async function extractFileAttachments(files, options = {}) {
     let kind;
     let pages;
     let text;
+    let scannedImages = [];
     try {
       if (type === 'application/pdf' || extensionFor(name) === '.pdf') {
         kind = 'pdf';
-        ({ text, pages } = await extractPdfText(buffer));
+        const pdf = await extractPdfText(buffer);
+        ({ text, pages } = pdf);
+        if (pdf.scanned) scannedImages = pdf.images;
       } else if (isSupportedTextFile(name, type)) {
         kind = 'text';
         text = normalizeText(decodeText(buffer));
@@ -136,6 +181,7 @@ async function extractFileAttachments(files, options = {}) {
       size: buffer.length,
       kind,
       ...(pages ? { pages } : {}),
+      ...(scannedImages.length ? { scanned: true, images: scannedImages } : {}),
       text,
       originalCharacters,
       extractedCharacters: Math.min(originalCharacters, perFileBudget),

@@ -47,6 +47,12 @@ Alongside the transcript, a saved chat records the models it used, the working d
 
 Opening such a session never re-enables online research. The record is provenance — it answers "was anything here reached over the network?" — and the switch always starts off, exactly as it does for a new chat.
 
+### Scanned PDFs
+
+A PDF with no text layer — a photographed or scanned worksheet — used to be refused outright. Its pages are now rendered to images and attached the way any other image is, so a vision-capable model (`qwen2.5vl`, `llava`, `gemma3`) can read it. The attachment text says plainly that the document was a scan and how many pages were attached, so the model is never guessing at what it was given.
+
+Rendering is a fallback, never the first choice: a PDF with real text is extracted as text, which is smaller, cheaper and more accurate. Pages are capped at eight, and the message names the ones left out — a long scan at readable resolution consumes a context window far faster than the same document as text. If the selected model cannot see images, the error says that the file is a scan, why that means images, and which models can read it.
+
 ### Model degradation detection
 
 Local models degrade before they fail loudly — glitch tokens, byte-fallback artifacts, self-talk leaking into written files, and runaway repetition. Brittain Code scans generated content and tool arguments for those signatures inside the streaming layer, so every caller (main agent, subagent, verifier, coder) is protected without per-call-site changes. A detected episode recovers with a context compaction — the "sanity reset" that empirically clears it — rather than silently writing corrupted code, and gives up honestly if it recurs.

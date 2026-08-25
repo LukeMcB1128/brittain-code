@@ -37,7 +37,9 @@
       "renderer/**"
     ],
     "asarUnpack": [
-      "node_modules/unpdf/**"
+      "node_modules/unpdf/**",
+      "node_modules/@napi-rs/canvas/**",
+      "node_modules/@napi-rs/canvas-*/**"
     ],
     "mac": {
       "identity": null,
@@ -72,6 +74,7 @@
     "marked": "^18.0.5"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.100",
     "electron-updater": "^6.8.9",
     "katex": "^0.18.4",
     "systeminformation": "^5.33.1",
