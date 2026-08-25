@@ -8,6 +8,7 @@
   // Curated labels for the built-in tools. Anything not listed here (MCP or
   // custom tools) falls back to a Title Case transformation below.
   const DISPLAY_NAMES = {
+    calculate: 'Calculator',
     read_file: 'Read File',
     write_file: 'Write File',
     edit_file: 'Edit File',

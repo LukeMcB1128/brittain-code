@@ -56,7 +56,7 @@ const CODER_TOOL_NAMES = new Set([
   'run_command', 'run_project_check', 'git_status', 'read_git_diff',
 ]);
 
-const CHAT_TOOL_NAMES = new Set(['ask_user', 'web_search', 'web_fetch']);
+const CHAT_TOOL_NAMES = new Set(['ask_user', 'calculate', 'web_search', 'web_fetch']);
 
 const SUBMIT_IMPLEMENTATION_PLAN_TOOL = {
   type: 'function',

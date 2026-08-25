@@ -22,6 +22,7 @@ const {
   projectOutline,
 } = require('./src/tools/semantic-navigation');
 const { applyUnifiedPatch } = require('./src/tools/apply-patch');
+const { calculate } = require('./src/tools/calculator');
 
 const MAX_TOOL_OUTPUT = 40_000;   // chars of tool output fed back to the model
 
@@ -690,6 +691,45 @@ function parseDuckDuckGoResults(html, allowedDomains, maxResults) {
 }
 
 const TOOL_DEFS = [
+  {
+    type: 'function',
+    function: {
+      name: 'calculate',
+      description: 'Evaluate safe, read-only math expressions locally. Use for repeated arithmetic, limit tables, trigonometry, statistics, matrices, or precision checks. Give scalar variables for one result or equal-length arrays for a row-by-row table. Angles use radians unless the expression converts them. Never use a browser only to do math.',
+      parameters: {
+        type: 'object',
+        properties: {
+          calculations: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 20,
+            description: 'One or more independent calculations.',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: 'Optional short label used to match the result.' },
+                expression: { type: 'string', description: 'Math expression, such as "sin(pi / 4)" or "(x - 4) / (x^2 - 3*x - 4)".' },
+                variables: {
+                  type: 'object',
+                  description: 'Named scalar values or equal-length value arrays. Arrays create a row-by-row result table.',
+                  additionalProperties: {
+                    oneOf: [
+                      { type: 'number' },
+                      { type: 'string' },
+                      { type: 'array', minItems: 1, maxItems: 50, items: { oneOf: [{ type: 'number' }, { type: 'string' }] } },
+                    ],
+                  },
+                },
+              },
+              required: ['expression'],
+            },
+          },
+          precision: { type: 'integer', minimum: 2, maximum: 64, description: 'Significant digits used for calculation and display (default: 14).' },
+        },
+        required: ['calculations'],
+      },
+    },
+  },
   {
     type: 'function',
     function: {
@@ -1437,6 +1477,8 @@ async function executeTool(name, args, cwd) {
   // futility tracking must see every call so any non-write action resets it
   const futilityNote = trackRewrite(name, name === 'write_file' && args?.path ? resolveInside(cwd, args.path) : '');
   switch (name) {
+    case 'calculate':
+      return calculate(args);
     case 'get_git_graph': {
       return gitRun(['log', '--graph', '--oneline', '--all', '--no-color'], cwd).then((res) => (res.ok ? truncate(res.out) : `Error: ${res.err}`));
     }

@@ -12,13 +12,14 @@ test('tool policy derives each role from one definition registry', () => {
     definition('read_file'),
     definition('write_file'),
     definition('ask_user'),
+    definition('calculate'),
     definition('web_search'),
     definition('run_subagent'),
   ]);
 
   assert.deepEqual(policy.SUBAGENT_TOOLS.map((item) => item.function.name), ['read_file']);
   assert.deepEqual(policy.CODER_TOOLS.map((item) => item.function.name), ['read_file', 'write_file']);
-  assert.deepEqual(policy.CHAT_TOOLS.map((item) => item.function.name), ['ask_user', 'web_search']);
+  assert.deepEqual(policy.CHAT_TOOLS.map((item) => item.function.name), ['ask_user', 'calculate', 'web_search']);
   assert.deepEqual(policy.ORCHESTRATOR_TOOLS.map((item) => item.function.name), [
     'read_file',
     'web_search',

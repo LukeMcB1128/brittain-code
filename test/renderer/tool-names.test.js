@@ -8,6 +8,7 @@ test('ToolNames maps built-in tools to friendly labels', () => {
   assert.equal(displayToolName('run_command'), 'Run Command');
   assert.equal(displayToolName('web_search'), 'Web Search');
   assert.equal(displayToolName('run_subagent'), 'Subagent');
+  assert.equal(displayToolName('calculate'), 'Calculator');
 });
 
 test('ToolNames falls back to Title Case for unmapped tools', () => {
