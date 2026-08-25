@@ -64,7 +64,21 @@ function validateExpression(math, expression) {
 
   let node;
   try { node = math.parse(text); }
-  catch (err) { throw new Error(`invalid expression: ${err.message}`); }
+  catch (err) {
+    // The overwhelmingly common mistake is a list where a single expression
+    // belongs — "f(3.9), f(3.99)" instead of one expression evaluated over an
+    // array of values. The parser error alone ("Unexpected operator ,") does
+    // not suggest the shape that works, so a model reads it as "no commas
+    // allowed" and gives up on the tool entirely.
+    if (text.includes(',')) {
+      throw new Error(
+        `invalid expression: ${err.message}. An expression is a single formula — to compute a table, `
+        + 'give one expression and pass the changing value as an array, e.g. '
+        + 'expression "(x-4)/(x^2-3*x-4)" with variables {"x": [3.9, 3.99, 3.999]}.',
+      );
+    }
+    throw new Error(`invalid expression: ${err.message}`);
+  }
 
   let count = 0;
   node.traverse((child) => {

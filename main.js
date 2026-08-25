@@ -4855,11 +4855,21 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     const pinnedReady = pinnedContext ? [{ role: 'user', content: pinnedContext }] : [];
     const pinnedCost = estimateTokens(pinnedReady);
 
+    // Measure candidates as they would be SENT, not as they are stored.
+    //
+    // estimateTokens counts base64 image data, and stripOldImages removes
+    // images from all but the most recent image-bearing message on the way
+    // out. A turn carrying a screenshot therefore looked enormous while
+    // costing almost nothing in practice — so every candidate was rejected,
+    // the tail came back empty, and a conversation about attached homework
+    // compacted away the homework.
+    const sendableTokens = (messages) => estimateTokens(modelReadyMessages(messages));
+
     // Keep the most recent complete turns verbatim. They are the most relevant
     // part of the conversation and the cheapest fidelity available, and the
     // summarizer is then only responsible for what came before them.
     const { tail, head, turns: tailTurns, tokens: tailTokens } =
-      selectVerbatimTail(unpinnedConversation, tailBudget(contextLength), estimateTokens);
+      selectVerbatimTail(unpinnedConversation, tailBudget(contextLength), sendableTokens);
 
     // Facts established by an earlier compaction of this same session. Carrying
     // them forward explicitly is what stops the record thinning a little on
@@ -4972,7 +4982,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     // compacting into a record that has lost the session.
     const degraded = !check.ok;
     const fallback = degraded
-      ? selectVerbatimTail(unpinnedConversation, Math.max(1200, retainedBudget(contextLength) - pinnedCost), estimateTokens)
+      ? selectVerbatimTail(unpinnedConversation, Math.max(1200, retainedBudget(contextLength) - pinnedCost), sendableTokens)
       : null;
     if (degraded && !fallback.tail.length) {
       return {
@@ -4981,7 +4991,29 @@ async function compactConversation(model, signal = currentAbort?.signal) {
       };
     }
 
-    const keptTail = degraded ? fallback.tail : tail;
+    // A good summary does not make up for keeping nothing. The summary covers
+    // what came BEFORE the recent turns, so a tail of zero discards the request
+    // currently being worked on — which is how a session came back saying it
+    // could not see an active task. Widen once, then decline rather than
+    // destroy the conversation.
+    let intact = degraded ? fallback.tail : tail;
+    if (!degraded && !intact.length) {
+      const wider = selectVerbatimTail(
+        unpinnedConversation,
+        Math.max(1200, retainedBudget(contextLength) - pinnedCost),
+        sendableTokens,
+      );
+      if (!wider.tail.length) {
+        return {
+          ok: false,
+          error: 'The most recent turn is too large to keep even at the widest budget, and compacting would discard it. '
+            + 'The conversation was left unchanged — start a new chat, or remove the largest attachment.',
+        };
+      }
+      intact = wider.tail;
+    }
+
+    const keptTail = intact;
     usage.metrics.compactions += 1;
 
     const notice = degraded
