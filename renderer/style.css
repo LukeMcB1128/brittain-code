@@ -72,6 +72,8 @@ body { display: flex; flex-direction: column; }
 
 body[data-mode="chat"] .code-only { display: none !important; }
 body[data-mode="chat"] #compact-options { display: none !important; }
+body[data-mode="chat"] .spacer { flex: 1 1 auto !important; display: block !important; min-width: 8px; }
+body[data-mode="chat"] #history-btn { margin-left: 0; }
 
 .spacer { flex: 1; }
 
