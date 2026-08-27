@@ -129,3 +129,73 @@ test('cost follows the rates given, and is zero when none are', () => {
   assert.equal(estimateCost(stats, {}), 0, 'a local model costs nothing and should not claim otherwise');
   assert.equal(estimateCost(null, { inputPerMillion: 1 }), 0);
 });
+
+// --- message translation ---
+
+const { toOpenAIMessages } = require('../../src/main/inference');
+
+test('Ollama keeps the conversation exactly as stored', () => {
+  // Translating for the local transport would break every local run; this
+  // guards a replacement that once hit both transports at once.
+  const messages = [{ role: 'user', content: 'hi', images: ['iVBORw0KGgo'] }];
+  const body = ollamaTransport.request({ endpoint: 'http://x', model: 'm', messages }).body;
+  assert.deepEqual(body.messages, messages);
+  assert.ok(body.messages[0].images, 'Ollama takes a bare base64 array');
+});
+
+test('images become content parts with a data URL', () => {
+  // A bare images array is an unknown field to an OpenAI endpoint, which
+  // answers 500 rather than naming the problem.
+  const [message] = toOpenAIMessages([{ role: 'user', content: 'read this', images: ['iVBORw0KGgoAAA'] }]);
+  assert.deepEqual(message.content[0], { type: 'text', text: 'read this' });
+  assert.match(message.content[1].image_url.url, /^data:image\/png;base64,iVBORw0KGgoAAA$/);
+});
+
+test('the image type is sniffed, since imageTypes never reaches the transport', () => {
+  // modelReadyMessages drops imageTypes on the way out — Ollama never needed it.
+  const url = (data) => toOpenAIMessages([{ role: 'user', images: [data] }])[0].content[0].image_url.url;
+  assert.match(url('/9j/4AAQSkZJRg'), /^data:image\/jpeg/);
+  assert.match(url('R0lGODlhAQAB'), /^data:image\/gif/);
+  assert.match(url('UklGRiQAAABX'), /^data:image\/webp/);
+  assert.match(url('iVBORw0KGgo'), /^data:image\/png/);
+});
+
+test('a tool result is tied to the call it answers', () => {
+  // OpenAI requires tool_call_id and rejects the whole request without it.
+  const translated = toOpenAIMessages([
+    { role: 'assistant', content: '', tool_calls: [{ id: 'call_a', function: { name: 'read_file', arguments: '{}' } }] },
+    { role: 'tool', tool_name: 'read_file', content: 'body' },
+  ]);
+  assert.equal(translated[1].tool_call_id, 'call_a');
+  assert.ok(!('tool_name' in translated[1]), 'tool_name is Ollama\'s way of saying it');
+});
+
+test('parallel results are matched by name, not just order', () => {
+  const translated = toOpenAIMessages([
+    { role: 'assistant', tool_calls: [
+      { id: 'call_read', function: { name: 'read_file', arguments: '{}' } },
+      { id: 'call_list', function: { name: 'browse_files', arguments: '{}' } },
+    ] },
+    // Answered in the opposite order to the calls.
+    { role: 'tool', tool_name: 'browse_files', content: 'listing' },
+    { role: 'tool', tool_name: 'read_file', content: 'contents' },
+  ]);
+  assert.equal(translated[1].tool_call_id, 'call_list');
+  assert.equal(translated[2].tool_call_id, 'call_read');
+});
+
+test('object arguments become the JSON string OpenAI requires', () => {
+  // Ollama hands tool arguments back as objects; a conversation that started
+  // locally and continued on a cloud model would otherwise be rejected.
+  const [assistant] = toOpenAIMessages([
+    { role: 'assistant', tool_calls: [{ function: { name: 'read_file', arguments: { path: 'a.js' } } }] },
+  ]);
+  assert.equal(typeof assistant.tool_calls[0].function.arguments, 'string');
+  assert.deepEqual(JSON.parse(assistant.tool_calls[0].function.arguments), { path: 'a.js' });
+  assert.ok(assistant.tool_calls[0].id, 'a call with no id still gets one, or the result cannot reference it');
+});
+
+test('Ollama-only fields are not echoed back', () => {
+  const [assistant] = toOpenAIMessages([{ role: 'assistant', content: 'done', thinking: 'reasoning...' }]);
+  assert.ok(!('thinking' in assistant), 'thinking is an unknown field to an OpenAI endpoint');
+});

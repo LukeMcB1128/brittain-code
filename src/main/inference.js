@@ -42,6 +42,8 @@ const ollamaTransport = {
       headers: { 'Content-Type': 'application/json' },
       body: {
         model,
+        // Ollama takes the conversation as it is stored. Only the OpenAI
+        // transport translates it.
         messages,
         ...(tools ? { tools } : {}),
         stream: true,
@@ -69,6 +71,84 @@ const ollamaTransport = {
   },
 };
 
+// The conversation is stored in Ollama's shape, which differs from OpenAI's in
+// three ways that all produce a 500 rather than a useful complaint:
+//
+//   images      Ollama takes a bare base64 array on the message; OpenAI takes
+//               content parts carrying a data URL.
+//   tool results Ollama identifies them by tool_name; OpenAI requires the
+//               tool_call_id of the call being answered.
+//   arguments   Ollama hands back objects; OpenAI requires a JSON string.
+//
+// The MIME type has to be sniffed because modelReadyMessages drops imageTypes
+// on the way out — Ollama never needed it.
+function imageMime(base64) {
+  const head = String(base64 || '').slice(0, 12);
+  if (head.startsWith('/9j/')) return 'image/jpeg';
+  if (head.startsWith('R0lGOD')) return 'image/gif';
+  if (head.startsWith('UklGR')) return 'image/webp';
+  return 'image/png';
+}
+
+function toOpenAIMessages(messages) {
+  const out = [];
+  // Calls from the most recent assistant turn, waiting to be answered.
+  let awaiting = [];
+
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (message?.role === 'tool') {
+      // Match the result to its call by name, falling back to order. Without an
+      // id the provider rejects the whole request.
+      const index = awaiting.findIndex((call) => call.function?.name === message.tool_name);
+      const call = index >= 0 ? awaiting.splice(index, 1)[0] : awaiting.shift();
+      out.push({
+        role: 'tool',
+        tool_call_id: call?.id || `call_${out.length}`,
+        content: String(message.content ?? ''),
+      });
+      continue;
+    }
+
+    if (message?.role === 'assistant') {
+      const calls = (message.tool_calls || []).map((call, index) => ({
+        id: call.id || `call_${index}`,
+        type: 'function',
+        function: {
+          name: call.function?.name || '',
+          arguments: typeof call.function?.arguments === 'string'
+            ? call.function.arguments
+            : JSON.stringify(call.function?.arguments ?? {}),
+        },
+      }));
+      awaiting = calls.slice();
+      // `thinking` is Ollama's; sending it back is an unknown field.
+      out.push({
+        role: 'assistant',
+        content: String(message.content ?? ''),
+        ...(calls.length ? { tool_calls: calls } : {}),
+      });
+      continue;
+    }
+
+    const images = message?.images || [];
+    if (!images.length) {
+      out.push({ role: message?.role || 'user', content: String(message?.content ?? '') });
+      continue;
+    }
+    out.push({
+      role: message.role,
+      content: [
+        ...(message.content ? [{ type: 'text', text: String(message.content) }] : []),
+        ...images.map((data) => ({
+          type: 'image_url',
+          image_url: { url: `data:${imageMime(data)};base64,${data}` },
+        })),
+      ],
+    });
+  }
+  return out;
+}
+
 const openAITransport = {
   id: 'openai',
   needsKey: true,
@@ -84,7 +164,7 @@ const openAITransport = {
       },
       body: {
         model,
-        messages,
+        messages: toOpenAIMessages(messages),
         ...(tools ? { tools } : {}),
         stream: true,
         temperature,
@@ -194,4 +274,4 @@ function estimateCost(stats, rates) {
     + ((Number(stats?.evalTokens) || 0) / 1e6) * output;
 }
 
-module.exports = { ollamaTransport, openAITransport, transportFor, estimateCost, TRANSPORTS };
+module.exports = { ollamaTransport, openAITransport, transportFor, estimateCost, toOpenAIMessages, TRANSPORTS };
