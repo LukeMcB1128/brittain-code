@@ -188,3 +188,35 @@ test('TEST probes the path the selected protocol actually uses', () => {
   // And the renderer says which provider it is testing.
   assert.match(read('renderer/app.js'), /settingsTestEndpoint\(\$\('setting-endpoint'\)\.value, \$\('setting-provider'\)\.value\)/);
 });
+
+test('models are listed from wherever the configured provider keeps them', () => {
+  // Asking Ollama's /api/tags of a cloud endpoint returns nothing, which the
+  // app read as "no server" and answered with an install-Ollama screen.
+  const main = read('main.js');
+  const handler = main.slice(main.indexOf("ipcMain.handle('models:list'"), main.indexOf("const getModelRecommendations"));
+  assert.match(handler, /if \(runtimeSettings\.provider === 'openai'\)/);
+  assert.match(handler, /inferenceEndpoint\(\) \+ '\/models'/);
+  assert.match(handler, /entry\?\.id/, 'OpenAI lists models as data[].id');
+  assert.match(handler, /ollamaJson\('\/api\/tags'\)/, 'and the local path is untouched');
+});
+
+test('the failure names the provider so the screen can speak its language', () => {
+  const main = read('main.js');
+  const handler = main.slice(main.indexOf("ipcMain.handle('models:list'"), main.indexOf("const getModelRecommendations"));
+  assert.match(handler, /provider: 'openai', error:/);
+  assert.match(handler, /provider: 'ollama', error:/);
+  assert.match(handler, /rejected the saved API key\./);
+});
+
+test('a cloud user is never told to install Ollama', () => {
+  // They configured a cloud provider on purpose; that is advice for a problem
+  // they do not have, and it hides the one they do.
+  const app = read('renderer/app.js');
+  assert.match(app, /const cloud = provider === 'openai';/);
+  assert.match(app, /ollamaBtn\.classList\.toggle\('hidden', cloud \|\| state !== 'unreachable'\)/);
+  assert.match(app, /CANNOT REACH THE PROVIDER/);
+  assert.match(app, /Check the endpoint URL and API key in Settings/);
+  // And the cloud branch returns before the ollama serve copy is reached.
+  const gate = app.slice(app.indexOf('function renderOnboarding'), app.indexOf('function addCopyableCommand'));
+  assert.ok(gate.indexOf('if (cloud) {') < gate.indexOf("addCopyableCommand(body, 'ollama serve')"));
+});

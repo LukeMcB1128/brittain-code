@@ -228,7 +228,7 @@ async function reloadModels(preferred = '') {
   modelSelect.innerHTML = '';
   if (!res.ok) {
     currentModels = [];
-    renderOnboarding('unreachable', res.error);
+    renderOnboarding('unreachable', res.error, res.provider);
     populateSettingsModelSelects();
     return currentModels;
   }
@@ -241,12 +241,12 @@ async function reloadModels(preferred = '') {
   }
   if (preferred && currentModels.includes(preferred)) modelSelect.value = preferred;
   populateSettingsModelSelects();
-  renderOnboarding(currentModels.length ? 'ok' : 'empty');
+  renderOnboarding(currentModels.length ? 'ok' : 'empty', '', res.provider);
   return currentModels;
 }
 
 // ---------- onboarding overlay: unreachable endpoint / zero models installed ----------
-function renderOnboarding(state, detail) {
+function renderOnboarding(state, detail, provider = 'ollama') {
   const overlay = $('onboarding-overlay');
   const title = $('onboarding-title');
   const body = $('onboarding-body');
@@ -259,8 +259,25 @@ function renderOnboarding(state, detail) {
   }
 
   overlay.classList.remove('hidden');
-  ollamaBtn.classList.toggle('hidden', state !== 'unreachable');
-  recommendationsBtn.classList.toggle('hidden', state !== 'empty');
+  const cloud = provider === 'openai';
+  // Telling someone to install Ollama when they have deliberately configured a
+  // cloud provider is advice for a problem they do not have.
+  ollamaBtn.classList.toggle('hidden', cloud || state !== 'unreachable');
+  recommendationsBtn.classList.toggle('hidden', cloud || state !== 'empty');
+
+  if (cloud) {
+    title.textContent = state === 'unreachable' ? 'CANNOT REACH THE PROVIDER' : 'NO MODELS AVAILABLE';
+    body.innerHTML = '';
+    const explanation = document.createElement('p');
+    explanation.textContent = detail || 'The provider returned no models.';
+    body.appendChild(explanation);
+    const next = document.createElement('p');
+    next.textContent = state === 'unreachable'
+      ? 'Check the endpoint URL and API key in Settings, then try again.'
+      : 'The endpoint answered but listed nothing. Check that the API key has access to any models.';
+    body.appendChild(next);
+    return;
+  }
 
   if (state === 'unreachable') {
     title.textContent = 'NO LOCAL MODEL SERVER FOUND';

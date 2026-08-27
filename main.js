@@ -4622,11 +4622,35 @@ ipcMain.handle('history:load', (_e, id) => historyStore.load(id));
 ipcMain.handle('history:delete', (_e, id) => historyStore.remove(id));
 
 ipcMain.handle('models:list', async () => {
+  // Each protocol lists its models somewhere different. Asking Ollama's path of
+  // a cloud provider returns nothing and reads as "no server", which is how a
+  // correctly configured endpoint ended up behind an "install Ollama" screen.
+  if (runtimeSettings.provider === 'openai') {
+    const key = secrets.get('providerApiKey');
+    try {
+      const res = await fetch(inferenceEndpoint() + '/models', {
+        headers: key ? { Authorization: `Bearer ${key}` } : {},
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, provider: 'openai', error: key ? 'The provider rejected the saved API key.' : 'No API key saved for this provider yet.' };
+      }
+      if (!res.ok) return { ok: false, provider: 'openai', error: `The provider returned ${res.status} when listing models.` };
+      const listed = await res.json();
+      const models = (Array.isArray(listed?.data) ? listed.data : [])
+        .map((entry) => String(entry?.id || ''))
+        .filter(Boolean)
+        .sort();
+      return { ok: true, provider: 'openai', models };
+    } catch (err) {
+      return { ok: false, provider: 'openai', error: `Cannot reach ${inferenceEndpoint()} — ${String(err.message || err)}` };
+    }
+  }
   try {
     const data = await ollamaJson('/api/tags');
-    return { ok: true, models: (data.models || []).map((m) => m.name) };
+    return { ok: true, provider: 'ollama', models: (data.models || []).map((m) => m.name) };
   } catch (err) {
-    return { ok: false, error: 'Cannot reach the inference endpoint at ' + inferenceEndpoint() + ' — is it running and Ollama-compatible?' };
+    return { ok: false, provider: 'ollama', error: 'Cannot reach the inference endpoint at ' + inferenceEndpoint() + ' — is it running and Ollama-compatible?' };
   }
 });
 
