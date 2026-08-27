@@ -1228,13 +1228,37 @@ function findRepeatedSubstring(tail, len = 40, minRepeats = 3) {
   return null;
 }
 
+// Blank out anything the model is quoting rather than saying.
+//
+// These patterns detect a model asserting something — that it has lost the
+// task, that it is talking to itself. Asked to explain this file, a model
+// quotes the very phrases the detector looks for, and the guard fires on its
+// own documentation. It really happened: describing "Context loss (\"the user
+// hasn't asked anything\")" killed the generation mid-sentence.
+//
+// A trailing unterminated quote counts as open, because a stream cut mid-quote
+// is exactly the case that produced the false positive.
+function withoutQuotedSpans(text) {
+  let out = String(text)
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/"[^"\n]*"/g, ' ')
+    .replace(/\u201C[^\u201D\n]*\u201D/g, ' ');
+  const opener = Math.max(out.lastIndexOf('"'), out.lastIndexOf('`'), out.lastIndexOf('\u201C'));
+  if (opener >= 0) out = out.slice(0, opener);
+  return out;
+}
+
 function scanContentForPsychosis(content, repetitionState) {
   const tail = content.slice(-600);
-  if (RAW_CHANNEL_MARKER_RE.test(tail)) return { reason: 'raw model channel marker in output', excerpt: tail.slice(-160), recovery: 'compact' };
-  if (CONTEXT_RESET_RE.test(tail)) return { reason: 'active task was lost from context', excerpt: tail.slice(-160), recovery: 'compact' };
+  // Quoted text is discussed, not asserted. Corruption checks below still run
+  // on the raw tail: a replacement character is broken output wherever it sits.
+  const spoken = withoutQuotedSpans(tail);
+  if (RAW_CHANNEL_MARKER_RE.test(spoken)) return { reason: 'raw model channel marker in output', excerpt: tail.slice(-160), recovery: 'compact' };
+  if (CONTEXT_RESET_RE.test(spoken)) return { reason: 'active task was lost from context', excerpt: tail.slice(-160), recovery: 'compact' };
   if (GLITCH_TOKEN_RE.test(tail)) return { reason: 'raw byte-fallback/replacement token in output', excerpt: tail.slice(-120) };
   if (GLITCH_FULLWIDTH_RE.test(tail)) return { reason: 'full-width punctuation where ASCII code was expected', excerpt: tail.slice(-120) };
-  if (SELF_TALK.test(tail)) return { reason: 'conversational self-talk leaking into generated content', excerpt: tail.slice(-160) };
+  if (SELF_TALK.test(spoken)) return { reason: 'conversational self-talk leaking into generated content', excerpt: tail.slice(-160) };
   if (content.length - repetitionState.value >= 400) {
     repetitionState.value = content.length;
     const repeat = findRepeatedSubstring(tail);
@@ -1270,7 +1294,7 @@ function countDeliberationRestarts(thinking) {
 function scanThinkingForPsychosis(thinking, thinkingState = { value: 0 }) {
   const tail = thinking.slice(-300);
   if (RAW_CHANNEL_MARKER_RE.test(tail)) return { reason: 'raw model channel marker in reasoning', excerpt: tail.slice(-160), recovery: 'compact' };
-  if (CONTEXT_RESET_RE.test(tail)) return { reason: 'active task was lost from reasoning context', excerpt: tail.slice(-160), recovery: 'compact' };
+  if (CONTEXT_RESET_RE.test(withoutQuotedSpans(tail))) return { reason: 'active task was lost from reasoning context', excerpt: tail.slice(-160), recovery: 'compact' };
   if (GLITCH_TOKEN_RE.test(tail)) return { reason: 'raw byte-fallback/replacement token in reasoning', excerpt: tail.slice(-120), recovery: 'compact' };
   if (GLITCH_FULLWIDTH_RE.test(tail)) return { reason: 'full-width punctuation in reasoning where ASCII was expected', excerpt: tail.slice(-120), recovery: 'compact' };
 
@@ -1532,6 +1556,14 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
         sink.emit('stream:state', 'auto-compacting (recovering)…');
         const c = await compactConversation(model);
         if (!c.ok) {
+          // Nothing to compact means there is no accumulated context — and a
+          // conversation with no context cannot have lost the task from it. The
+          // detection was wrong, so carry on rather than killing a turn that
+          // had barely started.
+          if (/nothing to compact/i.test(c.error || '')) {
+            sink.emit('stream:info', 'Ignoring that detection — there is no earlier context it could have lost.');
+            continue;
+          }
           sink.emit('stream:info', 'Recovery compact failed (' + c.error + ') — stopping this turn.');
           break;
         }
