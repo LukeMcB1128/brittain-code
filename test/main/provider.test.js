@@ -107,6 +107,15 @@ test('provider, key and rates are all configured in one place', () => {
   assert.match(app, /inputPerMillion: Number\(\$\('setting-input-rate'\)\.value\) \|\| 0/);
 });
 
+test('each provider choice supplies a useful default endpoint', () => {
+  const html = read('renderer/index.html');
+  const app = read('renderer/app.js');
+  assert.match(html, /value="ollama" data-default-endpoint="http:\/\/127\.0\.0\.1:11434"/);
+  assert.match(html, /value="openai" data-default-endpoint="https:\/\/openrouter\.ai\/api\/v1"/);
+  assert.match(app, /syncProviderFields\(\{ useDefaultEndpoint: true \}\)/);
+  assert.match(app, /if \(useDefaultEndpoint && defaultEndpoint\) \$\('setting-endpoint'\)\.value = defaultEndpoint/);
+});
+
 test('the key is saved through its own channel, not with the settings blob', () => {
   // A credential should not ride along in an object that gets logged, diffed
   // and written to a plain-text file.
@@ -121,7 +130,7 @@ test('the key is saved through its own channel, not with the settings blob', () 
 test('cloud-only fields are hidden rather than shown dead', () => {
   const app = read('renderer/app.js');
   assert.match(app, /\$\('settings-cloud-fields'\)\.classList\.toggle\('hidden', !cloud\)/);
-  assert.match(app, /addEventListener\('change', syncProviderFields\)/);
+  assert.match(app, /addEventListener\('change', \(\) => syncProviderFields\(\{ useDefaultEndpoint: true \}\)\)/);
 });
 
 test('/provider reports state and points at Settings to change it', () => {
@@ -144,7 +153,7 @@ test('the provider fields look like settings rows, not section headings', () => 
 test('the consequence of going cloud is beside the choice, not inside the dropdown', () => {
   // An option label cannot be read once the menu closes.
   const html = read('renderer/index.html');
-  assert.ok(html.includes('<option value="openai">Cloud (OpenAI-compatible)</option>'));
+  assert.match(html, /<option value="openai"[^>]*>Cloud \(OpenAI-compatible\)<\/option>/);
   assert.ok(!html.includes('every message is sent to the endpoint</option>'));
   const app = read('renderer/app.js');
   assert.match(app, /Every message is sent to this endpoint, including the contents of files the agent reads\./);

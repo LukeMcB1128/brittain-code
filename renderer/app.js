@@ -1347,7 +1347,7 @@ function addDecisionLog({ runId, policy, decisions = [], deferred = [], parked =
   scrollDown();
 }
 
-$('setting-provider')?.addEventListener('change', syncProviderFields);
+$('setting-provider')?.addEventListener('change', () => syncProviderFields({ useDefaultEndpoint: true }));
 $('settings-save-key')?.addEventListener('click', async () => {
   const field = $('setting-api-key');
   const res = await window.api.providerSetKey(field.value);
@@ -1963,8 +1963,12 @@ const settingModelPickers = Object.fromEntries(
 // The cloud-only fields are hidden on a local provider rather than shown as
 // dead inputs, and the key's status is read separately because the key itself
 // never comes back to the renderer.
-async function syncProviderFields() {
-  const cloud = $('setting-provider').value === 'openai';
+async function syncProviderFields({ useDefaultEndpoint = false } = {}) {
+  const provider = $('setting-provider');
+  const cloud = provider.value === 'openai';
+  const defaultEndpoint = provider.selectedOptions[0]?.dataset.defaultEndpoint || '';
+  $('setting-endpoint').placeholder = defaultEndpoint;
+  if (useDefaultEndpoint && defaultEndpoint) $('setting-endpoint').value = defaultEndpoint;
   $('settings-cloud-fields').classList.toggle('hidden', !cloud);
   // The consequence belongs here, next to the choice, rather than inside the
   // dropdown option where it cannot be read once the menu closes.
