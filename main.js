@@ -1367,7 +1367,7 @@ function scanThinkingForPsychosis(thinking, thinkingState = { value: 0 }) {
         recovery: 'directive',
       };
     }
-    if (thinking.length >= THINKING_BUDGET_CHARS) {
+    if (runtimeSettings.provider !== 'openai' && thinking.length >= THINKING_BUDGET_CHARS) {
       return {
         reason: `reasoning exceeded ${THINKING_BUDGET_CHARS.toLocaleString()} chars without producing a tool call or answer`,
         excerpt: tail.slice(-160),
