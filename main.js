@@ -733,6 +733,7 @@ function rememberModelDetails(details) {
   // the 8192 fallback before the catalog arrived; drop it so the real figure
   // is picked up rather than the guess being kept forever.
   contextCache.clear();
+  capsCache.clear();
 }
 
 async function getContextLength(model) {
@@ -768,6 +769,24 @@ async function getContextLength(model) {
 const capsCache = new Map();
 async function getCapabilities(model) {
   if (capsCache.has(model)) return capsCache.get(model);
+
+  // Same shape as the context window: /api/show is an Ollama path, so probing
+  // it on a cloud endpoint threw, the catch returned no capabilities, and a
+  // model that plainly reads images was refused one.
+  if (runtimeSettings.provider === 'openai') {
+    const modalities = catalogDetails.get(model)?.modalities;
+    if (Array.isArray(modalities) && modalities.length) {
+      const caps = modalities.includes('image') ? ['vision'] : [];
+      capsCache.set(model, caps);
+      return caps;
+    }
+    // The provider listed nothing about modalities. Assume it is capable and
+    // let it say otherwise: a wrong refusal here is a hard block with no way
+    // around it, while a wrong attempt comes back as an error naming the
+    // reason. This is a capability question, not a safety one.
+    return ['vision'];
+  }
+
   try {
     const info = await ollamaJson('/api/show', { model });
     const caps = Array.isArray(info.capabilities) ? info.capabilities : [];

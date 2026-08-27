@@ -260,3 +260,32 @@ test('the catalog reads a real provider listing', () => {
   assert.equal(model.inputPricePerMillion, 0.075);
   assert.equal(model.outputPricePerMillion, 0.25);
 });
+
+test('a cloud model that reads images is allowed to', () => {
+  // The provider states its modalities in the listing. Probing /api/show for
+  // them fails on a cloud endpoint, so a model that plainly reads images was
+  // told it could not.
+  const main = read('main.js');
+  const caps = main.slice(main.indexOf('async function getCapabilities'), main.indexOf('const supportsThinking'));
+  assert.match(caps, /if \(runtimeSettings\.provider === 'openai'\)/);
+  assert.match(caps, /modalities\.includes\('image'\) \? \['vision'\] : \[\]/);
+  assert.ok(caps.indexOf("provider === 'openai'") < caps.indexOf("ollamaJson('/api/show'"),
+    'the cloud branch must return before the Ollama probe');
+});
+
+test('an unstated capability is attempted, not refused', () => {
+  // A wrong refusal is a hard block with no way around it; a wrong attempt
+  // comes back as a provider error naming the reason. Capability is not a
+  // safety boundary.
+  const main = read('main.js');
+  const caps = main.slice(main.indexOf('async function getCapabilities'), main.indexOf('const supportsThinking'));
+  assert.match(caps, /return \['vision'\];/);
+  assert.match(caps, /capability question, not a safety one/);
+});
+
+test('a new catalog invalidates both cached guesses', () => {
+  const main = read('main.js');
+  const remember = main.slice(main.indexOf('function rememberModelDetails'), main.indexOf('async function getContextLength'));
+  assert.match(remember, /contextCache\.clear\(\);/);
+  assert.match(remember, /capsCache\.clear\(\);/);
+});
