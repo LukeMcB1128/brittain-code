@@ -982,12 +982,20 @@ button.mini:disabled {
 .setting-inline { display: flex; gap: 6px; }
 .setting-inline > * { flex: 1; }
 .setting-help { margin-top: 7px; color: var(--text-dim); font-size: 11px; line-height: 1.4; }
-/* Status lines belong under the control they describe, not under its label. */
-.settings-section > .setting-status,
-.settings-section div > .setting-status {
-  margin-left: calc(min(120px, 37.5%) + 10px);
+/* The key's status belongs under the field it describes. Guessing the column
+   offset put it in open space, so it joins the same grid the labels use and
+   leaves the first cell empty. Keep these columns in step with
+   .settings-section label above. */
+#settings-key-status {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.75fr) minmax(0, 1.25fr);
+  gap: 10px;
+  margin: 4px 0;
   font-size: 11px;
 }
+#settings-key-status::before { content: ''; }
+/* An empty status should take no room at all, rather than a blank row. */
+#settings-key-status:empty { display: none; }
 
 /* ---------- MCP integrations settings ---------- */
 .mcp-config-row {

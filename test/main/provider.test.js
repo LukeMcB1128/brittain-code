@@ -156,3 +156,20 @@ test('the copy explains the setting, not the implementation', () => {
   assert.ok(!html.includes('Chosen rather than detected from the URL'), 'that reasoning belongs in a commit message');
   assert.ok(!html.includes('Never shown in full again'));
 });
+
+test('the key status lines up under the field, not in open space', () => {
+  // It was positioned with a guessed offset — min(120px, 37.5%) — while the
+  // real first column is 0.75fr, so it landed in the middle of nowhere.
+  const css = read('renderer/style.css');
+  const status = css.slice(css.indexOf('#settings-key-status {'), css.indexOf('#settings-key-status:empty'));
+  const label = css.slice(css.indexOf('.settings-section label {'), css.indexOf('.settings-section label.check-row'));
+  const columns = /grid-template-columns:([^;]+);/;
+  assert.equal(status.match(columns)[1].trim(), label.match(columns)[1].trim(),
+    'the status must use the same columns as the labels it sits among');
+  assert.match(status, /::before|grid-column/, 'and leave the label cell empty');
+  assert.ok(!css.includes('min(120px, 37.5%)'), 'no guessed offsets');
+});
+
+test('an empty status takes no vertical space', () => {
+  assert.match(read('renderer/style.css'), /#settings-key-status:empty \{ display: none; \}/);
+});
