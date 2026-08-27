@@ -1931,13 +1931,18 @@ const settingModelFields = {
 async function syncProviderFields() {
   const cloud = $('setting-provider').value === 'openai';
   $('settings-cloud-fields').classList.toggle('hidden', !cloud);
+  // The consequence belongs here, next to the choice, rather than inside the
+  // dropdown option where it cannot be read once the menu closes.
+  $('setting-provider-help').textContent = cloud
+    ? 'Every message is sent to this endpoint, including the contents of files the agent reads.'
+    : 'Inference runs on this machine. Nothing is sent anywhere.';
   if (!cloud) return;
   const state = await window.api.providerState();
   const status = $('settings-key-status');
   if (!state?.ok) { status.textContent = ''; return; }
   status.textContent = state.key.set
-    ? `Key set (${state.key.hint})${state.key.encrypted ? ', encrypted' : ' — PLAIN TEXT: this system offers no encrypted storage'}`
-    : 'No key set — cloud runs will be rejected until one is saved.';
+    ? `Key set (${state.key.hint})${state.key.encrypted ? '' : ' — stored as plain text: this system has no encrypted storage'}`
+    : 'No key set yet.';
 }
 
 function populateSettingsModelSelects(source = appSettings || {}) {

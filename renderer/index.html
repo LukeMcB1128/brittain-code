@@ -192,31 +192,21 @@
             <input id="setting-endpoint" type="url" spellcheck="false" placeholder="http://127.0.0.1:11434" />
             <button type="button" id="settings-test-endpoint">TEST</button>
           </div>
-          <p class="setting-help">Base URL for the provider below, written exactly as it documents it. For Ollama that is the host and port; for a cloud provider it is their API base, e.g. https://openrouter.ai/api/v1</p>
+          <p class="setting-help">Where inference runs: Ollama's host and port, or a cloud provider's API base URL.</p>
           <div id="settings-test-result" class="setting-status"></div>
 
-          <label for="setting-provider">PROVIDER</label>
-          <select id="setting-provider">
-            <option value="ollama">Local (Ollama-compatible) — nothing leaves this machine</option>
-            <option value="openai">Cloud (OpenAI-compatible) — every message is sent to the endpoint</option>
-          </select>
-          <p class="setting-help">Chosen rather than detected from the URL: this decides whether your conversation leaves the machine.</p>
+          <label>Provider <select id="setting-provider">
+            <option value="ollama">Local (Ollama-compatible)</option>
+            <option value="openai">Cloud (OpenAI-compatible)</option>
+          </select></label>
+          <p id="setting-provider-help" class="setting-help"></p>
 
           <div id="settings-cloud-fields" class="hidden">
-            <label for="setting-api-key">API KEY</label>
-            <div class="settings-endpoint-row">
-              <input id="setting-api-key" type="password" spellcheck="false" autocomplete="off" placeholder="paste to set, clear to remove" />
-              <button type="button" id="settings-save-key">SAVE KEY</button>
-            </div>
+            <label>API key <span class="settings-endpoint-row"><input id="setting-api-key" type="password" spellcheck="false" autocomplete="off" placeholder="paste to set, blank to remove" /><button type="button" id="settings-save-key">SAVE</button></span></label>
             <div id="settings-key-status" class="setting-status"></div>
-            <p class="setting-help">Stored outside settings.json, encrypted against your keychain where the system offers one. Never shown in full again.</p>
-
-            <label for="setting-input-rate">COST PER MILLION TOKENS (USD)</label>
-            <div class="settings-endpoint-row">
-              <input id="setting-input-rate" type="number" min="0" step="0.01" placeholder="input, e.g. 0.15" />
-              <input id="setting-output-rate" type="number" min="0" step="0.01" placeholder="output, e.g. 0.50" />
-            </div>
-            <p class="setting-help">Optional. Set these and each run reports what it cost.</p>
+            <label>Cost per 1M input <input id="setting-input-rate" type="number" min="0" step="0.01" placeholder="0.15" /></label>
+            <label>Cost per 1M output <input id="setting-output-rate" type="number" min="0" step="0.01" placeholder="0.50" /></label>
+            <p class="setting-help">The key is stored outside settings.json and encrypted with your keychain where available. Rates are optional; set them and each run reports its cost.</p>
           </div>
         </section>
 

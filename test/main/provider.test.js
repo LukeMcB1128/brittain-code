@@ -129,3 +129,30 @@ test('/provider reports state and points at Settings to change it', () => {
   assert.match(app, /Change any of this in Settings\./);
   assert.ok(!app.includes('/provider key <value> stores the key'), 'configuration lives in one place');
 });
+
+test('the provider fields look like settings rows, not section headings', () => {
+  // Standalone labels rendered as full-width text in the pane's grid, so they
+  // competed with the section header instead of reading as fields.
+  const html = read('renderer/index.html');
+  const section = html.slice(html.indexOf('INFERENCE ENDPOINT'), html.indexOf('</section>', html.indexOf('INFERENCE ENDPOINT')));
+  for (const field of ['Provider', 'API key', 'Cost per 1M input', 'Cost per 1M output']) {
+    assert.ok(section.includes(`<label>${field} `), `${field} should be a label wrapping its control`);
+  }
+  assert.ok(!/<label for="setting-/.test(section), 'no detached labels in this pane');
+});
+
+test('the consequence of going cloud is beside the choice, not inside the dropdown', () => {
+  // An option label cannot be read once the menu closes.
+  const html = read('renderer/index.html');
+  assert.ok(html.includes('<option value="openai">Cloud (OpenAI-compatible)</option>'));
+  assert.ok(!html.includes('every message is sent to the endpoint</option>'));
+  const app = read('renderer/app.js');
+  assert.match(app, /Every message is sent to this endpoint, including the contents of files the agent reads\./);
+  assert.match(app, /Inference runs on this machine\. Nothing is sent anywhere\./);
+});
+
+test('the copy explains the setting, not the implementation', () => {
+  const html = read('renderer/index.html');
+  assert.ok(!html.includes('Chosen rather than detected from the URL'), 'that reasoning belongs in a commit message');
+  assert.ok(!html.includes('Never shown in full again'));
+});
