@@ -51,6 +51,7 @@ const { captureMissionRecovery, validateMissionRecovery } = require('./src/main/
 const { normalizeImplementationPlan } = require('./src/main/orchestration-plan');
 const { LOCAL_BROWSER_TOOL_NAMES, createLocalBrowserService } = require('./src/main/local-browser-service');
 const { createModelInstallService } = require('./src/main/model-install-service');
+const { normalizeOpenAIModels, normalizeOllamaModels } = require('./src/main/model-catalog');
 const { createUpdateService } = require('./src/main/update-service');
 const { autoUpdater } = require('electron-updater');
 const {
@@ -720,8 +721,36 @@ async function ollamaJson(route, body, signal) {
 }
 
 const contextCache = new Map();
+// What the provider said about its own models when it listed them. On a cloud
+// endpoint this is the only source for a context window: /api/show is an Ollama
+// path and does not exist there.
+const catalogDetails = new Map();
+function rememberModelDetails(details) {
+  for (const entry of details || []) {
+    if (entry?.id) catalogDetails.set(entry.id, entry);
+  }
+  // A model's window is a property of the model, but the cache was filled with
+  // the 8192 fallback before the catalog arrived; drop it so the real figure
+  // is picked up rather than the guess being kept forever.
+  contextCache.clear();
+}
+
 async function getContextLength(model) {
   if (contextCache.has(model)) return contextCache.get(model);
+
+  // Probing /api/show against a cloud endpoint fails, and the fallback below
+  // answered 8192 — so a million-token model was budgeted as if it were tiny
+  // and compacted almost immediately. Where the provider stated a window, use
+  // it; where it did not, fall back to the configured cap rather than the
+  // smallest window imaginable, since on this transport the number only drives
+  // local budgeting and the provider enforces its own limit.
+  if (runtimeSettings.provider === 'openai') {
+    const stated = Number(catalogDetails.get(model)?.contextLength) || 0;
+    const length = stated > 0 ? stated : (runtimeSettings.mainContextCap || NUM_CTX_CAP);
+    contextCache.set(model, length);
+    return length;
+  }
+
   try {
     const info = await ollamaJson('/api/show', { model });
     const mi = info.model_info || {};
@@ -4637,18 +4666,17 @@ ipcMain.handle('models:list', async () => {
       }
       if (!res.ok) return { ok: false, provider: 'openai', error: `The provider returned ${res.status} when listing models.` };
       const listed = await res.json();
-      const models = (Array.isArray(listed?.data) ? listed.data : [])
-        .map((entry) => String(entry?.id || ''))
-        .filter(Boolean)
-        .sort();
-      return { ok: true, provider: 'openai', models };
+      const modelDetails = normalizeOpenAIModels(listed);
+      rememberModelDetails(modelDetails);
+      return { ok: true, provider: 'openai', models: modelDetails.map((model) => model.id), modelDetails };
     } catch (err) {
       return { ok: false, provider: 'openai', error: `Cannot reach ${inferenceEndpoint()} — ${String(err.message || err)}` };
     }
   }
   try {
     const data = await ollamaJson('/api/tags');
-    return { ok: true, provider: 'ollama', models: (data.models || []).map((m) => m.name) };
+    const modelDetails = normalizeOllamaModels(data.models);
+    return { ok: true, provider: 'ollama', models: modelDetails.map((model) => model.id), modelDetails };
   } catch (err) {
     return { ok: false, provider: 'ollama', error: 'Cannot reach the inference endpoint at ' + inferenceEndpoint() + ' — is it running and Ollama-compatible?' };
   }

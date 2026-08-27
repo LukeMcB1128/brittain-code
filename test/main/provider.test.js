@@ -196,7 +196,7 @@ test('models are listed from wherever the configured provider keeps them', () =>
   const handler = main.slice(main.indexOf("ipcMain.handle('models:list'"), main.indexOf("const getModelRecommendations"));
   assert.match(handler, /if \(runtimeSettings\.provider === 'openai'\)/);
   assert.match(handler, /inferenceEndpoint\(\) \+ '\/models'/);
-  assert.match(handler, /entry\?\.id/, 'OpenAI lists models as data[].id');
+  assert.match(handler, /normalizeOpenAIModels\(listed\)/, 'OpenAI model entries keep their IDs and useful metadata');
   assert.match(handler, /ollamaJson\('\/api\/tags'\)/, 'and the local path is untouched');
 });
 
@@ -219,4 +219,44 @@ test('a cloud user is never told to install Ollama', () => {
   // And the cloud branch returns before the ollama serve copy is reached.
   const gate = app.slice(app.indexOf('function renderOnboarding'), app.indexOf('function addCopyableCommand'));
   assert.ok(gate.indexOf('if (cloud) {') < gate.indexOf("addCopyableCommand(body, 'ollama serve')"));
+});
+
+test('a cloud model is budgeted by the window the provider states', () => {
+  // /api/show is an Ollama path; probing it on a cloud endpoint threw, the
+  // catch answered 8192, and a million-token model was compacted almost
+  // immediately while Settings showed 128K.
+  const main = read('main.js');
+  const body = main.slice(main.indexOf('async function getContextLength'), main.indexOf('async function getContextLength') + 1200);
+  assert.match(body, /if \(runtimeSettings\.provider === 'openai'\)/);
+  assert.match(body, /catalogDetails\.get\(model\)\?\.contextLength/);
+  // Unknown must not mean tiny: on this transport num_ctx is never sent, so the
+  // figure only drives local budgeting.
+  assert.match(body, /runtimeSettings\.mainContextCap \|\| NUM_CTX_CAP/);
+  assert.ok(body.indexOf("provider === 'openai'") < body.indexOf("ollamaJson('/api/show'"),
+    'the cloud branch must return before the Ollama probe');
+});
+
+test('the listing feeds the catalog, and a stale guess is dropped', () => {
+  const main = read('main.js');
+  assert.match(main, /rememberModelDetails\(modelDetails\);/);
+  // The 8192 fallback may already be cached from before the catalog arrived.
+  const remember = main.slice(main.indexOf('function rememberModelDetails'), main.indexOf('async function getContextLength'));
+  assert.match(remember, /contextCache\.clear\(\);/);
+});
+
+test('the catalog reads a real provider listing', () => {
+  const { normalizeOpenAIModels } = require('../../src/main/model-catalog');
+  const [model] = normalizeOpenAIModels({
+    data: [{
+      id: 'z-ai/glm-5.3-flash',
+      context_length: 1048576,
+      pricing: { prompt: '0.000000075', completion: '0.00000025' },
+      architecture: { input_modalities: ['text', 'image'] },
+    }],
+  });
+  assert.equal(model.contextLength, 1048576);
+  assert.deepEqual(model.modalities, ['text', 'image']);
+  // Per-token rates become per-million, which is how the cost fields are set.
+  assert.equal(model.inputPricePerMillion, 0.075);
+  assert.equal(model.outputPricePerMillion, 0.25);
 });
