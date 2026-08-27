@@ -8,6 +8,18 @@ const stopBtn = $('stop-btn');
 const modelSelect = $('model-select');
 const autonomySelect = $('autonomy-select');
 
+// Keep dialogs in the usable area below the top bar. The bar can wrap when the
+// window is narrow, so its height is measured instead of copied into the CSS.
+const topbar = $('topbar');
+function syncPopupArea() {
+  document.documentElement.style.setProperty(
+    '--topbar-height',
+    `${Math.ceil(topbar.getBoundingClientRect().bottom)}px`
+  );
+}
+syncPopupArea();
+new ResizeObserver(syncPopupArea).observe(topbar);
+
 // Autonomy replaced the AUTO-APPROVE checkbox: one control for one concept,
 // because two overlapping supervision controls is how an unsupervised write
 // happens that nobody intended.

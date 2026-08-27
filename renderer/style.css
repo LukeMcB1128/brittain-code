@@ -13,6 +13,8 @@
   --yellow: #c9a24a;
   --purple: #a583d9;
   --mono: "SF Mono", Menlo, Consolas, monospace;
+  --topbar-height: 0px;
+  --popup-inset: 24px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0 !important; }
@@ -809,12 +811,13 @@ button.mini:disabled {
 /* ---------- overlay (diff viewer, memory, etc.) ---------- */
 #overlay {
   position: fixed;
-  inset: 0;
+  inset: var(--topbar-height) 0 0;
   background: rgba(0, 0, 0, 0.6);
   z-index: 100;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: var(--popup-inset);
 }
 
 #overlay.hidden { display: none; }
@@ -822,6 +825,7 @@ button.mini:disabled {
 #overlay-box {
   width: min(900px, 90vw);
   height: min(600px, 85vh);
+  max-height: 100%;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   display: flex;
@@ -867,12 +871,12 @@ button.mini:disabled {
 /* ---------- in-app confirm modal (replaces native window.confirm) ---------- */
 #confirm-modal {
   position: fixed;
-  inset: 0;
+  inset: var(--topbar-height) 0 0;
   z-index: 130;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: var(--popup-inset);
   background: rgba(0, 0, 0, 0.68);
 }
 
@@ -901,18 +905,18 @@ button.mini:disabled {
 
 #settings-modal {
   position: fixed;
-  inset: 0;
+  inset: var(--topbar-height) 0 0;
   z-index: 110;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: var(--popup-inset);
   background: rgba(0, 0, 0, 0.68);
 }
 
 #settings-form {
   width: min(940px, 96vw);
-  max-height: 92vh;
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
