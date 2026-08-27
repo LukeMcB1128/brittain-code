@@ -76,7 +76,7 @@ contextBridge.exposeInMainWorld('api', {
   providerSetKey: (value) => ipcRenderer.invoke('provider:setKey', value),
   settingsGet: () => ipcRenderer.invoke('settings:get'),
   settingsSave: (settings) => ipcRenderer.invoke('settings:save', settings),
-  settingsTestEndpoint: (endpoint) => ipcRenderer.invoke('settings:testEndpoint', endpoint),
+  settingsTestEndpoint: (endpoint, provider) => ipcRenderer.invoke('settings:testEndpoint', endpoint, provider),
   compact: (payload) => ipcRenderer.invoke('chat:compact', payload),
   loop: (payload = {}) => ipcRenderer.invoke('chat:loop', payload),
   plan: (payload) => ipcRenderer.invoke('chat:plan', payload),

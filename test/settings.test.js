@@ -19,9 +19,19 @@ test('accepts Ollama-compatible endpoints on alternate ports', () => {
   assert.equal(normalizeEndpoint('https://models.example.test:8443'), 'https://models.example.test:8443');
 });
 
-test('rejects endpoint paths, credentials, and unsupported protocols', () => {
-  assert.throws(() => normalizeEndpoint('http://localhost:11434/api'), /protocol, host, and optional port/);
+test('accepts the base URLs cloud providers document', () => {
+  // Refusing paths made every OpenAI-compatible endpoint impossible to enter:
+  // they are documented with one, and the client appends only the method path.
+  assert.equal(normalizeEndpoint('https://openrouter.ai/api/v1'), 'https://openrouter.ai/api/v1');
+  assert.equal(normalizeEndpoint('https://api.z.ai/api/paas/v4/'), 'https://api.z.ai/api/paas/v4');
+});
+
+test('rejects credentials, query strings, and unsupported protocols', () => {
+  // Still refused: anything that is not addressing. A key in a URL is either a
+  // mistake or a credential about to be stored in the wrong place.
   assert.throws(() => normalizeEndpoint('http://user:secret@localhost:11434'), /credentials/);
+  assert.throws(() => normalizeEndpoint('https://api.example.test/v1?key=sk-abc'), /query string or fragment/);
+  assert.throws(() => normalizeEndpoint('https://api.example.test/v1#frag'), /query string or fragment/);
   assert.throws(() => normalizeEndpoint('ftp://localhost:11434'), /http:\/\/ or https:\/\//);
 });
 

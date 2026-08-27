@@ -62,6 +62,17 @@ function cleanText(value, maxLength) {
   return String(value || '').replace(/\r\n?/g, '\n').trim().slice(0, maxLength);
 }
 
+// A base URL, which for a cloud provider includes a path.
+//
+// This originally allowed only an origin, because Ollama's endpoint is a host
+// and a port and the client appends /api/chat itself. Every OpenAI-compatible
+// provider documents a base that carries a path — https://openrouter.ai/api/v1,
+// https://api.z.ai/api/paas/v4 — so refusing paths made those endpoints
+// impossible to enter at all.
+//
+// What stays refused is anything that is not addressing: credentials, a query
+// string, a fragment. Those are either a mistake or a key about to be stored in
+// the wrong place.
 function normalizeEndpoint(value) {
   const raw = String(value || DEFAULT_SETTINGS.inferenceEndpoint).trim();
   let parsed;
@@ -69,10 +80,13 @@ function normalizeEndpoint(value) {
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Inference endpoint must use http:// or https://.');
   if (parsed.username || parsed.password) throw new Error('Put no credentials in the inference endpoint URL.');
   if (!parsed.hostname) throw new Error('Inference endpoint needs a hostname.');
-  if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
-    throw new Error('Inference endpoint must contain only protocol, host, and optional port.');
+  if (parsed.search || parsed.hash) {
+    throw new Error('Inference endpoint takes a base URL only — no query string or fragment.');
   }
-  return parsed.origin;
+  // A trailing slash is dropped so the transports can append their own path
+  // without producing a doubled separator.
+  const path = parsed.pathname.replace(/\/+$/, '');
+  return parsed.origin + path;
 }
 
 function normalizeContextCap(value, fallback) {

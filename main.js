@@ -4503,9 +4503,25 @@ ipcMain.handle('settings:get', () => ({
   defaults: { ...DEFAULT_SETTINGS },
 }));
 
-ipcMain.handle('settings:testEndpoint', async (_e, value) => {
+ipcMain.handle('settings:testEndpoint', async (_e, value, provider) => {
   try {
     const endpoint = normalizeEndpoint(value);
+    // Each protocol lists models at its own path, so testing the Ollama one
+    // against a cloud provider reports a 404 that says nothing useful.
+    if (String(provider) === 'openai') {
+      const key = secrets.get('providerApiKey');
+      const res = await fetch(endpoint + '/models', {
+        headers: key ? { Authorization: `Bearer ${key}` } : {},
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, error: key ? 'The endpoint rejected the saved API key.' : 'The endpoint needs an API key — save one below first.' };
+      }
+      if (!res.ok) return { ok: false, error: `GET /models returned ${res.status}.` };
+      const listed = await res.json();
+      const models = Array.isArray(listed?.data) ? listed.data : [];
+      return { ok: true, endpoint, modelCount: models.length };
+    }
     const res = await fetch(endpoint + '/api/tags', { signal: AbortSignal.timeout(5_000) });
     if (!res.ok) return { ok: false, error: `GET /api/tags returned ${res.status}.` };
     const data = await res.json();

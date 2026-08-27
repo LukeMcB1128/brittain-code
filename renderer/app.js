@@ -2057,7 +2057,7 @@ $('settings-test-endpoint').addEventListener('click', async () => {
   const status = $('settings-test-result');
   status.className = 'setting-status';
   status.textContent = 'Testing…';
-  const res = await window.api.settingsTestEndpoint($('setting-endpoint').value);
+  const res = await window.api.settingsTestEndpoint($('setting-endpoint').value, $('setting-provider').value);
   status.classList.add(res.ok ? 'ok' : 'error');
   status.textContent = res.ok ? `Connected — ${res.modelCount} model${res.modelCount === 1 ? '' : 's'} found.` : res.error;
 });

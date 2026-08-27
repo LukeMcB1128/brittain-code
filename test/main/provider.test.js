@@ -173,3 +173,18 @@ test('the key status lines up under the field, not in open space', () => {
 test('an empty status takes no vertical space', () => {
   assert.match(read('renderer/style.css'), /#settings-key-status:empty \{ display: none; \}/);
 });
+
+test('TEST probes the path the selected protocol actually uses', () => {
+  // Testing Ollama's /api/tags against a cloud provider returns a 404 that
+  // explains nothing.
+  const main = read('main.js');
+  const handler = main.slice(main.indexOf("ipcMain.handle('settings:testEndpoint'"), main.indexOf("ipcMain.handle('settings:testEndpoint'") + 1400);
+  assert.match(handler, /if \(String\(provider\) === 'openai'\)/);
+  assert.match(handler, /endpoint \+ '\/models'/);
+  assert.match(handler, /endpoint \+ '\/api\/tags'/);
+  // An auth failure is named as one rather than reported as a status code.
+  assert.match(handler, /The endpoint rejected the saved API key\./);
+  assert.match(handler, /needs an API key — save one below first\./);
+  // And the renderer says which provider it is testing.
+  assert.match(read('renderer/app.js'), /settingsTestEndpoint\(\$\('setting-endpoint'\)\.value, \$\('setting-provider'\)\.value\)/);
+});
