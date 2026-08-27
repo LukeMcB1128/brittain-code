@@ -92,7 +92,7 @@ function normalizeEndpoint(value) {
 function normalizeContextCap(value, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number) || number === 0) return number === 0 ? 0 : fallback;
-  return clampInteger(number, fallback, 2_048, 262_144);
+  return clampInteger(number, fallback, 2_048, 1_048_576);
 }
 
 function normalizeSettings(input = {}) {

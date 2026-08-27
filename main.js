@@ -72,7 +72,7 @@ const MAX_AGENT_STEPS = 50;       // safety cap on tool-call loops per user mess
 // maximum because KV-cache RAM grows with the window. 64k sized for gemma4:26b
 // on a 36GB Mac WITH Ollama's q8_0 KV cache enabled (OLLAMA_FLASH_ATTENTION=1,
 // OLLAMA_KV_CACHE_TYPE=q8_0 via launchctl setenv); drop to 32_768 without it.
-const NUM_CTX_CAP = 131_072; // sized for heavy use
+const NUM_CTX_CAP = 1_048_576; // sized for heavy use
 let runtimeSettings = { ...DEFAULT_SETTINGS };
 let customPolicies = { policies: {}, configPath: '', error: '' };
 let settingsUserDataDir = '';
