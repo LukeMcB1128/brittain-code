@@ -1307,6 +1307,15 @@ function addDecisionLog({ runId, policy, decisions = [], deferred = [], parked =
   scrollDown();
 }
 
+$('setting-provider')?.addEventListener('change', syncProviderFields);
+$('settings-save-key')?.addEventListener('click', async () => {
+  const field = $('setting-api-key');
+  const res = await window.api.providerSetKey(field.value);
+  field.value = '';
+  if (!res.ok) { $('settings-key-status').textContent = res.error; return; }
+  await syncProviderFields();
+});
+
 window.api.onRunDecisions(addDecisionLog);
 
 // A run someone started from Discord or a trigger drives this window's output
@@ -1904,6 +1913,21 @@ const settingModelFields = {
   'setting-scout-model': 'scoutModel',
 };
 
+// The cloud-only fields are hidden on a local provider rather than shown as
+// dead inputs, and the key's status is read separately because the key itself
+// never comes back to the renderer.
+async function syncProviderFields() {
+  const cloud = $('setting-provider').value === 'openai';
+  $('settings-cloud-fields').classList.toggle('hidden', !cloud);
+  if (!cloud) return;
+  const state = await window.api.providerState();
+  const status = $('settings-key-status');
+  if (!state?.ok) { status.textContent = ''; return; }
+  status.textContent = state.key.set
+    ? `Key set (${state.key.hint})${state.key.encrypted ? ', encrypted' : ' — PLAIN TEXT: this system offers no encrypted storage'}`
+    : 'No key set — cloud runs will be rejected until one is saved.';
+}
+
 function populateSettingsModelSelects(source = appSettings || {}) {
   for (const [id, key] of Object.entries(settingModelFields)) {
     const select = $(id);
@@ -1941,6 +1965,10 @@ function setTemperatureSelect(id, value) {
 function fillSettingsForm(settings) {
   populateSettingsModelSelects(settings);
   $('setting-endpoint').value = settings.inferenceEndpoint;
+  $('setting-provider').value = settings.provider === 'openai' ? 'openai' : 'ollama';
+  $('setting-input-rate').value = settings.inputPerMillion || '';
+  $('setting-output-rate').value = settings.outputPerMillion || '';
+  syncProviderFields();
   const standardContexts = ['0', '8192', '16384', '32768', '65536', '131072'];
   const contextValue = String(settings.mainContextCap);
   $('setting-main-context').value = standardContexts.includes(contextValue) ? contextValue : 'custom';
@@ -1971,6 +1999,9 @@ function settingsFromForm() {
   return {
     ...appSettings,
     inferenceEndpoint: $('setting-endpoint').value.trim(),
+    provider: $('setting-provider').value === 'openai' ? 'openai' : 'ollama',
+    inputPerMillion: Number($('setting-input-rate').value) || 0,
+    outputPerMillion: Number($('setting-output-rate').value) || 0,
     mainContextCap: Number(selectedContext === 'custom' ? $('setting-main-context-custom').value : selectedContext),
     autoCompact: $('setting-auto-compact').checked,
     compactThreshold: Number($('setting-compact-threshold').value) / 100,
@@ -2083,7 +2114,7 @@ const SLASH_HELP = [
   '/agent daemon [status|start|stop|install|uninstall] — the headless runtime that keeps triggers firing with the app closed',
   '/pending [approve|deny [<run>] [n|all]|resume [<run>]] — parked calls from suspended unattended runs; the run id is optional when only one is waiting',
   '/policies [edit|promote <policy> <tool>] — autonomy policies, held calls, and evidence-backed promotion suggestions',
-  '/provider [key <value>] — which endpoint runs inference, and the API key when it is a cloud one',
+  '/provider — which endpoint runs inference, whether a key is set, and what a run costs',
   '/discord [edit] — bridge a Discord bot to the agent so it is reachable from a phone',
   '/workspace [init] — the project\'s .brittain folder: in-repo memory, heartbeat checklist, project triggers',
   '/memory [move] — view what the agent has remembered; move relocates it into the project (.brittain/MEMORY.md)',
@@ -2578,15 +2609,6 @@ async function handleSlash(raw) {
       const state = await window.api.providerState();
       if (!state.ok) return addError('Could not read the provider settings.');
 
-      if (/^key\s+/.test(arg)) {
-        const value = arg.slice(4).trim();
-        const res = await window.api.providerSetKey(value);
-        if (!res.ok) return addError(res.error);
-        return addInfo(value
-          ? `API key saved${res.encrypted ? ' (encrypted against your keychain)' : ' — WARNING: your system offers no encrypted storage, so it is saved as plain text with tight permissions'}.`
-          : 'API key cleared.');
-      }
-
       const cloud = state.provider === 'openai';
       const lines = ['INFERENCE PROVIDER', ''];
       lines.push(`Provider: ${cloud ? 'openai-compatible (cloud)' : 'ollama (local)'}`);
@@ -2607,9 +2629,7 @@ async function handleSlash(raw) {
           ? 'That includes file contents the agent reads, which — with policy roots or MCP servers'
           : 'Online research is still a separate, opt-in switch.',
         cloud ? 'configured — can reach well beyond the project folder.' : '');
-      lines.push('',
-        'Switch provider and endpoint in Settings. /provider key <value> stores the key;',
-        '/provider key (with nothing after it) clears it. The key is never shown in full.');
+      lines.push('', 'Change any of this in Settings. The key is stored there too, and is never shown in full again.');
       return showOverlay('INFERENCE PROVIDER', lines.filter((line) => line !== undefined).join('\n'));
     }
 

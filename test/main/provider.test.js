@@ -94,3 +94,38 @@ test('the posture change is stated plainly, not buried', () => {
 test('a missing key is called out before it becomes a confusing rejection', () => {
   assert.match(read('renderer/app.js'), /NOT SET — runs will be rejected/);
 });
+
+test('provider, key and rates are all configured in one place', () => {
+  // Splitting one coherent setting between a modal and a slash command means
+  // neither is the answer to "where do I change this".
+  const html = read('renderer/index.html');
+  for (const id of ['setting-provider', 'setting-api-key', 'setting-input-rate', 'setting-output-rate']) {
+    assert.ok(html.includes(`id="${id}"`), `${id} belongs in Settings`);
+  }
+  const app = read('renderer/app.js');
+  assert.match(app, /provider: \$\('setting-provider'\)\.value === 'openai' \? 'openai' : 'ollama'/);
+  assert.match(app, /inputPerMillion: Number\(\$\('setting-input-rate'\)\.value\) \|\| 0/);
+});
+
+test('the key is saved through its own channel, not with the settings blob', () => {
+  // A credential should not ride along in an object that gets logged, diffed
+  // and written to a plain-text file.
+  const app = read('renderer/app.js');
+  assert.match(app, /window\.api\.providerSetKey\(field\.value\)/);
+  const save = app.slice(app.indexOf("inferenceEndpoint: $('setting-endpoint')"), app.indexOf("inferenceEndpoint: $('setting-endpoint')") + 500);
+  assert.ok(!save.includes('setting-api-key'), 'the key must not be part of settingsSave');
+  // And the field is cleared after saving, so it is not left on screen.
+  assert.match(app, /field\.value = '';/);
+});
+
+test('cloud-only fields are hidden rather than shown dead', () => {
+  const app = read('renderer/app.js');
+  assert.match(app, /\$\('settings-cloud-fields'\)\.classList\.toggle\('hidden', !cloud\)/);
+  assert.match(app, /addEventListener\('change', syncProviderFields\)/);
+});
+
+test('/provider reports state and points at Settings to change it', () => {
+  const app = read('renderer/app.js');
+  assert.match(app, /Change any of this in Settings\./);
+  assert.ok(!app.includes('/provider key <value> stores the key'), 'configuration lives in one place');
+});

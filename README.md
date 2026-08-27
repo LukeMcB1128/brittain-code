@@ -49,7 +49,7 @@ Opening such a session never re-enables online research. The record is provenanc
 
 ### Cloud models
 
-Inference speaks two protocols. `ollama` is the default: the endpoint is a local Ollama-compatible host and nothing leaves the machine. `openai` covers every OpenAI-compatible provider — OpenRouter, Z.AI, Groq, DeepSeek — with the base URL going in the same endpoint setting exactly as the provider documents it (`https://openrouter.ai/api/v1`), and `/provider key <value>` storing the credential.
+Inference speaks two protocols. `ollama` is the default: the endpoint is a local Ollama-compatible host and nothing leaves the machine. `openai` covers every OpenAI-compatible provider — OpenRouter, Z.AI, Groq, DeepSeek — with the base URL going in the same endpoint setting exactly as the provider documents it (`https://openrouter.ai/api/v1`). Provider, key and cost rates all live in Settings beside that endpoint; `/provider` reports what is configured without changing it.
 
 The provider is chosen rather than sniffed from the URL, because it decides whether a conversation leaves your machine and that is not a question to answer by guessing. An unrecognised value stays local.
 

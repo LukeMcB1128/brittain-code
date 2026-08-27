@@ -192,8 +192,32 @@
             <input id="setting-endpoint" type="url" spellcheck="false" placeholder="http://127.0.0.1:11434" />
             <button type="button" id="settings-test-endpoint">TEST</button>
           </div>
-          <p class="setting-help">Ollama-compatible base URL. Change the port for another local server; remote URLs send prompts and attachments to that machine.</p>
+          <p class="setting-help">Base URL for the provider below, written exactly as it documents it. For Ollama that is the host and port; for a cloud provider it is their API base, e.g. https://openrouter.ai/api/v1</p>
           <div id="settings-test-result" class="setting-status"></div>
+
+          <label for="setting-provider">PROVIDER</label>
+          <select id="setting-provider">
+            <option value="ollama">Local (Ollama-compatible) — nothing leaves this machine</option>
+            <option value="openai">Cloud (OpenAI-compatible) — every message is sent to the endpoint</option>
+          </select>
+          <p class="setting-help">Chosen rather than detected from the URL: this decides whether your conversation leaves the machine.</p>
+
+          <div id="settings-cloud-fields" class="hidden">
+            <label for="setting-api-key">API KEY</label>
+            <div class="settings-endpoint-row">
+              <input id="setting-api-key" type="password" spellcheck="false" autocomplete="off" placeholder="paste to set, clear to remove" />
+              <button type="button" id="settings-save-key">SAVE KEY</button>
+            </div>
+            <div id="settings-key-status" class="setting-status"></div>
+            <p class="setting-help">Stored outside settings.json, encrypted against your keychain where the system offers one. Never shown in full again.</p>
+
+            <label for="setting-input-rate">COST PER MILLION TOKENS (USD)</label>
+            <div class="settings-endpoint-row">
+              <input id="setting-input-rate" type="number" min="0" step="0.01" placeholder="input, e.g. 0.15" />
+              <input id="setting-output-rate" type="number" min="0" step="0.01" placeholder="output, e.g. 0.50" />
+            </div>
+            <p class="setting-help">Optional. Set these and each run reports what it cost.</p>
+          </div>
         </section>
 
         <section class="settings-section">
