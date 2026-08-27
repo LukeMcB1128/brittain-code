@@ -2083,6 +2083,7 @@ const SLASH_HELP = [
   '/agent daemon [status|start|stop|install|uninstall] — the headless runtime that keeps triggers firing with the app closed',
   '/pending [approve|deny [<run>] [n|all]|resume [<run>]] — parked calls from suspended unattended runs; the run id is optional when only one is waiting',
   '/policies [edit|promote <policy> <tool>] — autonomy policies, held calls, and evidence-backed promotion suggestions',
+  '/provider [key <value>] — which endpoint runs inference, and the API key when it is a cloud one',
   '/discord [edit] — bridge a Discord bot to the agent so it is reachable from a phone',
   '/workspace [init] — the project\'s .brittain folder: in-repo memory, heartbeat checklist, project triggers',
   '/memory [move] — view what the agent has remembered; move relocates it into the project (.brittain/MEMORY.md)',
@@ -2571,6 +2572,45 @@ async function handleSlash(raw) {
         'spent, not context size. Subagent/coder/verifier tokens never touch the',
         'main context; that is the point of delegating.',
       ].join('\n'));
+    }
+
+    case 'provider': {
+      const state = await window.api.providerState();
+      if (!state.ok) return addError('Could not read the provider settings.');
+
+      if (/^key\s+/.test(arg)) {
+        const value = arg.slice(4).trim();
+        const res = await window.api.providerSetKey(value);
+        if (!res.ok) return addError(res.error);
+        return addInfo(value
+          ? `API key saved${res.encrypted ? ' (encrypted against your keychain)' : ' — WARNING: your system offers no encrypted storage, so it is saved as plain text with tight permissions'}.`
+          : 'API key cleared.');
+      }
+
+      const cloud = state.provider === 'openai';
+      const lines = ['INFERENCE PROVIDER', ''];
+      lines.push(`Provider: ${cloud ? 'openai-compatible (cloud)' : 'ollama (local)'}`);
+      lines.push(`Endpoint: ${state.endpoint}`);
+      if (cloud) {
+        lines.push(`API key:  ${state.key.set ? `set (${state.key.hint})${state.key.encrypted ? ', encrypted' : ', PLAIN TEXT'}` : 'NOT SET — runs will be rejected'}`);
+        if (state.rates.inputPerMillion || state.rates.outputPerMillion) {
+          lines.push(`Rates:    $${state.rates.inputPerMillion}/M in, $${state.rates.outputPerMillion}/M out`);
+        } else {
+          lines.push('Rates:    not set — set them in Settings to see what a run costs');
+        }
+      }
+      lines.push('',
+        cloud
+          ? 'EVERY message in this mode leaves your machine and is sent to that endpoint.'
+          : 'Nothing leaves your machine: inference runs locally.',
+        cloud
+          ? 'That includes file contents the agent reads, which — with policy roots or MCP servers'
+          : 'Online research is still a separate, opt-in switch.',
+        cloud ? 'configured — can reach well beyond the project folder.' : '');
+      lines.push('',
+        'Switch provider and endpoint in Settings. /provider key <value> stores the key;',
+        '/provider key (with nothing after it) clears it. The key is never shown in full.');
+      return showOverlay('INFERENCE PROVIDER', lines.filter((line) => line !== undefined).join('\n'));
     }
 
     case 'discord': {

@@ -1,7 +1,8 @@
 // Brittain Code — Electron main process.
-// Owns the agent loop: talks to Ollama, executes tools, streams results to the UI.
+// Owns the agent loop: talks to a local or OpenAI-compatible endpoint, executes
+// tools, streams results to the UI.
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Notification, safeStorage } = require('electron');
 
 // --headless runs the agent runtime — scheduler, queue, triggers, unattended
 // runs — with no window at all. The renderer becomes an optional client; the
@@ -21,6 +22,8 @@ const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore, safeChatId } = require('./src/main/history-store');
 const { createSessions, sessionKeyFor, loadSessionState } = require('./src/main/sessions');
+const { transportFor, estimateCost } = require('./src/main/inference');
+const { createSecretStore } = require('./src/main/secrets');
 const { createLedgerStore } = require('./src/main/ledger-store');
 const { createRunSink, RUN_CHANNELS } = require('./src/main/run-sink');
 const { enqueue: enqueueRun, dequeue: dequeueRun, peek: peekQueue, cancel: cancelQueuedRuns } = require('./src/main/run-queue');
@@ -159,6 +162,12 @@ let activeMission = null;
 // captured, so a window that appears, disappears, or never exists at all is an
 // ordinary condition for a run rather than a crash inside a loop.
 const sink = createRunSink({ window: () => win });
+
+// Provider credentials, encrypted against the OS keychain where one exists.
+const secrets = createSecretStore({
+  userDataDir: () => settingsUserDataDir || app.getPath('userData'),
+  safeStorage,
+});
 
 // Identifies the stretch of work whose ledgers belong together. Reset whenever
 // the conversation is cleared or replaced, so one file covers one session.
@@ -1050,18 +1059,25 @@ ipcMain.on('question:response', (_e, { id, answer }) => answerQuestion(id, answe
 
 // ---------- streaming chat with ollama ----------
 async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS, recovery = { toolCallRetries: 0 }, temperature = runtimeSettings.codeTemperature) {
-  const res = await fetch(inferenceEndpoint() + '/api/chat', {
+  // Which protocol this endpoint speaks. The request shape and the response
+  // framing both differ; everything below this — accumulation, degradation
+  // detection, what reaches the sink — is identical either way.
+  const transport = transportFor(runtimeSettings.provider);
+  const { url, headers, body } = transport.request({
+    endpoint: inferenceEndpoint(),
+    apiKey: transport.needsKey ? secrets.get('providerApiKey') : '',
+    model,
+    messages,
+    tools: toolset || undefined, // null = no tools (forces a text answer)
+    think,
+    numCtx,
+    temperature,
+    keepAlive: runtimeSettings.keepAlive,
+  });
+  const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages,
-      ...(toolset ? { tools: toolset } : {}), // null = no tools (forces a text answer)
-      stream: true,
-      keep_alive: runtimeSettings.keepAlive,
-      options: { num_ctx: numCtx, temperature },
-      ...(think === undefined ? {} : { think }),
-    }),
+    headers,
+    body: JSON.stringify(body),
     signal,
   });
   if (!res.ok) {
@@ -1089,6 +1105,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
+  const parser = transport.createParser();
   let buf = '';
   let content = '';
   let thinking = '';
@@ -1106,39 +1123,31 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
       if (!line) continue;
-      const chunk = JSON.parse(line);
-      if (chunk.error) throw new Error(chunk.error);
-      const msg = chunk.message || {};
-      if (msg.thinking) {
-        thinking += msg.thinking;
-        const thinkHit = scanThinkingForPsychosis(thinking, thinkingState);
-        if (thinkHit) {
-          try { await reader.cancel(); } catch {}
-          throw new PsychosisDetectedError(thinkHit.reason, thinkHit.excerpt, thinkHit.recovery);
+      for (const delta of parser.push(line)) {
+        if (delta.error) throw new Error(delta.error);
+        if (delta.thinking) {
+          thinking += delta.thinking;
+          const thinkHit = scanThinkingForPsychosis(thinking, thinkingState);
+          if (thinkHit) {
+            try { await reader.cancel(); } catch {}
+            throw new PsychosisDetectedError(thinkHit.reason, thinkHit.excerpt, thinkHit.recovery);
+          }
+          if (!silent) sink.emit('stream:thinking', delta.thinking);
         }
-        if (!silent) sink.emit('stream:thinking', msg.thinking);
-      }
-      if (msg.content) {
-        content += msg.content;
-        const hit = scanContentForPsychosis(content, repetitionState);
-        if (hit) {
-          try { await reader.cancel(); } catch {}
-          throw new PsychosisDetectedError(hit.reason, hit.excerpt, hit.recovery || 'compact');
+        if (delta.content) {
+          content += delta.content;
+          const hit = scanContentForPsychosis(content, repetitionState);
+          if (hit) {
+            try { await reader.cancel(); } catch {}
+            throw new PsychosisDetectedError(hit.reason, hit.excerpt, hit.recovery || 'compact');
+          }
+          if (!silent) sink.emit('stream:token', delta.content);
         }
-        if (!silent) sink.emit('stream:token', msg.content);
-      }
-      if (msg.tool_calls) toolCalls.push(...msg.tool_calls);
-      if (chunk.done) {
-        stats = {
-          promptTokens: chunk.prompt_eval_count || 0,
-          evalTokens: chunk.eval_count || 0,
-          tokPerSec: chunk.eval_duration ? (chunk.eval_count || 0) / (chunk.eval_duration / 1e9) : 0,
-          loadMs: (chunk.load_duration || 0) / 1e6,
-          promptEvalMs: (chunk.prompt_eval_duration || 0) / 1e6,
-          generationMs: (chunk.eval_duration || 0) / 1e6,
-          totalMs: (chunk.total_duration || 0) / 1e6,
-        };
-        recordModelSpeed(model, stats, numCtx);
+        if (delta.toolCalls) toolCalls.push(...delta.toolCalls);
+        if (delta.stats) {
+          stats = delta.stats;
+          recordModelSpeed(model, stats, numCtx);
+        }
       }
     }
   }
@@ -4465,6 +4474,28 @@ ipcMain.handle('updates:state', () => updateService?.state() || {
 });
 ipcMain.handle('updates:check', () => updateService?.check({ manual: true }) || { ok: false, error: 'Automatic updates are not ready yet.' });
 ipcMain.handle('updates:install', () => updateService?.install() || { ok: false, error: 'Automatic updates are not ready yet.' });
+
+// The key never crosses to the renderer — only whether one exists.
+ipcMain.handle('provider:state', () => ({
+  ok: true,
+  provider: runtimeSettings.provider || 'ollama',
+  endpoint: inferenceEndpoint(),
+  key: secrets.describe('providerApiKey'),
+  encryptionAvailable: secrets.encrypted(),
+  rates: {
+    inputPerMillion: runtimeSettings.inputPerMillion || 0,
+    outputPerMillion: runtimeSettings.outputPerMillion || 0,
+  },
+}));
+
+ipcMain.handle('provider:setKey', (_e, value) => {
+  try {
+    const result = secrets.set('providerApiKey', value);
+    return { ok: true, encrypted: result.encrypted };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
 
 ipcMain.handle('settings:get', () => ({
   ok: true,

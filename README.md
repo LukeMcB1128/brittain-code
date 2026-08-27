@@ -47,6 +47,16 @@ Alongside the transcript, a saved chat records the models it used, the working d
 
 Opening such a session never re-enables online research. The record is provenance — it answers "was anything here reached over the network?" — and the switch always starts off, exactly as it does for a new chat.
 
+### Cloud models
+
+Inference speaks two protocols. `ollama` is the default: the endpoint is a local Ollama-compatible host and nothing leaves the machine. `openai` covers every OpenAI-compatible provider — OpenRouter, Z.AI, Groq, DeepSeek — with the base URL going in the same endpoint setting exactly as the provider documents it (`https://openrouter.ai/api/v1`), and `/provider key <value>` storing the credential.
+
+The provider is chosen rather than sniffed from the URL, because it decides whether a conversation leaves your machine and that is not a question to answer by guessing. An unrecognised value stays local.
+
+The key is kept in `credentials.json` rather than `settings.json`, encrypted against the OS keychain where one is available and mode `0600` regardless; when no encrypted storage exists the app says so rather than implying protection it does not have. It is never sent to the interface — `/provider` shows only whether a key is set and its first and last few characters.
+
+Worth being clear about what changes: on a cloud provider **every message is sent to that endpoint**, including the contents of files the agent reads. With policy `roots` or MCP servers configured, that can reach well beyond the project folder. The sensitive-read invariant still refuses `.env` files and keys, and online research remains a separate switch, but the model itself now sees everything else. Set `inputPerMillion` and `outputPerMillion` in Settings and a run will report what it cost.
+
 ### Scanned PDFs
 
 A PDF with no text layer — a photographed or scanned worksheet — used to be refused outright. Its pages are now rendered to images and attached the way any other image is, so a vision-capable model (`qwen2.5vl`, `llava`, `gemma3`) can read it. The attachment text says plainly that the document was a scan and how many pages were attached, so the model is never guessing at what it was given.

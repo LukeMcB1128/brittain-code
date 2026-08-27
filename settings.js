@@ -12,6 +12,17 @@ const DEFAULT_SETTINGS = Object.freeze({
   codeTemperature: 0.3,
   chatTemperature: 0.6,
   defaultMode: 'last',
+  // Which protocol the endpoint speaks. 'ollama' is the local default;
+  // 'openai' covers every OpenAI-compatible provider — OpenRouter, Z.AI, Groq,
+  // DeepSeek — with the base URL going in inferenceEndpoint as documented.
+  //
+  // Chosen rather than sniffed: this decides whether a conversation leaves the
+  // machine, which is not a question to answer by guessing at a URL.
+  provider: 'ollama',
+  // Per-million-token rates for cost reporting. Zero means free, which is the
+  // truth for a local model.
+  inputPerMillion: 0,
+  outputPerMillion: 0,
   codeModel: '',
   chatModel: '',
   // The model last run from the UI. Not a preference anyone edits — it exists
@@ -83,6 +94,9 @@ function normalizeSettings(input = {}) {
     codeTemperature: clampNumber(merged.codeTemperature, DEFAULT_SETTINGS.codeTemperature, 0, 1.5),
     chatTemperature: clampNumber(merged.chatTemperature, DEFAULT_SETTINGS.chatTemperature, 0, 1.5),
     defaultMode: ['last', 'code', 'chat'].includes(merged.defaultMode) ? merged.defaultMode : DEFAULT_SETTINGS.defaultMode,
+    provider: merged.provider === 'openai' ? 'openai' : 'ollama',
+    inputPerMillion: Math.max(0, Number(merged.inputPerMillion) || 0),
+    outputPerMillion: Math.max(0, Number(merged.outputPerMillion) || 0),
     codeModel: cleanText(merged.codeModel, 200),
     lastModel: cleanText(merged.lastModel, 200),
     chatModel: cleanText(merged.chatModel, 200),

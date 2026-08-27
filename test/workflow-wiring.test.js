@@ -195,8 +195,12 @@ test('settings are wired through the modal, bridge, persistence, and inference r
   assert.match(renderer, /defaultLoopIterations \|\| 8/);
   assert.match(preload, /settingsTestEndpoint/);
   assert.match(main, /ipcMain\.handle\('settings:save'/);
-  assert.match(main, /fetch\(inferenceEndpoint\(\) \+ '\/api\/chat'/);
-  assert.match(main, /keep_alive: runtimeSettings\.keepAlive/);
+  // The endpoint reaches inference through a transport now: it is the transport
+  // that decides between Ollama's /api/chat and an OpenAI-compatible
+  // /chat/completions, so pinning one path here would pin the wrong thing.
+  assert.match(main, /const transport = transportFor\(runtimeSettings\.provider\);/);
+  assert.match(main, /endpoint: inferenceEndpoint\(\),/);
+  assert.match(main, /keepAlive: runtimeSettings\.keepAlive,/);
   assert.equal(packageJson.build.files.includes('settings.js'), true);
 });
 

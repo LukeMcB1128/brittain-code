@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('updates:state', handler);
     return () => ipcRenderer.removeListener('updates:state', handler);
   },
+  providerState: () => ipcRenderer.invoke('provider:state'),
+  providerSetKey: (value) => ipcRenderer.invoke('provider:setKey', value),
   settingsGet: () => ipcRenderer.invoke('settings:get'),
   settingsSave: (settings) => ipcRenderer.invoke('settings:save', settings),
   settingsTestEndpoint: (endpoint) => ipcRenderer.invoke('settings:testEndpoint', endpoint),
