@@ -200,6 +200,13 @@ test('models are listed from wherever the configured provider keeps them', () =>
   assert.match(handler, /ollamaJson\('\/api\/tags'\)/, 'and the local path is untouched');
 });
 
+test('changing only the provider still refreshes models and runtime caches', () => {
+  const main = read('main.js');
+  const renderer = read('renderer/app.js');
+  assert.match(main, /endpointChanged \|\| providerChanged/);
+  assert.match(renderer, /oldEndpoint !== appSettings\.inferenceEndpoint \|\| oldProvider !== appSettings\.provider/);
+});
+
 test('the failure names the provider so the screen can speak its language', () => {
   const main = read('main.js');
   const handler = main.slice(main.indexOf("ipcMain.handle('models:list'"), main.indexOf("const getModelRecommendations"));

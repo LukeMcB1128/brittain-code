@@ -42,9 +42,10 @@ const ollamaTransport = {
       headers: { 'Content-Type': 'application/json' },
       body: {
         model,
-        // Ollama takes the conversation as it is stored. Only the OpenAI
-        // transport translates it.
-        messages,
+        // A conversation can start on an OpenAI-compatible provider and then
+        // continue here. Convert its string tool arguments back to the object
+        // shape Ollama requires.
+        messages: toOllamaMessages(messages),
         ...(tools ? { tools } : {}),
         stream: true,
         keep_alive: keepAlive,
@@ -70,6 +71,34 @@ const ollamaTransport = {
     };
   },
 };
+
+function ollamaToolArguments(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    // A malformed historical call has already received its stored tool result.
+    // Keep the conversation usable without asking Ollama to parse bad JSON.
+    return {};
+  }
+}
+
+function toOllamaMessages(messages) {
+  return (Array.isArray(messages) ? messages : []).map((message) => {
+    if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls)) return message;
+    return {
+      ...message,
+      tool_calls: message.tool_calls.map((call) => ({
+        function: {
+          name: String(call?.function?.name || ''),
+          arguments: ollamaToolArguments(call?.function?.arguments),
+        },
+      })),
+    };
+  });
+}
 
 // The conversation is stored in Ollama's shape, which differs from OpenAI's in
 // three ways that all produce a 500 rather than a useful complaint:
@@ -274,4 +303,4 @@ function estimateCost(stats, rates) {
     + ((Number(stats?.evalTokens) || 0) / 1e6) * output;
 }
 
-module.exports = { ollamaTransport, openAITransport, transportFor, estimateCost, toOpenAIMessages, TRANSPORTS };
+module.exports = { ollamaTransport, openAITransport, transportFor, estimateCost, toOpenAIMessages, toOllamaMessages, TRANSPORTS };

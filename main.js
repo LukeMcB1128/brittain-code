@@ -4586,8 +4586,9 @@ ipcMain.handle('settings:save', (_e, value) => {
     if (currentAbort) return { ok: false, error: 'Stop the active run before changing inference settings.' };
     const normalized = normalizeSettings(value);
     const endpointChanged = normalized.inferenceEndpoint !== runtimeSettings.inferenceEndpoint;
+    const providerChanged = normalized.provider !== runtimeSettings.provider;
     runtimeSettings = saveSettings(settingsUserDataDir, normalized);
-    if (endpointChanged) {
+    if (endpointChanged || providerChanged) {
       contextCache.clear();
       capsCache.clear();
       runtimeMetadataCache.clear();

@@ -2114,6 +2114,7 @@ $('settings-form').addEventListener('submit', async (event) => {
   status.textContent = 'Saving…';
   const next = settingsFromForm();
   const oldEndpoint = appSettings.inferenceEndpoint;
+  const oldProvider = appSettings.provider;
   const res = await window.api.settingsSave(next);
   if (!res.ok) {
     status.classList.add('error');
@@ -2123,7 +2124,9 @@ $('settings-form').addEventListener('submit', async (event) => {
   appSettings = res.settings;
   coderModel = appSettings.coderModel || coderModel;
   subModel = appSettings.scoutModel || subModel;
-  if (oldEndpoint !== appSettings.inferenceEndpoint) await reloadModels(defaultModelForMode(appMode));
+  if (oldEndpoint !== appSettings.inferenceEndpoint || oldProvider !== appSettings.provider) {
+    await reloadModels(defaultModelForMode(appMode));
+  }
   applySessionDefaults();
   hideSettings();
   addInfo('Settings saved. New inference and agent requests will use them.');

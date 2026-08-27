@@ -134,13 +134,37 @@ test('cost follows the rates given, and is zero when none are', () => {
 
 const { toOpenAIMessages } = require('../../src/main/inference');
 
-test('Ollama keeps the conversation exactly as stored', () => {
-  // Translating for the local transport would break every local run; this
-  // guards a replacement that once hit both transports at once.
+test('native Ollama messages keep their existing shape', () => {
   const messages = [{ role: 'user', content: 'hi', images: ['iVBORw0KGgo'] }];
   const body = ollamaTransport.request({ endpoint: 'http://x', model: 'm', messages }).body;
   assert.deepEqual(body.messages, messages);
   assert.ok(body.messages[0].images, 'Ollama takes a bare base64 array');
+});
+
+test('OpenAI string tool arguments become the object Ollama requires', () => {
+  const messages = [{
+    role: 'assistant',
+    content: '',
+    tool_calls: [{
+      id: 'call_1',
+      type: 'function',
+      function: { name: 'read_file', arguments: '{"path":"packet.txt"}' },
+    }],
+  }];
+  const body = ollamaTransport.request({ endpoint: 'http://x', model: 'm', messages }).body;
+  assert.deepEqual(body.messages[0].tool_calls, [{
+    function: { name: 'read_file', arguments: { path: 'packet.txt' } },
+  }]);
+  assert.equal(typeof messages[0].tool_calls[0].function.arguments, 'string', 'stored history is not changed');
+});
+
+test('a malformed historical tool call cannot make Ollama reject the next request', () => {
+  const messages = [{
+    role: 'assistant',
+    tool_calls: [{ function: { name: 'read_file', arguments: '{"path":"unfinished' } }],
+  }];
+  const body = ollamaTransport.request({ endpoint: 'http://x', model: 'm', messages }).body;
+  assert.deepEqual(body.messages[0].tool_calls[0].function.arguments, {});
 });
 
 test('images become content parts with a data URL', () => {
