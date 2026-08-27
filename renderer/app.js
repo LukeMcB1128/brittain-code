@@ -91,6 +91,11 @@ let latestMission = null;
 let pendingPlanDraft = null;
 let pendingPlanCard = null;
 let updateState = null;
+let currentModelDetails = [];
+
+const activeModelPicker = window.ModelPicker?.create(modelSelect, {
+  emptyLabel: 'No models available',
+});
 
 setAppMode(appMode, false, false);
 
@@ -228,11 +233,14 @@ async function reloadModels(preferred = '') {
   modelSelect.innerHTML = '';
   if (!res.ok) {
     currentModels = [];
+    currentModelDetails = [];
+    activeModelPicker?.refresh([]);
     renderOnboarding('unreachable', res.error, res.provider);
     populateSettingsModelSelects();
     return currentModels;
   }
   currentModels = res.models;
+  currentModelDetails = Array.isArray(res.modelDetails) ? res.modelDetails : [];
   for (const name of currentModels) {
     const opt = document.createElement('option');
     opt.value = name;
@@ -240,6 +248,7 @@ async function reloadModels(preferred = '') {
     modelSelect.appendChild(opt);
   }
   if (preferred && currentModels.includes(preferred)) modelSelect.value = preferred;
+  activeModelPicker?.refresh(currentModelDetails);
   populateSettingsModelSelects();
   renderOnboarding(currentModels.length ? 'ok' : 'empty', '', res.provider);
   return currentModels;
@@ -359,6 +368,7 @@ function applySessionDefaults() {
   onlineResearchToggle.checked = false; // privacy boundary: never restore online access implicitly
   const preferred = defaultModelForMode(appMode);
   if (preferred && currentModels.includes(preferred)) modelSelect.value = preferred;
+  activeModelPicker?.sync();
 }
 
 thinkToggle.addEventListener('change', () => localStorage.setItem('think', thinkToggle.checked ? '1' : '0'));
@@ -726,6 +736,7 @@ async function loadChat(chatId) {
   // Auto-select the model this chat was using; if it's gone from Ollama, keep the current one.
   if (saved.model && [...modelSelect.options].some((o) => o.value === saved.model)) {
     modelSelect.value = saved.model;
+    activeModelPicker?.sync();
     localStorage.setItem('model', saved.model);
   }
 
@@ -1942,6 +1953,13 @@ const settingModelFields = {
   'setting-scout-model': 'scoutModel',
 };
 
+const settingModelPickers = Object.fromEntries(
+  Object.keys(settingModelFields).map((id) => [id, window.ModelPicker?.create($(id), {
+    emptyLabel: 'Automatic / last used',
+    disableWhenEmpty: false,
+  })])
+);
+
 // The cloud-only fields are hidden on a local provider rather than shown as
 // dead inputs, and the key's status is read separately because the key itself
 // never comes back to the renderer.
@@ -1981,6 +1999,7 @@ function populateSettingsModelSelects(source = appSettings || {}) {
       select.appendChild(option);
     }
     select.value = selected;
+    settingModelPickers[id]?.refresh(currentModelDetails);
   }
 }
 
@@ -2467,7 +2486,7 @@ async function handleSlash(raw) {
       const match = [...modelSelect.options].map((o) => o.value).find((v) => v.includes(arg));
       if (!match) return addError(`No installed model matching "${arg}".`);
       modelSelect.value = match;
-      localStorage.setItem('model', match);
+      modelSelect.dispatchEvent(new Event('change'));
       return addInfo('Model set to ' + match);
     }
 
@@ -2604,8 +2623,7 @@ async function handleSlash(raw) {
       if (!route.ok) return addError('AUTO could not select a model: ' + route.error);
       if (!currentModels.includes(route.model)) return addError(`AUTO selected "${route.model}", but it is not in the current installed-model list.`);
       modelSelect.value = route.model;
-      localStorage.setItem('model', route.model);
-      localStorage.setItem(`model:${appMode}`, route.model);
+      modelSelect.dispatchEvent(new Event('change'));
       addInfo(`AUTO selected ${route.model} — ${route.reason}.${route.warning ? `\nWarning: ${route.warning}` : ''}`);
       input.value = arg;
       return send();
