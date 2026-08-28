@@ -1,6 +1,7 @@
 const os = require('os');
 const http = require('http');
 const https = require('https');
+const { providerPath, transportFor } = require('../../src/main/inference');
 
 // Node's global fetch (undici) applies a 300s headersTimeout. Ollama runs here are
 // non-streaming, so no response headers arrive until generation finishes, and any
@@ -79,15 +80,15 @@ class OllamaProvider {
   }
 
   async listModels() {
-    const tags = await this.json('/api/tags');
+    const tags = await this.json(providerPath('ollama', 'models'));
     return (tags.models || []).map((entry) => entry.name || entry.model).filter(Boolean).sort();
   }
 
   async runtimeMetadata(model, runtimeSettings = {}) {
     const [tags, show, version] = await Promise.all([
-      this.json('/api/tags').catch(() => ({ models: [] })),
-      this.json('/api/show', { model }).catch(() => ({})),
-      this.json('/api/version').catch(() => ({})),
+      this.json(providerPath('ollama', 'models')).catch(() => ({ models: [] })),
+      this.json(providerPath('ollama', 'model'), { model }).catch(() => ({})),
+      this.json(providerPath('ollama', 'version')).catch(() => ({})),
     ]);
     const tag = (tags.models || []).find((entry) => entry.name === model || entry.model === model) || {};
     const modelInfo = show.model_info || {};
@@ -159,26 +160,26 @@ class OllamaProvider {
   }
 
   async respond({ model, systemPrompt, messages, tools, contextCap, temperature, think, signal }) {
-    const body = {
+    const transport = transportFor('ollama');
+    const request = transport.request({
+      endpoint: this.baseUrl,
       model,
       messages: [{ role: 'system', content: systemPrompt }, ...this.normalizeMessages(messages)],
       tools,
-      stream: false,
-      options: {
-        num_ctx: contextCap || 32768,
-        temperature: temperature ?? 0.2,
-      },
-    };
-    if (think !== undefined) body.think = !!think;
+      think,
+      numCtx: contextCap || 32768,
+      temperature: temperature ?? 0.2,
+    });
+    request.body.stream = false;
 
     let response;
     try {
-      response = await this.json('/api/chat', body, signal);
+      response = await requestJson(request.url, request.body, signal);
     } catch (err) {
       const message = String(err.message || err);
-      if (body.think !== undefined && /does not support thinking/i.test(message)) {
-        delete body.think;
-        response = await this.json('/api/chat', body, signal);
+      if (request.body.think !== undefined && /does not support thinking/i.test(message)) {
+        delete request.body.think;
+        response = await requestJson(request.url, request.body, signal);
       } else {
         throw err;
       }

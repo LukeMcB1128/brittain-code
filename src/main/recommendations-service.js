@@ -3,6 +3,7 @@ const path = require('path');
 const { buildBaselineRecommendations, buildRecommendations } = require('../../recommendations');
 const modelPresets = require('../../model-presets.json');
 const modelBaselines = require('../../model-baselines.json');
+const { providerPath } = require('./inference');
 
 function compactRecommendationShow(show) {
   return {
@@ -102,17 +103,17 @@ function createRecommendationsService({
   return async function getRecommendations({ mode = 'code' } = {}) {
     try {
       const [tagsResponse, runningResponse, hardware] = await Promise.all([
-        ollamaJson('/api/tags'),
-        ollamaJson('/api/ps').catch(() => ({ models: [] })),
+        ollamaJson(providerPath('ollama', 'models')),
+        ollamaJson(providerPath('ollama', 'running')).catch(() => ({ models: [] })),
         hardwareProfile(),
       ]);
       const tags = tagsResponse.models || [];
       const showEntries = await Promise.all(tags.map(async (tag) => {
         const name = tag.name || tag.model;
         try {
-          let show = await ollamaJson('/api/show', { model: name });
+          let show = await ollamaJson(providerPath('ollama', 'model'), { model: name });
           if (needsVerboseRecommendationShow(show)) {
-            show = await ollamaJson('/api/show', { model: name, verbose: true });
+            show = await ollamaJson(providerPath('ollama', 'model'), { model: name, verbose: true });
           }
           return [name, compactRecommendationShow(show)];
         } catch {

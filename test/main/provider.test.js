@@ -198,8 +198,8 @@ test('TEST probes the path the selected protocol actually uses', () => {
   const main = read('main.js');
   const handler = main.slice(main.indexOf("ipcMain.handle('settings:testEndpoint'"), main.indexOf("ipcMain.handle('settings:testEndpoint'") + 1400);
   assert.match(handler, /if \(String\(provider\) === 'openai'\)/);
-  assert.match(handler, /endpoint \+ '\/models'/);
-  assert.match(handler, /endpoint \+ '\/api\/tags'/);
+  assert.match(handler, /endpoint \+ providerPath\('openai', 'models'\)/);
+  assert.match(handler, /endpoint \+ localModelsPath/);
   // An auth failure is named as one rather than reported as a status code.
   assert.match(handler, /The endpoint rejected the saved API key\./);
   assert.match(handler, /needs an API key — save one below first\./);
@@ -213,9 +213,9 @@ test('models are listed from wherever the configured provider keeps them', () =>
   const main = read('main.js');
   const handler = main.slice(main.indexOf("ipcMain.handle('models:list'"), main.indexOf("const getModelRecommendations"));
   assert.match(handler, /if \(runtimeSettings\.provider === 'openai'\)/);
-  assert.match(handler, /inferenceEndpoint\(\) \+ '\/models'/);
+  assert.match(handler, /inferenceEndpoint\(\) \+ providerPath\('openai', 'models'\)/);
   assert.match(handler, /normalizeOpenAIModels\(listed\)/, 'OpenAI model entries keep their IDs and useful metadata');
-  assert.match(handler, /ollamaJson\('\/api\/tags'\)/, 'and the local path is untouched');
+  assert.match(handler, /ollamaJson\(providerPath\('ollama', 'models'\)\)/, 'and the local path stays provider-owned');
 });
 
 test('changing only the provider still refreshes models and runtime caches', () => {
@@ -246,6 +246,14 @@ test('a cloud user is never told to install Ollama', () => {
   assert.ok(gate.indexOf('if (cloud) {') < gate.indexOf("addCopyableCommand(body, 'ollama serve')"));
 });
 
+test('cloud recommendations do not probe local model-management routes', () => {
+  const main = read('main.js');
+  const wrapper = main.slice(main.indexOf('async function getModelRecommendations'), main.indexOf("ipcMain.handle('models:recommendations'"));
+  assert.match(wrapper, /runtimeSettings\.provider === 'openai'/);
+  assert.match(wrapper, /Hardware-fit recommendations apply only to local models/);
+  assert.ok(wrapper.indexOf("provider === 'openai'") < wrapper.indexOf('getLocalModelRecommendations'));
+});
+
 test('a cloud model is budgeted by the window the provider states', () => {
   // /api/show is an Ollama path; probing it on a cloud endpoint threw, the
   // catch answered 8192, and a million-token model was compacted almost
@@ -257,7 +265,7 @@ test('a cloud model is budgeted by the window the provider states', () => {
   // Unknown must not mean tiny: on this transport num_ctx is never sent, so the
   // figure only drives local budgeting.
   assert.match(body, /runtimeSettings\.mainContextCap \|\| NUM_CTX_CAP/);
-  assert.ok(body.indexOf("provider === 'openai'") < body.indexOf("ollamaJson('/api/show'"),
+  assert.ok(body.indexOf("provider === 'openai'") < body.indexOf("ollamaJson(providerPath('ollama', 'model')"),
     'the cloud branch must return before the Ollama probe');
 });
 
@@ -294,7 +302,7 @@ test('a cloud model that reads images is allowed to', () => {
   const caps = main.slice(main.indexOf('async function getCapabilities'), main.indexOf('const supportsThinking'));
   assert.match(caps, /if \(runtimeSettings\.provider === 'openai'\)/);
   assert.match(caps, /modalities\.includes\('image'\) \? \['vision'\] : \[\]/);
-  assert.ok(caps.indexOf("provider === 'openai'") < caps.indexOf("ollamaJson('/api/show'"),
+  assert.ok(caps.indexOf("provider === 'openai'") < caps.indexOf("ollamaJson(providerPath('ollama', 'model')"),
     'the cloud branch must return before the Ollama probe');
 });
 

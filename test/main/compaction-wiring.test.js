@@ -27,8 +27,12 @@ test('the conversation is never replaced before the summary is validated', () =>
 
 test('both compaction paths ask for a bounded length rather than leaving it to the model', () => {
   const main = source('main.js');
-  const matches = main.match(/num_predict:/g) || [];
-  assert.ok(matches.length >= 3, `expected num_predict on every summarizer call, found ${matches.length}`);
+  const matches = main.match(/maxTokens:/g) || [];
+  assert.ok(matches.length >= 3, `expected maxTokens on every summarizer call, found ${matches.length}`);
+  assert.match(source('src/main/inference.js'), /max_tokens: maxTokens/,
+    'the provider-neutral limit must reach the OpenAI request');
+  assert.match(source('src/main/inference.js'), /num_predict: maxTokens/,
+    'the provider-neutral limit must reach the Ollama request');
   assert.doesNotMatch(compactConversationSource(), /temperature: runtimeSettings\.codeTemperature/,
     'summarizing is extraction, not authoring — it should not use the code temperature');
 });

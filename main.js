@@ -22,7 +22,7 @@ const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore, safeChatId } = require('./src/main/history-store');
 const { createSessions, sessionKeyFor, loadSessionState } = require('./src/main/sessions');
-const { transportFor } = require('./src/main/inference');
+const { transportFor, providerPath, safeProviderError } = require('./src/main/inference');
 const { ratesFor, costOf, emptyTotals: emptyCostTotals, addTurn: addCostTurn, describeTurn: describeTurnCost, describeTotals: describeCostTotals } = require('./src/main/cost');
 const { estimateContextTokens } = require('./src/main/context-estimator');
 const { createSecretStore } = require('./src/main/secrets');
@@ -750,7 +750,7 @@ app.on('window-all-closed', () => { if (!HEADLESS) app.quit(); });
 
 // ---------- ollama helpers ----------
 async function ollamaJson(route, body, signal) {
-  const requestBody = body && route === '/api/chat'
+  const requestBody = body && route === providerPath('ollama', 'chat')
     ? { ...body, keep_alive: runtimeSettings.keepAlive }
     : body;
   const res = await fetch(inferenceEndpoint() + route, {
@@ -759,7 +759,7 @@ async function ollamaJson(route, body, signal) {
     body: requestBody ? JSON.stringify(requestBody) : undefined,
     signal,
   });
-  if (!res.ok) throw new Error(`Inference endpoint ${route} failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new Error(safeProviderError(res.status, await res.text()));
   return res.json();
 }
 
@@ -796,7 +796,7 @@ async function getContextLength(model) {
   }
 
   try {
-    const info = await ollamaJson('/api/show', { model });
+    const info = await ollamaJson(providerPath('ollama', 'model'), { model });
     const mi = info.model_info || {};
     const key = Object.keys(mi).find((k) => k.endsWith('.context_length'));
     const len = key ? mi[key] : 8192;
@@ -831,7 +831,7 @@ async function getCapabilities(model) {
   }
 
   try {
-    const info = await ollamaJson('/api/show', { model });
+    const info = await ollamaJson(providerPath('ollama', 'model'), { model });
     const caps = Array.isArray(info.capabilities) ? info.capabilities : [];
     capsCache.set(model, caps);
     return caps;
@@ -845,11 +845,46 @@ const supportsVision = async (model) => (await getCapabilities(model)).includes(
 const runtimeMetadataCache = new Map();
 async function runtimeMetadata(model) {
   if (runtimeMetadataCache.has(model)) return runtimeMetadataCache.get(model);
-  const [tags, show, version, commit] = await Promise.all([
-    ollamaJson('/api/tags').catch(() => ({ models: [] })),
-    model ? ollamaJson('/api/show', { model }).catch(() => ({})) : {},
-    ollamaJson('/api/version').catch(() => ({})),
-    gitRun(['rev-parse', '--short', 'HEAD'], __dirname).catch(() => ({ ok: false })),
+  const commit = await gitRun(['rev-parse', '--short', 'HEAD'], __dirname).catch(() => ({ ok: false }));
+  if (runtimeSettings.provider === 'openai') {
+    const detail = catalogDetails.get(model) || {};
+    const metadata = {
+      appVersion: require('./package.json').version,
+      appCommit: commit.ok ? commit.out.trim() : null,
+      ollamaVersion: null,
+      provider: 'openai',
+      model: {
+        name: model || null,
+        digest: null,
+        sizeBytes: null,
+        family: null,
+        parameterSize: null,
+        quantization: null,
+        nativeContext: Number(detail.contextLength) || null,
+      },
+      settings: {
+        inferenceEndpoint: runtimeSettings.inferenceEndpoint,
+        requestedContextCap: runtimeSettings.mainContextCap || NUM_CTX_CAP,
+        codeTemperature: runtimeSettings.codeTemperature,
+        chatTemperature: runtimeSettings.chatTemperature,
+        keepAlive: null,
+        provider: 'openai',
+      },
+      hardware: {
+        platform: process.platform,
+        arch: process.arch,
+        totalMemoryBytes: os.totalmem(),
+        cpu: os.cpus()?.[0]?.model || null,
+        cpuCount: os.cpus()?.length || null,
+      },
+    };
+    runtimeMetadataCache.set(model, metadata);
+    return metadata;
+  }
+  const [tags, show, version] = await Promise.all([
+    ollamaJson(providerPath('ollama', 'models')).catch(() => ({ models: [] })),
+    model ? ollamaJson(providerPath('ollama', 'model'), { model }).catch(() => ({})) : {},
+    ollamaJson(providerPath('ollama', 'version')).catch(() => ({})),
   ]);
   const tag = (tags.models || []).find((entry) => entry.name === model || entry.model === model) || {};
   const modelInfo = show.model_info || {};
@@ -873,6 +908,7 @@ async function runtimeMetadata(model) {
       codeTemperature: runtimeSettings.codeTemperature,
       chatTemperature: runtimeSettings.chatTemperature,
       keepAlive: runtimeSettings.keepAlive,
+      provider: 'ollama',
     },
     hardware: {
       platform: process.platform,
@@ -1149,7 +1185,7 @@ function answerQuestion(id, answer) {
 ipcMain.on('question:response', (_e, { id, answer }) => answerQuestion(id, answer));
 
 // ---------- streaming chat with ollama ----------
-async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS, recovery = { toolCallRetries: 0 }, temperature = runtimeSettings.codeTemperature) {
+async function streamChat(model, messages, signal, think, silent = false, numCtx = 8192, toolset = TOOL_DEFS, recovery = { toolCallRetries: 0 }, temperature = runtimeSettings.codeTemperature, maxTokens = 0) {
   // Which protocol this endpoint speaks. The request shape and the response
   // framing both differ; everything below this — accumulation, degradation
   // detection, what reaches the sink — is identical either way.
@@ -1164,6 +1200,7 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
     numCtx,
     temperature,
     keepAlive: runtimeSettings.keepAlive,
+    maxTokens,
   });
   const res = await fetch(url, {
     method: 'POST',
@@ -1187,11 +1224,12 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
           toolset,
           { toolCallRetries: 1 },
           temperature,
+          maxTokens,
         );
       }
       throw new Error(toolCallFailureMessage(model));
     }
-    throw new Error(`Inference endpoint chat failed: ${res.status} ${errorBody}`);
+    throw new Error(safeProviderError(res.status, errorBody));
   }
 
   const reader = res.body.getReader();
@@ -1243,6 +1281,23 @@ async function streamChat(model, messages, signal, think, silent = false, numCtx
     }
   }
   return { content, thinking, toolCalls, stats };
+}
+
+async function completeText({ model, messages, signal, think, numCtx, temperature, maxTokens, usageBucket }) {
+  const result = await streamChat(
+    model,
+    messages,
+    signal,
+    think,
+    true,
+    numCtx,
+    null,
+    { toolCallRetries: 0 },
+    temperature,
+    maxTokens,
+  );
+  if (usageBucket && result.stats) recordUsage(usageBucket, result.stats);
+  return result.content.trim();
 }
 
 // ---------- fallback tool-call parser ----------
@@ -1379,6 +1434,7 @@ const DELIBERATION_RESTART_RE = /(?:let me (?:write|do|start|plan|create|just|fi
 const DELIBERATION_MAX_RESTARTS = 6;
 // Generous backstop for genuine deep reasoning; only catches true runaway.
 const THINKING_BUDGET_CHARS = 12_000;
+const CLOUD_THINKING_BUDGET_CHARS = 100_000;
 
 function countDeliberationRestarts(thinking) {
   DELIBERATION_RESTART_RE.lastIndex = 0;
@@ -1403,16 +1459,18 @@ function scanThinkingForPsychosis(thinking, thinkingState = { value: 0 }) {
   if (thinking.length - thinkingState.value >= 500) {
     thinkingState.value = thinking.length;
     const restarts = countDeliberationRestarts(thinking);
-    if (restarts >= DELIBERATION_MAX_RESTARTS) {
+    const cloudProvider = runtimeSettings.provider === 'openai';
+    if (!cloudProvider && restarts >= DELIBERATION_MAX_RESTARTS) {
       return {
         reason: `deliberation loop — ${restarts} restarts ("let me…", "actually, let me…") without acting`,
         excerpt: tail.slice(-160),
         recovery: 'directive',
       };
     }
-    if (runtimeSettings.provider !== 'openai' && thinking.length >= THINKING_BUDGET_CHARS) {
+    const budget = cloudProvider ? CLOUD_THINKING_BUDGET_CHARS : THINKING_BUDGET_CHARS;
+    if (thinking.length >= budget) {
       return {
-        reason: `reasoning exceeded ${THINKING_BUDGET_CHARS.toLocaleString()} chars without producing a tool call or answer`,
+        reason: `reasoning exceeded ${budget.toLocaleString()} chars without producing a tool call or answer`,
         excerpt: tail.slice(-160),
         recovery: 'directive',
       };
@@ -1876,11 +1934,12 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
           if (failure.reachedLimit) failureDirectives.add(name || 'tool');
         }
         if (toolOutcome === 'ok') {
-          if (RISKY_TOOLS.has(name) && name !== 'run_command' && args?.path) runLog.mutations.add(String(args.path));
-          if (name === 'move_file' || name === 'copy_file') runLog.mutations.add(String(args.destination || ''));
+          if (ORCHESTRATION_MUTATING_TOOLS.has(name)) {
+            for (const changedPath of evidencePaths({ name, args, result })) runLog.mutations.add(changedPath);
+          }
           if (name === 'run_command' && args?.command) {
             runLog.commands.push(String(args.command));
-            if (/\b(test|spec|--check|tsc|lint|pytest|vitest|jest)\b/.test(String(args.command))) runLog.verified = true;
+            if (isVerificationCommand(args.command)) runLog.verified = true;
           }
         }
         const bounded = boundToolResult(result, { toolName: name || 'tool' });
@@ -2428,28 +2487,16 @@ async function compactScopedMessages(model, msgs, numCtx, role, usageBucket, con
     let summary = '';
     let check = { ok: false, reason: 'empty', tokens: 0, required: 0, missing: [] };
     for (let attempt = 0; attempt < 2; attempt++) {
-      const data = await ollamaJson('/api/chat', {
+      summary = await completeText({
         model,
         messages: summaryMessages,
-        stream: false,
-        options: {
-          num_ctx: numCtx,
-          temperature: 0.2,
-          num_predict: Math.max(512, minimumTokens * 2),
-        },
-        ...(useThink === undefined ? {} : { think: useThink }),
-      }, currentAbort?.signal);
-
-      recordUsage(usageBucket, {
-        promptTokens: data.prompt_eval_count || 0,
-        evalTokens: data.eval_count || 0,
-        loadMs: (data.load_duration || 0) / 1e6,
-        promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
-        generationMs: (data.eval_duration || 0) / 1e6,
-        totalMs: (data.total_duration || 0) / 1e6,
+        signal: currentAbort?.signal,
+        think: useThink,
+        numCtx,
+        temperature: 0.2,
+        maxTokens: Math.max(512, minimumTokens * 2),
+        usageBucket,
       });
-
-      summary = (data.message?.content || '').trim();
       check = validateSummary(summary, { sourceTokens, estimateTokens });
       if (check.ok && check.structured) break;
       if (attempt === 0) {
@@ -2788,6 +2835,13 @@ const ORCHESTRATION_MUTATING_TOOLS = new Set([
   'delete_file', 'copy_file', 'move_file',
 ]);
 
+function isVerificationCommand(command) {
+  const value = String(command || '');
+  return /\b(?:test|spec|--check|tsc|lint|pytest|vitest|jest)\b/i.test(value)
+    || /\bcmake\s+--build\b/i.test(value)
+    || /\b(?:make|ninja|cargo\s+(?:build|check)|go\s+(?:build|test)|npm\s+run\s+build)\b/i.test(value);
+}
+
 function evidencePaths(entry) {
   const paths = [];
   if (entry.args?.path) paths.push(String(entry.args.path));
@@ -2890,11 +2944,8 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
   try {
     const useThink = (await supportsThinking(verifierModel)) ? false : undefined;
     const numCtx = await effectiveContext(verifierModel, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
-    const data = await ollamaJson('/api/chat', {
+    const verdict = await completeText({
       model: verifierModel,
-      stream: false,
-      options: { num_ctx: numCtx, temperature: 0.1 },
-      ...(useThink === undefined ? {} : { think: useThink }),
       messages: [
         {
           role: 'system',
@@ -2905,16 +2956,13 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
           content: `OVERALL GOAL:\n${goal}\n\nTASK:\n${JSON.stringify(task, null, 2)}\n\nWORKING TREE BEFORE ORCHESTRATION:\n${baselineStatus || '(clean or unavailable)'}\n\nCODER REPORT:\n${capWorkflowText(coderResult.report, 3500)}\n\nRECORDED TOOL EVIDENCE:\n${relevantEvidence || '(no verification commands were recorded)'}\n\nCURRENT GIT EVIDENCE:\n${gitEvidence}`,
         },
       ],
-    }, signal);
-    recordUsage('verifier', {
-      promptTokens: data.prompt_eval_count || 0,
-      evalTokens: data.eval_count || 0,
-      loadMs: (data.load_duration || 0) / 1e6,
-      promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
-      generationMs: (data.eval_duration || 0) / 1e6,
-      totalMs: (data.total_duration || 0) / 1e6,
+      signal,
+      think: useThink,
+      numCtx,
+      temperature: 0.1,
+      usageBucket: 'verifier',
     });
-    return (data.message?.content || '').trim() || 'No verifier verdict was returned.';
+    return verdict || 'No verifier verdict was returned.';
   } catch (err) {
     return `Verifier unavailable (${err.message}).`;
   }
@@ -2925,11 +2973,8 @@ async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
   try {
     const think = (await supportsThinking(subModel)) ? false : undefined;
     const numCtx = await effectiveContext(subModel, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
-    const data = await ollamaJson('/api/chat', {
+    const verdict = await completeText({
       model: subModel,
-      stream: false,
-      options: { num_ctx: numCtx, temperature: runtimeSettings.codeTemperature },
-      ...(think === undefined ? {} : { think }),
       messages: [
         {
           role: 'system',
@@ -2940,16 +2985,13 @@ async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
           content: `GOAL:\n${goal}\n\nAGENT'S FINAL MESSAGE THIS ITERATION:\n${(summary || '(none)').slice(0, 3000)}\n\nGIT CHANGES SO FAR (diff stat + status):\n${(gitEvidence || '(none)').slice(0, 2000)}`,
         },
       ],
-    }, signal);
-    recordUsage('verifier', {
-      promptTokens: data.prompt_eval_count || 0,
-      evalTokens: data.eval_count || 0,
-      loadMs: (data.load_duration || 0) / 1e6,
-      promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
-      generationMs: (data.eval_duration || 0) / 1e6,
-      totalMs: (data.total_duration || 0) / 1e6,
+      signal,
+      think,
+      numCtx,
+      temperature: runtimeSettings.codeTemperature,
+      usageBucket: 'verifier',
     });
-    return (data.message?.content || '').trim() || 'No verdict returned — continue working toward the goal.';
+    return verdict || 'No verdict returned — continue working toward the goal.';
   } catch (err) {
     return `Verifier unavailable (${err.message}) — continue working toward the goal.`;
   }
@@ -2963,7 +3005,7 @@ function absorbCoderEvidence(runLog, evidence) {
     if (entry.name === 'run_command' && entry.args?.command) {
       const command = String(entry.args.command);
       runLog.commands.push(command);
-      if (/\b(test|spec|--check|tsc|lint|pytest|vitest|jest)\b/.test(command)) runLog.verified = true;
+      if (isVerificationCommand(command)) runLog.verified = true;
     }
     if (entry.name === 'run_project_check' && entry.args?.check) {
       runLog.commands.push(`project check: ${entry.args.check}`);
@@ -4644,7 +4686,7 @@ ipcMain.handle('settings:testEndpoint', async (_e, value, provider) => {
     // against a cloud provider reports a 404 that says nothing useful.
     if (String(provider) === 'openai') {
       const key = secrets.get('providerApiKey');
-      const res = await fetch(endpoint + '/models', {
+      const res = await fetch(endpoint + providerPath('openai', 'models'), {
         headers: key ? { Authorization: `Bearer ${key}` } : {},
         signal: AbortSignal.timeout(8_000),
       });
@@ -4656,8 +4698,9 @@ ipcMain.handle('settings:testEndpoint', async (_e, value, provider) => {
       const models = Array.isArray(listed?.data) ? listed.data : [];
       return { ok: true, endpoint, modelCount: models.length };
     }
-    const res = await fetch(endpoint + '/api/tags', { signal: AbortSignal.timeout(5_000) });
-    if (!res.ok) return { ok: false, error: `GET /api/tags returned ${res.status}.` };
+    const localModelsPath = providerPath('ollama', 'models');
+    const res = await fetch(endpoint + localModelsPath, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return { ok: false, error: `GET ${localModelsPath} returned ${res.status}.` };
     const data = await res.json();
     if (!Array.isArray(data.models)) return { ok: false, error: 'The endpoint responded, but not with the Ollama-compatible models format.' };
     return { ok: true, endpoint, modelCount: data.models.length };
@@ -4761,7 +4804,7 @@ ipcMain.handle('models:list', async () => {
   if (runtimeSettings.provider === 'openai') {
     const key = secrets.get('providerApiKey');
     try {
-      const res = await fetch(inferenceEndpoint() + '/models', {
+      const res = await fetch(inferenceEndpoint() + providerPath('openai', 'models'), {
         headers: key ? { Authorization: `Bearer ${key}` } : {},
         signal: AbortSignal.timeout(10_000),
       });
@@ -4778,7 +4821,7 @@ ipcMain.handle('models:list', async () => {
     }
   }
   try {
-    const data = await ollamaJson('/api/tags');
+    const data = await ollamaJson(providerPath('ollama', 'models'));
     const modelDetails = normalizeOllamaModels(data.models);
     return { ok: true, provider: 'ollama', models: modelDetails.map((model) => model.id), modelDetails };
   } catch (err) {
@@ -4786,7 +4829,7 @@ ipcMain.handle('models:list', async () => {
   }
 });
 
-const getModelRecommendations = createRecommendationsService({
+const getLocalModelRecommendations = createRecommendationsService({
   ollamaJson,
   hardwareProfile,
   getRuntimeSettings: () => runtimeSettings,
@@ -4798,6 +4841,17 @@ const getModelRecommendations = createRecommendationsService({
   modelSpeedSamples,
   defaultContext: NUM_CTX_CAP,
 });
+
+async function getModelRecommendations(options) {
+  if (runtimeSettings.provider === 'openai') {
+    return {
+      ok: false,
+      provider: 'openai',
+      error: 'Hardware-fit recommendations apply only to local models. Use /model with part of a provider model name to search the cloud catalog.',
+    };
+  }
+  return getLocalModelRecommendations(options);
+}
 
 ipcMain.handle('models:recommendations', (_event, options) => getModelRecommendations(options));
 ipcMain.handle('models:install', (event, { model } = {}) => modelInstaller.install(model, (progress) => {
@@ -5068,18 +5122,6 @@ ipcMain.handle('daemon:uninstall', async () => {
 });
 
 // ---------- conversation compaction ----------
-function recordCompactionUsage(data) {
-  if (!data?.prompt_eval_count && !data?.eval_count) return;
-  recordUsage('main', {
-    promptTokens: data.prompt_eval_count,
-    evalTokens: data.eval_count,
-    loadMs: (data.load_duration || 0) / 1e6,
-    promptEvalMs: (data.prompt_eval_duration || 0) / 1e6,
-    generationMs: (data.eval_duration || 0) / 1e6,
-    totalMs: (data.total_duration || 0) / 1e6,
-  });
-}
-
 async function compactConversation(model, signal = currentAbort?.signal) {
   if (conversation.length < 2) return { ok: false, error: 'Nothing to compact yet.' };
   try {
@@ -5146,18 +5188,20 @@ async function compactConversation(model, signal = currentAbort?.signal) {
         // window. Trimming inside one part is bounded harm — every part is
         // still represented, which is the property the old hard fit lacked.
         const part = fitToWindow(chunks[index], chunkBudget);
-        const data = await ollamaJson('/api/chat', {
+        const partial = await completeText({
           model,
           messages: [
             ...pinnedReady,
             ...part,
             { role: 'user', content: chunkInstruction(index, chunks.length) },
           ],
-          stream: false,
-          options: { num_ctx: contextLength, temperature: 0.2, num_predict: Math.max(512, Math.floor(summaryRoom / 2)) },
-        }, signal);
-        recordCompactionUsage(data);
-        partials.push(`PART ${index + 1} OF ${chunks.length}:\n${(data.message?.content || '').trim()}`);
+          signal,
+          numCtx: contextLength,
+          temperature: 0.2,
+          maxTokens: Math.max(512, Math.floor(summaryRoom / 2)),
+          usageBucket: 'main',
+        });
+        partials.push(`PART ${index + 1} OF ${chunks.length}:\n${partial}`);
       }
       msgs = [
         ...pinnedReady,
@@ -5187,20 +5231,15 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     // long session came back as two sentences. Ask for the room the record can
     // actually hold, and give one corrective retry when the answer is too thin.
     for (let attempt = 0; attempt < 2; attempt++) {
-      const data = await ollamaJson('/api/chat', {
+      summary = await completeText({
         model,
         messages: msgs,
-        stream: false,
-        options: {
-          num_ctx: contextLength,
-          temperature: 0.2,
-          num_predict: Math.max(512, summaryRoom),
-        },
-      }, signal);
-
-      recordCompactionUsage(data);
-
-      summary = (data.message?.content || '').trim();
+        signal,
+        numCtx: contextLength,
+        temperature: 0.2,
+        maxTokens: Math.max(512, summaryRoom),
+        usageBucket: 'main',
+      });
       check = validateSummary(summary, { sourceTokens, estimateTokens });
       // Retry for missing headings too, but only once — a long summary without
       // them is still worth keeping, so a second unstructured answer is

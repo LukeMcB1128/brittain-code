@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { ollamaTransport, openAITransport, transportFor, estimateCost } = require('../../src/main/inference');
+const { ollamaTransport, openAITransport, transportFor, safeProviderError, estimateCost } = require('../../src/main/inference');
 
 const drain = (parser, lines) => lines.flatMap((line) => parser.push(line));
 
@@ -24,6 +24,18 @@ test('a trailing slash on the endpoint does not double up', () => {
     'https://api.z.ai/api/paas/v4/chat/completions');
   assert.equal(ollamaTransport.request({ endpoint: 'http://localhost:11434/', model: 'm', messages: [] }).url,
     'http://localhost:11434/api/chat');
+});
+
+test('HTML provider failures give a short endpoint correction', () => {
+  const message = safeProviderError(404, '<!DOCTYPE html><html>' + 'private proxy detail '.repeat(100) + '</html>');
+  assert.equal(message, 'provider returned an HTML error page (404) — check endpoint base URL');
+});
+
+test('provider error excerpts cannot flood chat or logs', () => {
+  const message = safeProviderError(400, 'x'.repeat(5000));
+  assert.ok(message.length < 250);
+  assert.match(message, /^provider request failed \(400\)/);
+  assert.ok(message.endsWith('…'));
 });
 
 test('usage is requested explicitly, because a stream withholds it otherwise', () => {

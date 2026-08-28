@@ -36,7 +36,7 @@ const ollamaTransport = {
   id: 'ollama',
   needsKey: false,
 
-  request({ endpoint, model, messages, tools, think, numCtx, temperature, keepAlive }) {
+  request({ endpoint, model, messages, tools, think, numCtx, temperature, keepAlive, maxTokens }) {
     return {
       url: endpoint.replace(/\/+$/, '') + '/api/chat',
       headers: { 'Content-Type': 'application/json' },
@@ -49,7 +49,11 @@ const ollamaTransport = {
         ...(tools ? { tools } : {}),
         stream: true,
         keep_alive: keepAlive,
-        options: { num_ctx: numCtx, temperature },
+        options: {
+          num_ctx: numCtx,
+          temperature,
+          ...(maxTokens ? { num_predict: maxTokens } : {}),
+        },
         ...(think === undefined ? {} : { think }),
       },
     };
@@ -288,6 +292,37 @@ const openAITransport = {
 
 const TRANSPORTS = { ollama: ollamaTransport, openai: openAITransport };
 
+const PROVIDER_PATHS = Object.freeze({
+  ollama: Object.freeze({
+    chat: '/api/chat',
+    models: '/api/tags',
+    model: '/api/show',
+    running: '/api/ps',
+    version: '/api/version',
+    generate: '/api/generate',
+    embeddings: '/api/embed',
+  }),
+  openai: Object.freeze({
+    chat: '/chat/completions',
+    models: '/models',
+  }),
+});
+
+function providerPath(provider, operation) {
+  return PROVIDER_PATHS[String(provider || 'ollama')]?.[operation] || null;
+}
+
+function safeProviderError(status, body) {
+  const code = Number(status) || 0;
+  const text = String(body || '').trim();
+  if (/^(?:<!doctype\s+html|<html)\b/i.test(text)) {
+    return `provider returned an HTML error page (${code}) — check endpoint base URL`;
+  }
+  const compact = text.replace(/\s+/g, ' ');
+  const excerpt = compact.length > 200 ? compact.slice(0, 200) + '…' : compact;
+  return `provider request failed (${code})${excerpt ? ` — ${excerpt}` : ''}`;
+}
+
 function transportFor(provider) {
   return TRANSPORTS[String(provider || 'ollama')] || ollamaTransport;
 }
@@ -303,4 +338,14 @@ function estimateCost(stats, rates) {
     + ((Number(stats?.evalTokens) || 0) / 1e6) * output;
 }
 
-module.exports = { ollamaTransport, openAITransport, transportFor, estimateCost, toOpenAIMessages, toOllamaMessages, TRANSPORTS };
+module.exports = {
+  ollamaTransport,
+  openAITransport,
+  transportFor,
+  providerPath,
+  safeProviderError,
+  estimateCost,
+  toOpenAIMessages,
+  toOllamaMessages,
+  TRANSPORTS,
+};

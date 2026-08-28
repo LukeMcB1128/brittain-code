@@ -141,3 +141,17 @@ test('the run report compares two complete snapshots', () => {
   assert.match(report, /if \(hasNetFileChanges\) lines\.push\('UNDO is available/);
   assert.doesNotMatch(report, /new, untracked:/);
 });
+
+test('all successful coding tools contribute paths to the run report', () => {
+  const main = read('main.js');
+  const outcome = main.slice(main.indexOf("if (toolOutcome === 'ok')"), main.indexOf("if (toolOutcome === 'ok')") + 900);
+  assert.match(outcome, /ORCHESTRATION_MUTATING_TOOLS\.has\(name\)/);
+  assert.match(outcome, /evidencePaths\(\{ name, args, result \}\)/);
+  assert.doesNotMatch(outcome, /args\?\.path/);
+});
+
+test('CMake builds count as verification in every agent path', () => {
+  const main = read('main.js');
+  assert.match(main, /cmake\\s\+--build/);
+  assert.equal((main.match(/isVerificationCommand\(/g) || []).length, 3);
+});

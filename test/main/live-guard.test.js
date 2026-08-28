@@ -14,6 +14,19 @@ const withoutQuotedSpans = new Function(
 const CONTEXT_RESET_RE = /\b(?:the user (?:has not|hasn't) (?:provided|asked|given) (?:anything|(?:a |any )?(?:specific )?(?:task|question|instructions?))|i should wait for (?:the user's )?(?:instructions|request))\b/i;
 const fires = (text) => CONTEXT_RESET_RE.test(withoutQuotedSpans(text));
 
+const thinkingGuard = new Function(
+  'provider',
+  'thinking',
+  `var runtimeSettings = { provider };
+   const RAW_CHANNEL_MARKER_RE = /$a/;
+   const CONTEXT_RESET_RE = /$a/;
+   const GLITCH_TOKEN_RE = /$a/;
+   const GLITCH_FULLWIDTH_RE = /$a/;
+   const withoutQuotedSpans = (value) => value;
+   ${main.slice(main.indexOf('const DELIBERATION_RESTART_RE'), main.indexOf('// ---------- agent loop ----------'))}
+   return scanThinkingForPsychosis(thinking);`,
+);
+
 test('explaining the guard does not trip the guard', () => {
   // This is the real failure: asked to explain main.js, the model described the
   // detector, quoted its trigger phrases, and was killed mid-sentence.
@@ -60,4 +73,15 @@ test('a conversation with no context cannot have lost the task from it', () => {
   const block = main.slice(main.indexOf('const c = await compactConversation(model);'));
   assert.ok(block.indexOf('continue;') < block.indexOf('Recovery compact failed'),
     'the false-positive path continues instead of breaking');
+});
+
+test('cloud reasoning is not stopped by local restart heuristics', () => {
+  const loops = 'Actually, let me reconsider. '.repeat(20);
+  assert.match(thinkingGuard('ollama', loops).reason, /deliberation loop/);
+  assert.equal(thinkingGuard('openai', loops), null);
+});
+
+test('cloud reasoning keeps a large runaway ceiling', () => {
+  assert.equal(thinkingGuard('openai', 'x'.repeat(99_999)), null);
+  assert.match(thinkingGuard('openai', 'x'.repeat(100_000)).reason, /100,000/);
 });
