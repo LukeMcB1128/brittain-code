@@ -110,7 +110,7 @@ test('/agent is wired from the renderer through preload to main', () => {
 test('/agent is listed in help and restricted to Code mode', () => {
   const app = read('renderer/app.js');
   assert.match(app, /'\/agent \[--policy <name>\] <goal>/);
-  assert.match(app, /'memory', 'ledger', 'agent'\]/);
+  assert.match(app, /'ledger', 'agent'\]/);
 });
 
 test('a mission runs without a Git repo instead of failing on the checkpoint', () => {

@@ -1035,7 +1035,11 @@ async function send() {
     }
     return handleSlash(text);
   }
-  if (!modelSelect.value) return addError('No model selected — is Ollama running?');
+  if (!modelSelect.value) {
+    return addError(appSettings.provider === 'openai'
+      ? 'No model selected — check the provider catalog, endpoint, and API key.'
+      : 'No model selected — check that the local model server is running.');
+  }
   if (appMode === 'code' && !cwd) return addError('Pick a working directory first (DIR button, top left).');
 
   // Ollama wants raw base64 without the data-URL prefix
@@ -2169,7 +2173,7 @@ const SLASH_HELP = [
   '/review [base] — run a structured read-only review and send selected findings to the coder',
   '/orchestrate <goal> — planner inspects and delegates sequential implementation tasks to the selected coder model',
   '/mission [iterations] <goal> — run a persisted coding mission; use status, stop, or resume',
-  '/model <name> — switch model (partial match ok)',
+  '/model [name] — show or switch model (partial match ok)',
   '/coder [name] — show or set the writable coding-worker model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
   '/usage — show how context and tokens have been spent across all agents',
@@ -2200,7 +2204,7 @@ const CHAT_SLASH_HELP = [
   '/help — show this list',
   '/clear — start a new session',
   '/compact — summarize the conversation to free up context',
-  '/model <name> — switch model (partial match ok)',
+  '/model [name] — show or switch model (partial match ok)',
   '/usage — show context and token usage',
   '/cost — what this conversation has cost so far',
   '/mcp [on|off <server>] - external MCP tool servers: status, enable, disable',
@@ -2216,11 +2220,47 @@ const CHAT_SLASH_HELP = [
   '/tools — list tools available to the app',
 ].join('\n');
 
+const MODEL_COMMAND_LIMIT = 20;
+
+function normalizeModelQuery(value) {
+  return String(value || '').toLowerCase().replace(/[._-]+/g, '').replace(/\s+/g, '');
+}
+
+function matchingModels(models, query) {
+  const needle = normalizeModelQuery(query);
+  if (!needle) return [...models];
+  return models.filter((model) => normalizeModelQuery(model).includes(needle));
+}
+
+function describeModelChoices(label, current, models, query = '') {
+  const matches = matchingModels(models, query);
+  const visible = matches.slice(0, MODEL_COMMAND_LIMIT);
+  const remaining = matches.length - visible.length;
+  const scope = query ? ` matching "${query}"` : '';
+  const lines = [`${label} model: ${current || '(not set)'}`, `Available models${scope}: ${visible.join(', ') || '(none)'}`];
+  if (remaining > 0) lines.push(`+${remaining} more. Add more of the model name to narrow the list.`);
+  else if (!query && models.length > MODEL_COMMAND_LIMIT) lines.push('Add part of a model name to narrow the list.');
+  return lines.join('\n');
+}
+
+function modelNotFound(query) {
+  return appSettings.provider === 'openai'
+    ? `No provider model matches "${query}". Check the provider catalog or use a broader name.`
+    : `No installed model matches "${query}". Run /recs after you install a model.`;
+}
+
+function selectModelMatch(models, query) {
+  const matches = matchingModels(models, query);
+  const normalized = normalizeModelQuery(query);
+  const exact = matches.find((model) => normalizeModelQuery(model) === normalized);
+  return { matches, selected: exact || (matches.length === 1 ? matches[0] : '') };
+}
+
 async function handleSlash(raw) {
   const [cmd, ...rest] = raw.slice(1).split(' ');
   const arg = rest.join(' ').trim();
   const normalizedCmd = cmd.toLowerCase();
-  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'review', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'memory', 'ledger', 'agent']);
+  const codeOnlyCommands = new Set(['diff', 'graph', 'loop', 'plan', 'review', 'orchestrate', 'mission', 'commit', 'coder', 'subagent', 'ledger', 'agent']);
   if (appMode === 'chat' && codeOnlyCommands.has(normalizedCmd)) {
     return addError(`/${normalizedCmd} is only available in Code mode.`);
   }
@@ -2511,32 +2551,36 @@ async function handleSlash(raw) {
     }
 
     case 'model': {
-      if (!arg) return addError('Usage: /model <name>');
-      const match = [...modelSelect.options].map((o) => o.value).find((v) => v.includes(arg));
-      if (!match) return addError(`No installed model matching "${arg}".`);
-      modelSelect.value = match;
+      const models = [...modelSelect.options].map((o) => o.value);
+      if (!arg) return addInfo(describeModelChoices('Main', modelSelect.value, models));
+      const { matches, selected } = selectModelMatch(models, arg);
+      if (!matches.length) return addError(modelNotFound(arg));
+      if (!selected) return addInfo(describeModelChoices('Main', modelSelect.value, models, arg));
+      modelSelect.value = selected;
       modelSelect.dispatchEvent(new Event('change'));
-      return addInfo('Model set to ' + match);
+      return addInfo('Model set to ' + selected);
     }
 
     case 'subagent': {
       const models = [...modelSelect.options].map((o) => o.value);
-      if (!arg) return addInfo(`Subagent model: ${subModel}\nAvailable: ${models.join(', ')}\nUse /subagent <name> to change.`);
-      const match = models.find((v) => v.includes(arg));
-      if (!match) return addError(`No installed model matching "${arg}".`);
-      subModel = match;
-      localStorage.setItem('subModel', match);
-      return addInfo('Subagent model set to ' + match);
+      if (!arg) return addInfo(describeModelChoices('Subagent', subModel, models));
+      const { matches, selected } = selectModelMatch(models, arg);
+      if (!matches.length) return addError(modelNotFound(arg));
+      if (!selected) return addInfo(describeModelChoices('Subagent', subModel, models, arg));
+      subModel = selected;
+      localStorage.setItem('subModel', selected);
+      return addInfo('Subagent model set to ' + selected);
     }
 
     case 'coder': {
       const models = [...modelSelect.options].map((o) => o.value);
-      if (!arg) return addInfo(`Coder model: ${coderModel}\nAvailable: ${models.join(', ')}\nUse /coder <name> to change. Run /recs after installing a new Ollama model to refresh the list.`);
-      const match = models.find((v) => v.includes(arg));
-      if (!match) return addError(`No installed model matching "${arg}". If Ollama just finished installing it, run /recs to refresh the model list.`);
-      coderModel = match;
-      localStorage.setItem('coderModel', match);
-      return addInfo('Coder model set to ' + match);
+      if (!arg) return addInfo(describeModelChoices('Coder', coderModel, models));
+      const { matches, selected } = selectModelMatch(models, arg);
+      if (!matches.length) return addError(modelNotFound(arg));
+      if (!selected) return addInfo(describeModelChoices('Coder', coderModel, models, arg));
+      coderModel = selected;
+      localStorage.setItem('coderModel', selected);
+      return addInfo('Coder model set to ' + selected);
     }
 
     case 'mcp': {
