@@ -118,13 +118,15 @@ test('a suspended run resumes into the session it was suspended from', () => {
 
 test('the online latch travels with the session, not the process', () => {
   const main = read('main.js');
-  assert.match(main, /onlineResearch: sessionOnlineResearch, usage \}/, 'stashed on the way out');
+  // Assert the field is stashed, not the exact shape of the object it sits in:
+  // pinning the literal breaks every time a new piece of session state is added.
+  assert.match(main, /const current = \{[^}]*onlineResearch: sessionOnlineResearch/, 'stashed on the way out');
   assert.match(main, /sessionOnlineResearch = !!restored\?\.onlineResearch;/, 'restored on the way in');
 });
 
 test('usage travels with the session and is saved for headless conversations', () => {
   const main = read('main.js');
-  assert.match(main, /onlineResearch: sessionOnlineResearch, usage \}/, 'usage is stashed on the way out');
+  assert.match(main, /const current = \{[^}]*\busage\b/, 'usage is stashed on the way out');
   assert.match(main, /usage = restored\?\.usage \? restoreUsage\(restored\.usage\) : freshUsage\(\)/, 'usage is restored or starts empty');
   assert.match(main, /runMetrics: usage,/, 'headless history stores the usage record');
 });
@@ -168,4 +170,12 @@ test('a run hands the session back when it finishes', () => {
   const task = main.slice(main.indexOf('async function runAgentTask'), main.indexOf("ipcMain.handle('agent:run'"));
   assert.ok(task.indexOf('} finally {') < task.lastIndexOf('enterSession(callerSessionKey)'),
     'the hand-back belongs in the finally, so an aborted run restores it too');
+});
+
+test('spend travels with the session too', () => {
+  // Otherwise /cost would answer for whatever ran most recently rather than for
+  // the conversation being looked at.
+  const main = read('main.js');
+  assert.match(main, /const current = \{[^}]*spend: sessionSpend/);
+  assert.match(main, /sessionSpend = restored\?\.spend \|\| emptyCostTotals\(\)/);
 });

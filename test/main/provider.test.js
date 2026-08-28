@@ -95,16 +95,25 @@ test('a missing key is called out before it becomes a confusing rejection', () =
   assert.match(read('renderer/app.js'), /NOT SET — runs will be rejected/);
 });
 
-test('provider, key and rates are all configured in one place', () => {
+test('provider and key are configured in one place', () => {
   // Splitting one coherent setting between a modal and a slash command means
   // neither is the answer to "where do I change this".
   const html = read('renderer/index.html');
-  for (const id of ['setting-provider', 'setting-api-key', 'setting-input-rate', 'setting-output-rate']) {
+  for (const id of ['setting-provider', 'setting-api-key']) {
     assert.ok(html.includes(`id="${id}"`), `${id} belongs in Settings`);
   }
-  const app = read('renderer/app.js');
-  assert.match(app, /provider: \$\('setting-provider'\)\.value === 'openai' \? 'openai' : 'ollama'/);
-  assert.match(app, /inputPerMillion: Number\(\$\('setting-input-rate'\)\.value\) \|\| 0/);
+  assert.match(read('renderer/app.js'), /provider: \$\('setting-provider'\)\.value === 'openai' \? 'openai' : 'ollama'/);
+});
+
+test('rates are read from the provider, not typed in', () => {
+  // They were a field nobody could keep accurate: prices change, and the model
+  // catalog already carries the provider's own published figures.
+  const html = read('renderer/index.html');
+  assert.ok(!html.includes('setting-input-rate'), 'the manual rate fields are gone');
+  assert.ok(!html.includes('setting-output-rate'));
+  const settings = read('settings.js');
+  assert.ok(!settings.includes('inputPerMillion'), 'and gone from the settings model too');
+  assert.match(read('main.js'), /function ratesForModel\(model\)/);
 });
 
 test('each provider choice supplies a useful default endpoint', () => {
@@ -144,7 +153,7 @@ test('the provider fields look like settings rows, not section headings', () => 
   // competed with the section header instead of reading as fields.
   const html = read('renderer/index.html');
   const section = html.slice(html.indexOf('INFERENCE ENDPOINT'), html.indexOf('</section>', html.indexOf('INFERENCE ENDPOINT')));
-  for (const field of ['Provider', 'API key', 'Cost per 1M input', 'Cost per 1M output']) {
+  for (const field of ['Provider', 'API key']) {
     assert.ok(section.includes(`<label>${field} `), `${field} should be a label wrapping its control`);
   }
   assert.ok(!/<label for="setting-/.test(section), 'no detached labels in this pane');

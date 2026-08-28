@@ -37,6 +37,9 @@ const RUN_CHANNELS = new Set([
   // driving the run has to be able to answer it, and that is not always the
   // window.
   'question:request',
+  // What a turn cost. Part of the run's narrative, so an attached client sees
+  // it too rather than only the window.
+  'stream:cost',
 ]);
 
 // Only these read as prose in a transcript. Tokens and stats are far too noisy

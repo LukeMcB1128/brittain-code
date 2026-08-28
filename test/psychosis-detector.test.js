@@ -14,6 +14,10 @@ const end = src.indexOf('// ---------- agent loop ----------');
 // directly — converting the declaration to a `var`-assigned expression keeps
 // identical runtime behavior (still `instanceof Error`) but makes the binding
 // visible to the rest of this test file.
+// The thinking budget is skipped on a cloud provider, where long reasoning is
+// the model working rather than looping, so the slice needs settings in scope.
+// Local is the default here because that is the regime these cases describe.
+var runtimeSettings = { provider: 'ollama' };
 eval(src.slice(start, end).replace('class PsychosisDetectedError extends Error {', 'var PsychosisDetectedError = class extends Error {'));
 
 test('psychosis: byte-fallback / replacement token triggers content scan', () => {
@@ -173,4 +177,17 @@ test('deliberation: scan is throttled — state advances only past the interval'
 test('deliberation: PsychosisDetectedError defaults to compact and accepts directive', () => {
   assert.equal(new PsychosisDetectedError('r', 'e').recovery, 'compact');
   assert.equal(new PsychosisDetectedError('r', 'e', 'directive').recovery, 'directive');
+});
+
+test('deliberation: a reasoning model is not cut off for reasoning', () => {
+  // The 12k budget was tuned for small local models, where thinking that long
+  // without acting meant a loop. On a cloud reasoning model it is normal work.
+  const previous = runtimeSettings.provider;
+  runtimeSettings.provider = 'openai';
+  try {
+    const long = 'weighing the ratification debate in careful detail. '.repeat(600);
+    assert.equal(scanThinkingForPsychosis(long, { value: 0 }), null);
+  } finally {
+    runtimeSettings.provider = previous;
+  }
 });

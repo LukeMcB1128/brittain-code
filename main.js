@@ -22,7 +22,8 @@ const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore, safeChatId } = require('./src/main/history-store');
 const { createSessions, sessionKeyFor, loadSessionState } = require('./src/main/sessions');
-const { transportFor, estimateCost } = require('./src/main/inference');
+const { transportFor } = require('./src/main/inference');
+const { ratesFor, costOf, emptyTotals: emptyCostTotals, addTurn: addCostTurn, describeTurn: describeTurnCost, describeTotals: describeCostTotals } = require('./src/main/cost');
 const { estimateContextTokens } = require('./src/main/context-estimator');
 const { createSecretStore } = require('./src/main/secrets');
 const { createLedgerStore } = require('./src/main/ledger-store');
@@ -184,6 +185,19 @@ let sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}
 // here reached over the network? — needs the answer to be "at some point",
 // which only a latch can give.
 let sessionOnlineResearch = false;
+
+// What this conversation has cost. Per session, so a Discord thread and the
+// window do not pool their spending, and so /cost answers for the conversation
+// you are looking at.
+let sessionSpend = emptyCostTotals();
+
+// Rates for the model about to run, from the provider's own listing. Local
+// models are free and cloud models with no published price are unknown, which
+// costOf keeps distinct.
+function ratesForModel(model) {
+  if (runtimeSettings.provider !== 'openai') return null;
+  return ratesFor(catalogDetails.get(model));
+}
 function noteOnlineResearch(enabled) {
   if (enabled) sessionOnlineResearch = true;
 }
@@ -191,6 +205,7 @@ function noteOnlineResearch(enabled) {
 function newSessionId() {
   sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   sessionOnlineResearch = false;
+  sessionSpend = emptyCostTotals();
   return sessionId;
 }
 let updateService = null;
@@ -263,7 +278,7 @@ function enterSession(key) {
     console.log(`Ignored a session switch to "${target}" while a run is in progress.`);
     return activeSessionKey;
   }
-  const current = { conversation, sessionId, contextState, onlineResearch: sessionOnlineResearch, usage };
+  const current = { conversation, sessionId, contextState, onlineResearch: sessionOnlineResearch, usage, spend: sessionSpend };
   const { changed, state } = sessions.switchTo(key, current);
   if (!changed) return activeSessionKey;
   const restored = state || (target !== 'window' ? loadSessionState(historyStore, target) : null);
@@ -275,6 +290,9 @@ function enterSession(key) {
   // that never went online must not inherit the claim from a window session
   // that did, and must not lose its own when the window takes over again.
   sessionOnlineResearch = !!restored?.onlineResearch;
+  // Spend belongs to the conversation too, so /cost answers for the one you are
+  // looking at rather than for whatever ran most recently.
+  sessionSpend = restored?.spend || emptyCostTotals();
   // Last, and deliberately: newSessionId clears the latch, so a fresh session
   // starts clean while a restored one keeps the claim set above.
   sessionId = restored?.sessionId || newSessionId();
@@ -1600,6 +1618,10 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   let lastContent = '';
   let emptyNudges = 0;
   const runLog = { mutations: new Set(), commands: [], verified: false };
+  // A turn is one user message, however many model calls the tool loop makes.
+  // Cost is summed across all of them and reported once, because that is the
+  // unit a person recognises as "what that question cost me".
+  const turnTokens = { promptTokens: 0, evalTokens: 0 };
   const toolFailures = createToolFailureTracker(2);
   let lastStats = null;
   let exhaustedWithToolCalls = false;
@@ -1678,6 +1700,8 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       if (stats) {
         recordUsage('main', stats);
         publishContextStats(stats, contextLength);
+        turnTokens.promptTokens += stats.promptTokens || 0;
+        turnTokens.evalTokens += stats.evalTokens || 0;
       }
 
       const assistantMsg = { role: 'assistant', content };
@@ -1916,6 +1940,21 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   if (exhaustedWithToolCalls && !stopRequested && !suspendedForApproval) {
     sink.emit('stream:info', `Agent stopped after reaching the ${maxAgentSteps}-step safety cap.`);
   }
+  // What that message cost, reported once at the end of the turn. Only on a
+  // cloud provider: a local model has no bill, and inventing a line saying so
+  // would be noise on every single turn.
+  const rates = ratesForModel(model);
+  if (runtimeSettings.provider === 'openai' && (turnTokens.promptTokens || turnTokens.evalTokens)) {
+    const cost = costOf(turnTokens, rates);
+    sessionSpend = addCostTurn(sessionSpend, { cost, ...turnTokens });
+    sink.emit('stream:cost', {
+      text: describeTurnCost({ cost, ...turnTokens }),
+      cost,
+      ...turnTokens,
+      sessionText: describeCostTotals(sessionSpend),
+    });
+  }
+
   return { lastContent, lastStats, contextLength, runLog, suspendedForApproval };
 }
 
@@ -4566,16 +4605,21 @@ ipcMain.handle('updates:check', () => updateService?.check({ manual: true }) || 
 ipcMain.handle('updates:install', () => updateService?.install() || { ok: false, error: 'Automatic updates are not ready yet.' });
 
 // The key never crosses to the renderer — only whether one exists.
+// What this conversation has spent. Only meaningful on a cloud provider, and
+// the caller is told which so it can hide the whole idea when local.
+ipcMain.handle('cost:get', () => ({
+  ok: true,
+  cloud: runtimeSettings.provider === 'openai',
+  text: describeCostTotals(sessionSpend),
+  totals: { ...sessionSpend },
+}));
+
 ipcMain.handle('provider:state', () => ({
   ok: true,
   provider: runtimeSettings.provider || 'ollama',
   endpoint: inferenceEndpoint(),
   key: secrets.describe('providerApiKey'),
   encryptionAvailable: secrets.encrypted(),
-  rates: {
-    inputPerMillion: runtimeSettings.inputPerMillion || 0,
-    outputPerMillion: runtimeSettings.outputPerMillion || 0,
-  },
 }));
 
 ipcMain.handle('provider:setKey', (_e, value) => {

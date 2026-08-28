@@ -205,9 +205,7 @@
           <div id="settings-cloud-fields" class="hidden">
             <label>API key <span class="settings-endpoint-row"><input id="setting-api-key" type="password" spellcheck="false" autocomplete="off" placeholder="paste to set, blank to remove" /><button type="button" id="settings-save-key">SAVE</button></span></label>
             <div id="settings-key-status" class="setting-status"></div>
-            <label>Cost per 1M input <input id="setting-input-rate" type="number" min="0" step="0.01" placeholder="0.15" /></label>
-            <label>Cost per 1M output <input id="setting-output-rate" type="number" min="0" step="0.01" placeholder="0.50" /></label>
-            <p class="setting-help">The key is stored outside settings.json and encrypted with your keychain where available. Rates are optional; set them and each run reports its cost.</p>
+            <p class="setting-help">The key is stored outside settings.json and encrypted with your keychain where available. Prices come from the provider's own model listing, so each turn reports what it cost — see <code>/cost</code> for the running total.</p>
           </div>
         </section>
 

@@ -1356,6 +1356,18 @@ $('settings-save-key')?.addEventListener('click', async () => {
   await syncProviderFields();
 });
 
+// What the turn cost, as a quiet line under the answer. Only ever sent on a
+// cloud provider, so its presence is the signal — the renderer does not need to
+// know which provider is selected.
+window.api.onTurnCost(({ text, sessionText }) => {
+  const line = document.createElement('div');
+  line.className = 'msg info turn-cost';
+  line.textContent = text;
+  line.title = sessionText || '';
+  chat.appendChild(line);
+  scrollDown();
+});
+
 window.api.onRunDecisions(addDecisionLog);
 
 // A run someone started from Discord or a trigger drives this window's output
@@ -2027,8 +2039,6 @@ function fillSettingsForm(settings) {
   populateSettingsModelSelects(settings);
   $('setting-endpoint').value = settings.inferenceEndpoint;
   $('setting-provider').value = settings.provider === 'openai' ? 'openai' : 'ollama';
-  $('setting-input-rate').value = settings.inputPerMillion || '';
-  $('setting-output-rate').value = settings.outputPerMillion || '';
   syncProviderFields();
   const standardContexts = ['0', '8192', '16384', '32768', '65536', '131072'];
   const contextValue = String(settings.mainContextCap);
@@ -2061,8 +2071,6 @@ function settingsFromForm() {
     ...appSettings,
     inferenceEndpoint: $('setting-endpoint').value.trim(),
     provider: $('setting-provider').value === 'openai' ? 'openai' : 'ollama',
-    inputPerMillion: Number($('setting-input-rate').value) || 0,
-    outputPerMillion: Number($('setting-output-rate').value) || 0,
     mainContextCap: Number(selectedContext === 'custom' ? $('setting-main-context-custom').value : selectedContext),
     autoCompact: $('setting-auto-compact').checked,
     compactThreshold: Number($('setting-compact-threshold').value) / 100,
@@ -2165,6 +2173,7 @@ const SLASH_HELP = [
   '/coder [name] — show or set the writable coding-worker model (partial match ok)',
   '/subagent [name] — show or set the subagent/verifier model (partial match ok)',
   '/usage — show how context and tokens have been spent across all agents',
+  '/cost — what this conversation has cost so far',
   '/mcp [on|off <server>] — external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
   '/pin [list|message <n>|file <path>] — keep important messages or project files in context',
@@ -2193,6 +2202,7 @@ const CHAT_SLASH_HELP = [
   '/compact — summarize the conversation to free up context',
   '/model <name> — switch model (partial match ok)',
   '/usage — show context and token usage',
+  '/cost — what this conversation has cost so far',
   '/mcp [on|off <server>] - external MCP tool servers: status, enable, disable',
   '/context — show exactly what will be sent to the model next turn (system prompt, per-message tokens, eviction flags)',
   '/pin [list|message <n>] — keep important messages in context',
@@ -2217,7 +2227,14 @@ async function handleSlash(raw) {
 
   switch (normalizedCmd) {
     case 'help':
-      return addInfo(appMode === 'chat' ? CHAT_SLASH_HELP : SLASH_HELP);
+      // /cost is meaningless without a bill, so it is not offered when
+      // inference is local — an advertised command that always answers "not
+      // applicable" is worse than one that is simply absent.
+      const billing = await window.api.costGet();
+      const listed = appMode === 'chat' ? CHAT_SLASH_HELP : SLASH_HELP;
+      return addInfo(billing?.cloud
+        ? listed
+        : listed.split('\n').filter((line) => !line.startsWith('/cost')).join('\n'));
 
     case 'clear':
       return newSession();
@@ -2667,6 +2684,15 @@ async function handleSlash(raw) {
         'spent, not context size. Subagent/coder/verifier tokens never touch the',
         'main context; that is the point of delegating.',
       ].join('\n'));
+    }
+
+    case 'cost': {
+      const res = await window.api.costGet();
+      if (!res?.ok) return addError('Could not read this conversation\'s cost.');
+      if (!res.cloud) {
+        return addInfo('Inference is running locally, so there is nothing to bill. Cost tracking applies to cloud providers.');
+      }
+      return addInfo(res.text);
     }
 
     case 'provider': {

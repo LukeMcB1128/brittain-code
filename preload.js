@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('updates:state', handler);
     return () => ipcRenderer.removeListener('updates:state', handler);
   },
+  costGet: () => ipcRenderer.invoke('cost:get'),
+  onTurnCost: (cb) => ipcRenderer.on('stream:cost', (_e, d) => cb(d)),
   providerState: () => ipcRenderer.invoke('provider:state'),
   providerSetKey: (value) => ipcRenderer.invoke('provider:setKey', value),
   settingsGet: () => ipcRenderer.invoke('settings:get'),

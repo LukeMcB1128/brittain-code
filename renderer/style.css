@@ -1132,6 +1132,13 @@ button.mini:disabled {
   font-size: 12px;
 }
 
+/* What a turn cost: present but subordinate to the answer above it. */
+.turn-cost {
+  font-family: var(--mono);
+  font-size: 10px;
+  opacity: 0.55;
+}
+
 /* ---------- startup message ---------- */
 #startup-message {
   position: absolute;
