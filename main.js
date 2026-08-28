@@ -1382,7 +1382,7 @@ function scanThinkingForPsychosis(thinking, thinkingState = { value: 0 }) {
 function chatSystemPrompt(onlineResearch = false) {
   const lines = [
     "You are Brittain, a thoughtful general-purpose assistant running locally on the user's computer.",
-    'This is Chat mode. You have no working directory and no access to project files, shell commands, Git, or project memory.',
+    'This is Chat mode. You have no working directory and no access to project files, shell commands, or Git',
     '',
     'Rules:',
     '- Answer the user directly in clear, natural language. Match the depth of the question and avoid unnecessary ceremony.',
