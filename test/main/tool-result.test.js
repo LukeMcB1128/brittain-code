@@ -40,6 +40,6 @@ test('the agent bounds saved and new tool results and measures context after too
   const main = fs.readFileSync(path.join(__dirname, '..', '..', 'main.js'), 'utf8');
   assert.match(main, /if \(message\.role === 'tool'\)[\s\S]{0,300}boundToolResult\(message\.content/);
   assert.match(main, /conversation\.push\(\{ role: 'tool',[\s\S]{0,100}content: bounded\.content/);
-  assert.match(main, /const estimatedNow = estimateTokens\(messages\(\)\) \+ estimateTokens\(agentTools \|\| \[\]\)/);
+  assert.match(main, /const estimatedNow = estimateContextTokens\(messages\(\), \{ model \}\) \+ estimateTokens\(agentTools \|\| \[\]\)/);
   assert.match(main, /const used = Math\.max\(measured, estimatedNow\)/);
 });

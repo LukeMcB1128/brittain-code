@@ -76,9 +76,9 @@ function stopAllManagedProcesses() {
 }
 
 // ---------- persistent memory ----------
-// Plain-text lessons saved by `remember`, scoped to the selected project while
-// living outside its repository. The canonical project path is hashed so app
-// data stays filename-safe; projects.json preserves a human-readable mapping.
+// Plain-text lessons saved by `remember`. Code mode scopes them to the selected
+// project; folder-free Chat mode uses one user-wide file. Project paths are
+// hashed so app data stays filename-safe; projects.json keeps readable names.
 function canonicalProjectPath(cwd) {
   if (!cwd) throw new Error('A working directory is required for project memory.');
   try { return fs.realpathSync(cwd); } catch { return path.resolve(cwd); }
@@ -93,6 +93,9 @@ function memoryDir() {
 }
 
 function memoryPath(cwd) {
+  // Chat mode is deliberately folder-free. Its remembered lessons are
+  // user-wide instead of being attached to a project that does not exist.
+  if (!cwd) return path.join(memoryDir(), 'chat.md');
   // A project that opted into the in-repo workspace keeps its memory there,
   // where it shows up in diffs; everything else stays in app data. The
   // presence of .brittain/ IS the opt-in — created only by an explicit init.
@@ -105,7 +108,6 @@ function legacyMemoryPath() {
 }
 
 function readMemory(cwd) {
-  if (!cwd) return '';
   try { return fs.readFileSync(memoryPath(cwd), 'utf8'); } catch { return ''; }
 }
 
@@ -1000,7 +1002,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'remember',
-      description: 'Save a short reusable lesson to persistent memory for the current project. It will be available in future chats using the same working directory. Use when the user corrects you, when you discover a project convention, or when you make a mistake worth avoiding next time. One concise sentence per fact.',
+      description: 'Save a short reusable lesson to persistent memory. In Code mode it belongs to the current project. In folder-free Chat mode it is user-wide. Use when the user corrects you, when you discover a lasting preference or convention, or when you make a mistake worth avoiding next time. One concise sentence per fact.',
       parameters: {
         type: 'object',
         properties: {
@@ -1781,18 +1783,21 @@ async function executeTool(name, args, cwd) {
     case 'remember': {
       const fact = String(args.fact || '').trim().replace(/\s*\n+\s*/g, ' ');
       if (!fact) return 'Error: fact must not be empty.';
-      if (readMemory(cwd).includes(fact)) return 'Already remembered for this project.';
+      const scope = cwd ? 'this project' : 'folder-free Chat mode';
+      if (readMemory(cwd).includes(fact)) return `Already remembered for ${scope}.`;
       const target = memoryPath(cwd);
       // In-repo memory is potentially committed and pushed. A remembered
       // credential there is a published credential, so anything key-shaped is
       // refused rather than written.
-      if (workspace.hasWorkspace(cwd) && workspace.looksLikeSecret(fact)) {
+      if (cwd && workspace.hasWorkspace(cwd) && workspace.looksLikeSecret(fact)) {
         return 'Error: this fact looks like a credential or key, and project memory lives inside the repository (.brittain/MEMORY.md). Not saved. Rephrase without the secret value.';
       }
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.appendFileSync(target, '- ' + fact + '\n', 'utf8');
-      registerProjectMemory(cwd);
-      return 'Remembered for this project. This will be available in future chats that use the same directory.';
+      if (cwd) registerProjectMemory(cwd);
+      return cwd
+        ? 'Remembered for this project. This will be available in future chats that use the same directory.'
+        : 'Remembered for folder-free Chat mode. This will be available in future Chat sessions.';
     }
     case 'append_file': {
       const p = resolveForWrite(cwd, args.path);

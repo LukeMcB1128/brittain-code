@@ -1545,11 +1545,15 @@ function updateContextBar(contextTokens, contextLength) {
 }
 
 window.api.onStats(({ contextTokens, contextLength, tokPerSec, scope }) => {
-  updateContextBar(contextTokens, contextLength);
+  // The bar is the current persisted conversation. Provider and planner
+  // samples describe one short-lived inference and can decrease because of
+  // cache reuse or missing usage fields.
+  const isConversation = scope === 'conversation' || !scope;
+  if (isConversation) updateContextBar(contextTokens, contextLength);
   if (tokPerSec) $('tok-speed').textContent = tokPerSec.toFixed(1) + ' t/s';
-  // Planner context is short-lived and discarded after /orchestrate. Warn only
-  // when the persisted conversation itself needs compaction.
-  if (scope !== 'planner' && appSettings?.autoCompact === false && !compactWarned && contextTokens / contextLength > 0.8) {
+  // Provider and planner context is short-lived. Warn only when the persisted
+  // conversation itself needs compaction.
+  if (isConversation && appSettings?.autoCompact === false && !compactWarned && contextTokens / contextLength > 0.8) {
     compactWarned = true;
     addInfo('Context is over 80% full — run /compact soon or the model will start losing the oldest messages (including its instructions).');
   }
@@ -2197,6 +2201,7 @@ const CHAT_SLASH_HELP = [
   '/include <n> — restore an excluded tool result to inference',
   '/recs — compare installed models for this computer',
   '/auto <request> — select the best compatible installed model and run the request',
+  '/memory — view user-wide lessons remembered in folder-free Chat mode',
   '/export — save this chat as a markdown file',
   '/tools — list tools available to the app',
 ].join('\n');
@@ -2791,22 +2796,26 @@ async function handleSlash(raw) {
     }
 
     case 'memory': {
-      if (!cwd) return addError('Pick a working directory first (DIR button, top left).');
+      const memoryCwd = appMode === 'chat' ? null : cwd;
+      if (appMode !== 'chat' && !memoryCwd) return addError('Pick a working directory first (DIR button, top left).');
       if (arg === 'move') {
-        const moved = await window.api.memoryMove(cwd);
+        if (!memoryCwd) return addError('Folder-free Chat memory is user-wide and cannot move into a project.');
+        const moved = await window.api.memoryMove(memoryCwd);
         if (!moved.ok) return addError(moved.error);
         return addInfo(`Project memory now lives in ${moved.path} (${moved.moved} line(s) copied in`
           + (moved.created.length ? `; created ${moved.created.join(', ')}` : '') + '). '
           + 'The app-data copy remains as a backup. .brittain/MEMORY.md is meant to be committed — review it like any other change.');
       }
-      const res = await window.api.memoryGet(cwd);
+      const res = await window.api.memoryGet(memoryCwd);
       if (!res.ok) return addError(res.error);
-      let content = res.content.trim() || '(nothing remembered for this project yet)';
+      let content = res.content.trim() || (res.globalChat
+        ? '(nothing remembered for folder-free Chat mode yet)'
+        : '(nothing remembered for this project yet)');
       if (res.inRepo) content = '(in-repo: .brittain/MEMORY.md)\n\n' + content;
       if (res.legacyContent?.trim()) {
         content += `\n\nLEGACY UNIVERSAL MEMORY (not injected)\n${res.legacyPath}\n\n${res.legacyContent.trim()}`;
       }
-      return showOverlay('PROJECT MEMORY — ' + res.path, content);
+      return showOverlay((res.globalChat ? 'CHAT MEMORY — ' : 'PROJECT MEMORY — ') + res.path, content);
     }
 
     case 'agent': {

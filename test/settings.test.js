@@ -37,7 +37,7 @@ test('rejects credentials, query strings, and unsupported protocols', () => {
 
 test('normalizes settings into safe runtime bounds', () => {
   const settings = normalizeSettings({
-    mainContextCap: 999_999,
+    mainContextCap: 9_999_999,
     compactThreshold: 0.2,
     codeTemperature: 9,
     chatTemperature: -2,
@@ -45,7 +45,8 @@ test('normalizes settings into safe runtime bounds', () => {
     defaultLoopIterations: 0,
     keepAlive: 'forever',
   });
-  assert.equal(settings.mainContextCap, 262_144);
+  assert.equal(settings.mainContextCap, 1_048_576);
+  assert.equal(normalizeSettings({ mainContextCap: 999_999 }).mainContextCap, 999_999);
   assert.equal(settings.compactThreshold, 0.5);
   assert.equal(settings.codeTemperature, 1.5);
   assert.equal(settings.chatTemperature, 0);

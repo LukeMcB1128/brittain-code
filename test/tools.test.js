@@ -152,13 +152,24 @@ test('semantic navigation outlines definitions and finds bounded references', as
   assert.match(invalid, /one identifier/);
 });
 
-test('folder-free Chat mode receives only conversation, calculator, and research tools', () => {
+test('folder-free Chat mode receives conversation, memory, calculator, and research tools', () => {
   const names = new Set(CHAT_TOOLS.map((definition) => definition.function.name));
   assert.deepEqual(names, CHAT_TOOL_NAMES);
-  assert.deepEqual([...names].sort(), ['ask_user', 'calculate', 'web_fetch', 'web_search']);
+  assert.deepEqual([...names].sort(), ['ask_user', 'calculate', 'remember', 'web_fetch', 'web_search']);
   assert.equal(names.has('read_file'), false);
   assert.equal(names.has('run_command'), false);
-  assert.equal(names.has('remember'), false);
+  assert.equal(names.has('remember'), true);
+});
+
+test('folder-free Chat memory is user-wide and does not require a project', async (t) => {
+  const userData = tempProject();
+  t.after(() => fs.rmSync(userData, { recursive: true, force: true }));
+  initTools(userData);
+
+  const result = await executeTool('remember', { fact: 'Prefer concise answers.' }, null);
+  assert.match(result, /folder-free Chat mode/);
+  assert.match(readMemory(null), /Prefer concise answers/);
+  assert.equal(memoryPath(null), path.join(userData, 'memory', 'chat.md'));
 });
 
 test('calculate evaluates scalar, table, matrix, and high-precision expressions', async () => {

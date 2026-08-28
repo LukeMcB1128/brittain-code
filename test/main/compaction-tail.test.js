@@ -35,7 +35,7 @@ test('a turn carrying an image is measured as it would be sent', () => {
 
 test('compaction measures the tail the way it will be sent', () => {
   const main = read('main.js');
-  assert.match(main, /const sendableTokens = \(messages\) => estimateTokens\(modelReadyMessages\(messages\)\);/);
+  assert.match(main, /const sendableTokens = \(messages\) => estimateContextTokens\(modelReadyMessages\(messages\), \{ model \}\);/);
   assert.match(main, /selectVerbatimTail\(unpinnedConversation, tailBudget\(contextLength\), sendableTokens\)/);
   // The wider fallback must agree, or the two disagree about what fits.
   assert.ok(!/selectVerbatimTail\([^)]*, estimateTokens\)/.test(main),
