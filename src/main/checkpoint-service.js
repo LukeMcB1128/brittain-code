@@ -4,6 +4,12 @@ const path = require('path');
 function createCheckpointService({ gitRun, getTempDirectory, publishState, keep = 20 }) {
   let lastCheckpoint = null;
 
+  function invalidate(cwd) {
+    lastCheckpoint = null;
+    publishState({ available: false, cwd });
+    return null;
+  }
+
   async function prune(cwd) {
     const list = await gitRun(['for-each-ref', '--format=%(refname)', 'refs/brittain/checkpoints/'], cwd);
     if (!list.ok) return;
@@ -15,7 +21,7 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
 
   async function create(cwd) {
     try {
-      if (!(await gitRun(['rev-parse', '--git-dir'], cwd)).ok) return null;
+      if (!(await gitRun(['rev-parse', '--git-dir'], cwd)).ok) return invalidate(cwd);
       const temporaryIndex = path.join(
         getTempDirectory(),
         'brittain-ckpt-' + Date.now() + '-' + Math.random().toString(36).slice(2),
@@ -23,9 +29,9 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
       const env = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
       try {
         const add = await gitRun(['add', '-A', '--', '.'], cwd, env);
-        if (!add.ok) return null;
+        if (!add.ok) return invalidate(cwd);
         const tree = await gitRun(['write-tree'], cwd, env);
-        if (!tree.ok) return null;
+        if (!tree.ok) return invalidate(cwd);
         const head = await gitRun(['rev-parse', 'HEAD'], cwd);
         const parentArgs = head.ok ? ['-p', head.out.trim()] : [];
         const commit = await gitRun([
@@ -35,9 +41,9 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
           '-m',
           'brittain checkpoint ' + new Date().toISOString(),
         ], cwd, env);
-        if (!commit.ok) return null;
-        const ref = 'refs/brittain/checkpoints/' + Date.now();
-        if (!(await gitRun(['update-ref', ref, commit.out.trim()], cwd)).ok) return null;
+        if (!commit.ok) return invalidate(cwd);
+        const ref = 'refs/brittain/checkpoints/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+        if (!(await gitRun(['update-ref', ref, commit.out.trim()], cwd)).ok) return invalidate(cwd);
         lastCheckpoint = { ref, cwd, at: Date.now() };
         publishState({ available: true, cwd });
         prune(cwd);
@@ -46,7 +52,7 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
         try { fs.unlinkSync(temporaryIndex); } catch {}
       }
     } catch {
-      return null;
+      return invalidate(cwd);
     }
   }
 
@@ -56,8 +62,8 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
   // still untracked, so Git reports each one twice: deleted from the checkpoint
   // and new in the working tree. Seeding a temporary index from the checkpoint
   // and adding the current files gives Git two complete snapshots to compare.
-  async function diffStat(cwd) {
-    const target = lastCheckpoint;
+  async function diffStat(cwd, checkpoint = lastCheckpoint) {
+    const target = checkpoint;
     if (!target || target.cwd !== cwd) {
       return { ok: false, out: '', err: 'No checkpoint for this folder in this session.' };
     }

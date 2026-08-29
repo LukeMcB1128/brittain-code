@@ -2050,26 +2050,39 @@ async function maybeAutoBranch(cwd, taskText, enabled) {
 }
 
 // ---------- end-of-run report card (Tier 3) ----------
-async function emitRunReport(cwd, runLog) {
+async function emitRunReport(cwd, runLog, runCheckpoint = null) {
   if (!runLog || (!runLog.mutations.size && !runLog.commands.length)) return; // read-only turns stay quiet
   const lines = ['\u2501 RUN REPORT \u2501'];
   let diffPart = '';
   let comparedWithCheckpoint = false;
-  const lastCheckpoint = checkpointService.current();
-  if (lastCheckpoint && lastCheckpoint.cwd === cwd) {
-    const stat = await checkpointService.diffStat(cwd);
+  if (runCheckpoint && runCheckpoint.cwd === cwd) {
+    const stat = await checkpointService.diffStat(cwd, runCheckpoint);
     comparedWithCheckpoint = stat.ok;
-    if (stat.ok && stat.out.trim()) diffPart = stat.out.trim().split('\n').slice(-11).join('\n');
+    if (stat.ok && stat.out.trim()) {
+      const statLines = stat.out.trim().split('\n');
+      const summary = statLines.pop();
+      const shown = statLines.slice(0, 20);
+      if (statLines.length > shown.length) shown.push(`… ${statLines.length - shown.length} more changed paths`);
+      diffPart = [...shown, summary].join('\n');
+    }
   }
   const hasNetFileChanges = !!diffPart || (!comparedWithCheckpoint && runLog.mutations.size > 0);
   if (diffPart) lines.push(diffPart);
   else if (comparedWithCheckpoint) lines.push('no net file changes since the run checkpoint');
-  else if (runLog.mutations.size) lines.push('files touched: ' + [...runLog.mutations].slice(0, 10).join(', '));
+  else if (runLog.mutations.size) {
+    const touched = [...runLog.mutations];
+    lines.push(`files touched (${touched.length}): ` + touched.slice(0, 20).join(', ')
+      + (touched.length > 20 ? `, … +${touched.length - 20} more` : ''));
+    lines.push('exact Git comparison unavailable — this list comes from successful write tools');
+  }
   if (runLog.commands.length) {
     lines.push(`commands (${runLog.commands.length}): ` + runLog.commands.slice(0, 3).map((c) => (c.length > 60 ? c.slice(0, 60) + '\u2026' : c)).join('  \u00b7  '));
   }
   lines.push(runLog.verified ? '\u2713 a verification command was run' : '\u26a0 NOT VERIFIED \u2014 no test/check command ran this turn');
-  if (hasNetFileChanges) lines.push('UNDO is available in the status bar.');
+  const currentCheckpoint = checkpointService.current();
+  const undoAvailable = hasNetFileChanges && comparedWithCheckpoint
+    && currentCheckpoint?.ref === runCheckpoint?.ref;
+  if (undoAvailable) lines.push('UNDO is available in the status bar.');
   sink.emit('stream:info', lines.join('\n'));
   sink.emit('run:report', { cwd, mutations: runLog.mutations.size });
 }
@@ -2164,9 +2177,10 @@ ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, th
     };
   }
 
+  let runCheckpoint = null;
   if (runMode === 'code') {
     await maybeAutoBranch(cwd, text, !!autoBranch);
-    await createCheckpoint(cwd); // silent; enables UNDO RUN
+    runCheckpoint = await createCheckpoint(cwd); // silent; enables UNDO RUN
   }
   const userMsg = {
     role: 'user',
@@ -2192,7 +2206,7 @@ ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, th
 
   try {
     const { runLog } = await runAgentTurn(model, cwd, autoApprove, think, subModel, !!onlineResearch, runMode);
-    if (runMode === 'code') await emitRunReport(cwd, runLog);
+    if (runMode === 'code') await emitRunReport(cwd, runLog, runCheckpoint);
     return { ok: true };
   } catch (err) {
     if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }
@@ -3191,7 +3205,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
   stopRequested = false;
   currentAbort = new AbortController();
   await maybeAutoBranch(cwd, goal, !!autoBranch);
-  await createCheckpoint(cwd); // silent; enables UNDO RUN for the whole loop
+  const runCheckpoint = await createCheckpoint(cwd); // silent; enables UNDO RUN for the whole loop
   const runStartedAt = Date.now();
   let runOutcome = 'ok';
   const max = Math.min(Math.max(parseInt(maxIterations, 10) || 8, 1), 25);
@@ -3260,7 +3274,7 @@ ipcMain.handle('chat:loop', async (_e, { model, subModel, goal, cwd, autoApprove
         }
       }
     }
-    await emitRunReport(cwd, loopLog);
+    await emitRunReport(cwd, loopLog, runCheckpoint);
     return { ok: true };
   } catch (err) {
     if (err.name === 'AbortError') { runOutcome = 'stopped'; return { ok: true, stopped: true }; }
@@ -3316,7 +3330,12 @@ async function runActiveMission({ model, coderModel, subModel, goal, cwd, autoAp
         });
       },
     });
-    await emitRunReport(cwd, loopLog);
+    const runCheckpoint = activeMission.recovery ? {
+      ref: activeMission.recovery.checkpointRef,
+      cwd: activeMission.projectPath,
+      at: activeMission.recovery.checkpointAt,
+    } : null;
+    await emitRunReport(cwd, loopLog, runCheckpoint);
     const stopped = stopRequested || result.stopped;
     updateMission({
       status: stopped ? 'stopped' : result.complete ? 'completed' : 'failed',
@@ -3662,7 +3681,7 @@ async function runAgentTask(payload = {}) {
   // Where there is a repo, branch and checkpoint for undo; where there is not,
   // neither exists and the disclosure is the guard.
   await maybeAutoBranch(cwd, goal, true);
-  await createCheckpoint(cwd);
+  const runCheckpoint = await createCheckpoint(cwd);
 
   noteOnlineResearch(!!payload.onlineResearch);
   if (!resume) conversation.push({ role: 'user', content: goal, displayContent: goal });
@@ -3700,7 +3719,7 @@ async function runAgentTask(payload = {}) {
       outcome = 'suspended';
       status = 'suspended';
     } else {
-      await emitRunReport(cwd, turn.runLog);
+      await emitRunReport(cwd, turn.runLog, runCheckpoint);
     }
   } catch (err) {
     if (err?.name === 'AbortError') { outcome = 'stopped'; status = 'stopped'; }
@@ -4249,7 +4268,7 @@ ipcMain.handle('chat:reviewFix', async (_e, { coderModel, cwd, findings, autoApp
   let runOutcome = 'ok';
   try {
     await maybeAutoBranch(cwd, 'fix selected review findings', !!autoBranch);
-    await createCheckpoint(cwd);
+    const runCheckpoint = await createCheckpoint(cwd);
     const task = {
       title: `Fix ${review.findings.length} selected review finding${review.findings.length === 1 ? '' : 's'}`,
       objective: 'Correct every selected structured review finding. Inspect the current code before editing and preserve unrelated changes.\n\n' + JSON.stringify(review.findings, null, 2),
@@ -4260,7 +4279,7 @@ ipcMain.handle('chat:reviewFix', async (_e, { coderModel, cwd, findings, autoApp
     const result = await runCoderTask(task, coderModel, cwd, !!autoApprove, !!think);
     const mutations = new Set(result.evidence.filter((entry) => ORCHESTRATION_MUTATING_TOOLS.has(entry.name)).flatMap(evidencePaths));
     const commands = result.evidence.filter((entry) => entry.name === 'run_command' || entry.name === 'run_project_check').map((entry) => entry.args?.command || entry.args?.check || entry.name);
-    await emitRunReport(cwd, { mutations, commands, verified: commands.length > 0 });
+    await emitRunReport(cwd, { mutations, commands, verified: commands.length > 0 }, runCheckpoint);
     return { ok: true, report: result.report };
   } catch (error) {
     if (error.name === 'AbortError') return { ok: true, stopped: true };

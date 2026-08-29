@@ -135,11 +135,20 @@ test('the run report compares two complete snapshots', () => {
   // index. Comparing through that index reports them as deleted and then new.
   // The checkpoint service uses its own index so each file appears once.
   const main = read('main.js');
-  const report = main.slice(main.indexOf('async function emitRunReport'), main.indexOf('async function emitRunReport') + 1800);
-  assert.match(report, /checkpointService\.diffStat\(cwd\)/);
+  const report = main.slice(main.indexOf('async function emitRunReport'), main.indexOf('async function emitRunReport') + 2600);
+  assert.match(report, /checkpointService\.diffStat\(cwd, runCheckpoint\)/);
   assert.match(report, /no net file changes since the run checkpoint/);
-  assert.match(report, /if \(hasNetFileChanges\) lines\.push\('UNDO is available/);
+  assert.match(report, /currentCheckpoint\?\.ref === runCheckpoint\?\.ref/);
+  assert.match(report, /if \(undoAvailable\) lines\.push\('UNDO is available/);
   assert.doesNotMatch(report, /new, untracked:/);
+});
+
+test('each report is bound to the checkpoint created for that run', () => {
+  const main = read('main.js');
+  assert.match(main, /runCheckpoint = await createCheckpoint\(cwd\)/);
+  assert.match(main, /emitRunReport\(cwd, runLog, runCheckpoint\)/);
+  const report = main.slice(main.indexOf('async function emitRunReport'), main.indexOf('async function emitRunReport') + 2500);
+  assert.doesNotMatch(report, /const lastCheckpoint = checkpointService\.current\(\)/);
 });
 
 test('all successful coding tools contribute paths to the run report', () => {
