@@ -51,6 +51,10 @@ function createHistoryStore({ userDataDir, runtimeMetadata }) {
       const detailed = {
         subModel: meta.subModel || '',
         coderModel: meta.coderModel || '',
+        // This is the switch snapshot, not the permanent provenance flag in
+        // `onlineResearch`. Older chats do not have it and therefore reopen
+        // offline.
+        onlineResearchEnabled: !!meta.onlineResearchEnabled,
         onlineResearch: !!meta.onlineResearch,
         runMetrics: meta.runMetrics || null,
         contextState: meta.contextState || { projectPath: '', pinnedFiles: [] },

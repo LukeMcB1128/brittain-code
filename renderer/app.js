@@ -375,12 +375,16 @@ thinkToggle.addEventListener('change', () => localStorage.setItem('think', think
 
 autoBranchToggle.addEventListener('change', () => localStorage.setItem('autoBranch', autoBranchToggle.checked ? '1' : '0'));
 reviewToggle.addEventListener('change', () => localStorage.setItem('reviewMode', reviewToggle.checked ? '1' : '0'));
-onlineResearchToggle.addEventListener('change', async () => {
-  if (!onlineResearchToggle.checked) return;
-  const approved = await confirmDialog(
+function confirmOnlineResearch() {
+  return confirmDialog(
     'Enable ONLINE RESEARCH for this session?\n\nSearch queries and requested page URLs will leave this computer. Every web_search and web_fetch call will still require explicit approval, even when AUTO-APPROVE is on.',
     { okLabel: 'ENABLE' }
   );
+}
+
+onlineResearchToggle.addEventListener('change', async () => {
+  if (!onlineResearchToggle.checked) return;
+  const approved = await confirmOnlineResearch();
   if (!approved) onlineResearchToggle.checked = false;
 });
 
@@ -623,12 +627,12 @@ function renderChatItem(c) {
       main.appendChild(model);
     }
     // Whether this session reached the network is worth seeing before opening
-    // it. Loading it still never turns the switch back on — see resetChatState.
+    // it. This permanent record is separate from the saved switch state.
     if (c.onlineResearch) {
       const online = document.createElement('span');
       online.className = 'chat-online';
       online.textContent = 'ONLINE';
-      online.title = 'This session ran with online research enabled at some point. Opening it does not re-enable it.';
+      online.title = 'This session ran with online research enabled at some point.';
       main.appendChild(online);
     }
 
@@ -700,7 +704,7 @@ async function saveChat() {
       think: thinkToggle.checked,
       autoApprove: runsUnattended(),
       autoBranch: autoBranchToggle.checked,
-      onlineResearch: onlineResearchToggle.checked,
+      onlineResearchEnabled: onlineResearchToggle.checked,
       subModel,
       coderModel,
       runMetrics,
@@ -722,12 +726,23 @@ async function loadChat(chatId) {
   // Set this before any rendering or mode/directory synchronization so a
   // mission card can never be carried over from the previously open chat.
   currentChatId = chatId;
-  onlineResearchToggle.checked = false; // loading history must never restore network access
+  // Provenance and permission are different facts. An old chat has no explicit
+  // switch snapshot and opens offline. A chat saved while ONLINE was on can
+  // restore it only after the user sees the normal network warning again.
+  onlineResearchToggle.checked = false;
+  if (saved.onlineResearchEnabled === true) {
+    onlineResearchToggle.checked = await confirmOnlineResearch();
+  }
   setAppMode(saved.mode === 'chat' ? 'chat' : 'code');
 
   // Push the stored conversation into the main process so the model continues from it.
   const lc = await window.api.loadConversation(saved.conversation, saved.model || modelSelect.value, saved.runMetrics, saved.contextState,
-    { cwd: saved.cwd || cwd, mode: saved.mode === 'chat' ? 'chat' : 'code', onlineResearch: false });
+    {
+      cwd: saved.cwd || cwd,
+      mode: saved.mode === 'chat' ? 'chat' : 'code',
+      onlineResearch: onlineResearchToggle.checked,
+      onlineResearchEverUsed: !!saved.onlineResearch,
+    });
   renderConversation(saved.conversation);
   updateContextBar(lc.approxTokens, lc.contextLength);
   compactWarned = false; // fresh warning budget for this chat

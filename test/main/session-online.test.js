@@ -18,19 +18,23 @@ function store() {
   };
 }
 
-test('whether a session went online is saved in the index and the detail', async () => {
+test('online provenance and the saved switch state stay separate', async () => {
   const { store: history } = store();
-  await history.save({ id: 'a1', title: 'went online', model: 'm', onlineResearch: true }, [{ role: 'user', content: 'hi' }]);
-  await history.save({ id: 'a2', title: 'stayed local', model: 'm', onlineResearch: false }, [{ role: 'user', content: 'hi' }]);
+  await history.save({ id: 'a1', title: 'went online', model: 'm', onlineResearch: true, onlineResearchEnabled: false }, [{ role: 'user', content: 'hi' }]);
+  await history.save({ id: 'a2', title: 'saved online', model: 'm', onlineResearch: true, onlineResearchEnabled: true }, [{ role: 'user', content: 'hi' }]);
+  await history.save({ id: 'old', title: 'older chat', model: 'm', onlineResearch: true }, [{ role: 'user', content: 'hi' }]);
 
-  // In the index, so the session list can show it without opening every file.
+  // Only permanent provenance is needed in the index for the sidebar marker.
   const index = Object.fromEntries(history.list().map((entry) => [entry.id, entry.onlineResearch]));
   assert.equal(index.a1, true);
-  assert.equal(index.a2, false);
+  assert.equal(index.a2, true);
 
-  // And in the chat itself, where the transcript is.
+  // The detail keeps the current switch state separately. A missing field from
+  // an older chat is normalized to false when that chat is saved again.
   assert.equal(history.load('a1').chat.onlineResearch, true);
-  assert.equal(history.load('a2').chat.onlineResearch, false);
+  assert.equal(history.load('a1').chat.onlineResearchEnabled, false);
+  assert.equal(history.load('a2').chat.onlineResearchEnabled, true);
+  assert.equal(history.load('old').chat.onlineResearchEnabled, false);
 });
 
 test('the flag is a latch over the session, not the toggle at save time', () => {
@@ -54,10 +58,13 @@ test('both entry points latch it: the window and a headless run', () => {
   assert.match(main, /noteOnlineResearch\(!!payload\.onlineResearch\);/, 'runAgentTask');
 });
 
-test('opening a saved session still never re-enables network access', () => {
-  // The record is provenance. Restoring the switch from history would be a
-  // privacy regression, and the existing boundary stays exactly as it was.
+test('reopening a chat separates provenance from permission and asks again', () => {
   const app = read('renderer/app.js');
-  assert.match(app, /onlineResearchToggle\.checked = false; \/\/ loading history must never restore network access/);
-  assert.match(app, /onlineResearchToggle\.checked = false; \/\/ privacy boundary: never restore online access implicitly/);
+  assert.match(app, /if \(saved\.onlineResearchEnabled === true\) \{\s*onlineResearchToggle\.checked = await confirmOnlineResearch\(\);/, 'only an explicit switch snapshot can restore ONLINE');
+  assert.match(app, /onlineResearchEverUsed: !!saved\.onlineResearch,/, 'the provenance flag remains separate');
+  assert.match(app, /onlineResearchEnabled: onlineResearchToggle\.checked,/, 'save records the current switch state');
+  assert.match(app, /onlineResearchToggle\.checked = false; \/\/ privacy boundary: never restore online access implicitly/, 'new sessions still start offline');
+
+  const main = read('main.js');
+  assert.match(main, /sessionOnlineResearch = !!view\.onlineResearchEverUsed;/, 'loading a chat preserves its provenance latch');
 });

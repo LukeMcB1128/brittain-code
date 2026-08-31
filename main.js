@@ -4777,6 +4777,10 @@ ipcMain.handle('context:control', (_e, payload = {}) => {
 ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextState, view = {}) => {
   enterSession('window');
   newSessionId();
+  // Loading a transcript starts a new live session, but its provenance must
+  // survive another save even when ONLINE stays off. The current switch state
+  // is separate and remains in conversationView.
+  sessionOnlineResearch = !!view.onlineResearchEverUsed;
   conversation = Array.isArray(msgs) ? msgs : [];
   contextState = normalizeContextState(savedContextState);
   usage = restoreUsage(savedUsage);
@@ -4812,6 +4816,7 @@ ipcMain.handle('history:list', () => historyStore.list());
 ipcMain.handle('history:save', (_e, meta, convo) => historyStore.save({
   ...meta,
   onlineResearch: !!meta?.onlineResearch || sessionOnlineResearch,
+  onlineResearchEnabled: !!meta?.onlineResearchEnabled,
 }, convo));
 ipcMain.handle('history:load', (_e, id) => historyStore.load(id));
 ipcMain.handle('history:delete', (_e, id) => historyStore.remove(id));
