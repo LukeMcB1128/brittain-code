@@ -217,6 +217,29 @@ test('a failed checkpoint cannot leave an older run available', async () => {
   assert.deepEqual(published.at(-1), { available: false, cwd: '/project' });
 });
 
+test('checkpoint diff rejects an index that calls existing files deleted', async (t) => {
+  const cwd = tempDirectory(t);
+  fs.writeFileSync(path.join(cwd, 'still-here.txt'), 'present\n');
+  let diffCalled = false;
+  const service = createCheckpointService({
+    gitRun: async (args) => {
+      if (args[0] === 'rev-parse') return { ok: true, out: path.join(cwd, 'missing-index'), err: '' };
+      if (args[0] === 'add') return { ok: true, out: '', err: '' };
+      if (args[0] === 'ls-tree') return { ok: true, out: 'still-here.txt\0', err: '' };
+      if (args[0] === 'ls-files') return { ok: true, out: '', err: '' };
+      if (args[0] === 'diff') diffCalled = true;
+      return { ok: true, out: '', err: '' };
+    },
+    getTempDirectory: () => os.tmpdir(),
+    publishState: () => {},
+  });
+  const checkpoint = { ref: 'refs/brittain/checkpoints/run', cwd, at: 1 };
+  const result = await service.diffStat(cwd, checkpoint);
+  assert.equal(result.ok, false);
+  assert.match(result.err, /omitted 1 existing path/);
+  assert.equal(diffCalled, false);
+});
+
 test('recommendations service loads Ollama metadata through its injected boundary', async (t) => {
   const directory = tempDirectory(t);
   const calls = [];

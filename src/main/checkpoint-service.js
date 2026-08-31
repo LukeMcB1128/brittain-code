@@ -19,6 +19,39 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
     }
   }
 
+  async function seedFromCurrentIndex(cwd, temporaryIndex) {
+    const located = await gitRun(['rev-parse', '--git-path', 'index'], cwd);
+    if (!located.ok) return located;
+    const value = located.out.trim();
+    const currentIndex = path.isAbsolute(value) ? value : path.resolve(cwd, value);
+    try {
+      if (fs.existsSync(currentIndex)) fs.copyFileSync(currentIndex, temporaryIndex);
+      return { ok: true, out: '', err: '' };
+    } catch (error) {
+      return { ok: false, out: '', err: String(error.message || error) };
+    }
+  }
+
+  async function validateCurrentIndex(cwd, checkpointRef, env) {
+    const [before, after] = await Promise.all([
+      gitRun(['ls-tree', '-r', '--name-only', '-z', checkpointRef], cwd),
+      gitRun(['ls-files', '--cached', '-z'], cwd, env),
+    ]);
+    if (!before.ok) return before;
+    if (!after.ok) return after;
+    const current = new Set(after.out.split('\0').filter(Boolean));
+    const falseDeletions = before.out.split('\0').filter(Boolean)
+      .filter((file) => !current.has(file) && fs.existsSync(path.join(cwd, file)));
+    if (falseDeletions.length) {
+      return {
+        ok: false,
+        out: '',
+        err: `Temporary Git index omitted ${falseDeletions.length} existing path(s).`,
+      };
+    }
+    return { ok: true, out: '', err: '' };
+  }
+
   async function create(cwd) {
     try {
       if (!(await gitRun(['rev-parse', '--git-dir'], cwd)).ok) return invalidate(cwd);
@@ -28,6 +61,8 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
       );
       const env = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
       try {
+        const seeded = await seedFromCurrentIndex(cwd, temporaryIndex);
+        if (!seeded.ok) return invalidate(cwd);
         const add = await gitRun(['add', '-A', '--', '.'], cwd, env);
         if (!add.ok) return invalidate(cwd);
         const tree = await gitRun(['write-tree'], cwd, env);
@@ -56,12 +91,12 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
     }
   }
 
-  // Compare the current files with the checkpoint through a temporary index.
-  // A checkpoint includes files that were untracked when the run started. A
-  // normal `git diff <checkpoint>` uses the real index, where those files are
-  // still untracked, so Git reports each one twice: deleted from the checkpoint
-  // and new in the working tree. Seeding a temporary index from the checkpoint
-  // and adding the current files gives Git two complete snapshots to compare.
+  // Compare two complete snapshots through a temporary index. Copying the real
+  // index first keeps every currently tracked path; `git add -A` then adds
+  // untracked paths and refreshes file contents without changing the user's
+  // actual index. Starting from `read-tree <checkpoint>` proved unsafe in the
+  // packaged app: the following add could leave an empty index and report the
+  // whole repository as deleted.
   async function diffStat(cwd, checkpoint = lastCheckpoint) {
     const target = checkpoint;
     if (!target || target.cwd !== cwd) {
@@ -73,10 +108,12 @@ function createCheckpointService({ gitRun, getTempDirectory, publishState, keep 
     );
     const env = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
     try {
-      const read = await gitRun(['read-tree', target.ref], cwd, env);
-      if (!read.ok) return read;
+      const seeded = await seedFromCurrentIndex(cwd, temporaryIndex);
+      if (!seeded.ok) return seeded;
       const add = await gitRun(['add', '-A', '--', '.'], cwd, env);
       if (!add.ok) return add;
+      const valid = await validateCurrentIndex(cwd, target.ref, env);
+      if (!valid.ok) return valid;
       return gitRun(['diff', '--cached', '--stat', target.ref, '--', '.'], cwd, env);
     } catch (error) {
       return { ok: false, out: '', err: String(error.message || error) };
