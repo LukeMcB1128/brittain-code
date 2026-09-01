@@ -227,3 +227,75 @@ test('a policy deny still beats a would-be park', () => {
   const policy = { ...permissive, deny: ['mcp_x'] };
   assert.equal(decide(policy, { name: 'mcp_x', mcp: true, attended: false }).verdict, 'deny');
 });
+
+// --- auto-approving online requests ---
+
+const onlineCall = (extra = {}) => ({ name: 'web_search', network: true, onlineResearch: true, ...extra });
+
+test('a plain online request can be auto-approved from Settings', () => {
+  // The point of the setting: stop confirming every single search.
+  const policy = { network: 'ask' };
+  assert.equal(decide(policy, onlineCall()).verdict, 'ask');
+  const on = decide(policy, onlineCall({ networkAutoApprove: true }));
+  assert.equal(on.verdict, 'allow');
+  assert.match(on.reason, /Settings/);
+});
+
+test('auto-approve does not turn online research on', () => {
+  // The master switch is a separate decision and stays the outer gate.
+  const decision = decide({ network: 'ask' }, {
+    name: 'web_search', network: true, onlineResearch: false, networkAutoApprove: true,
+  });
+  assert.equal(decision.verdict, 'deny');
+  assert.match(decision.reason, /online research is disabled/);
+});
+
+test('auto-approve cannot overrule a policy that denies online requests', () => {
+  // A policy naming online requests specifically is a deliberate choice; a
+  // convenience toggle is not allowed to reverse it.
+  const decision = decide({ network: 'deny' }, onlineCall({ networkAutoApprove: true }));
+  assert.equal(decision.verdict, 'deny');
+});
+
+test('a sensitive read is not auto-approved just because it goes online', () => {
+  // The network branch sits above the sensitive invariant, so returning
+  // 'allow' here would send a credential out over the wire without asking —
+  // exactly what that invariant exists to prevent.
+  for (const policy of [{ network: 'ask' }, { network: true }]) {
+    const decision = decide(policy, onlineCall({ sensitive: true, networkAutoApprove: true }));
+    assert.equal(decision.verdict, 'ask', JSON.stringify(policy));
+    assert.match(decision.reason, /sensitive/);
+  }
+});
+
+test('a destructive or MCP call is judged on that, not on being online', () => {
+  const destructive = decide({ network: true }, onlineCall({ destructive: true, networkAutoApprove: true }));
+  assert.equal(destructive.verdict, 'ask');
+  assert.match(destructive.reason, /destructive/);
+
+  const mcp = decide({ network: true }, onlineCall({ mcp: true, networkAutoApprove: true }));
+  assert.equal(mcp.verdict, 'ask');
+  assert.match(mcp.reason, /MCP/);
+});
+
+test('a financial call stays manual however online requests are configured', () => {
+  const decision = decide({ network: true }, onlineCall({ financial: true, networkAutoApprove: true }));
+  assert.equal(decision.verdict, 'ask');
+  assert.match(decision.reason, /financial/);
+});
+
+test('unattended, an auto-approved online request still runs', () => {
+  // Whereas an un-approved one defers rather than hanging on a prompt.
+  const attended = { network: 'ask' };
+  assert.equal(decide(attended, onlineCall({ attended: false })).verdict, 'park');
+  assert.equal(decide(attended, onlineCall({ attended: false, networkAutoApprove: true })).verdict, 'allow');
+});
+
+test('the setting is off by default and reaches the policy engine', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', '..', f), 'utf8');
+  assert.match(read('settings.js'), /onlineAutoApprove: false,/);
+  assert.match(read('main.js'), /networkAutoApprove: !!runtimeSettings\.onlineAutoApprove/);
+  assert.ok(read('renderer/index.html').includes('id="setting-online-auto-approve"'));
+});

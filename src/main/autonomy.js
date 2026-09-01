@@ -146,6 +146,7 @@ function decide(rawPolicy, call = {}) {
     financial = false,
     mcpTrust = '',
     onlineResearch = false,
+    networkAutoApprove = false,
     toolCalls = 0,
   } = call;
 
@@ -174,8 +175,21 @@ function decide(rawPolicy, call = {}) {
   if (network) {
     if (!onlineResearch) return { verdict: 'deny', reason: 'online research is disabled' };
     if (policy.network === 'deny') return { verdict: 'deny', reason: 'policy does not permit online requests' };
-    if (policy.network === 'allow') return { verdict: 'allow', reason: 'policy permits online requests' };
-    return { verdict: resolveAsk(attended, true), reason: 'online requests always need approval' };
+    // Only a call that is *nothing but* an online request can be permitted
+    // here. This branch sits above the destructive, MCP, and sensitive
+    // invariants, so returning 'allow' for a call that is also one of those
+    // would waive an invariant that no policy is allowed to waive — sending a
+    // credential out over the wire being the exact case the sensitive rule
+    // exists for. Anything else falls through to be judged on that other
+    // property instead.
+    if (!sensitive && !destructive && !mcp) {
+      if (policy.network === 'allow') return { verdict: 'allow', reason: 'policy permits online requests' };
+      // The Settings toggle only reaches the default 'ask' case: it is a
+      // convenience for a person tired of confirming every search, not a way
+      // to overrule a policy that named online requests specifically.
+      if (networkAutoApprove) return { verdict: 'allow', reason: 'online requests are auto-approved in Settings' };
+      return { verdict: resolveAsk(attended, true), reason: 'online requests always need approval' };
+    }
   }
 
   // Losing a day's work unsupervised is not a trade worth making.

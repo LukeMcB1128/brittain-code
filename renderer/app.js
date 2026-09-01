@@ -2076,6 +2076,7 @@ function fillSettingsForm(settings) {
   $('setting-auto-branch').checked = !!settings.autoBranch;
   $('setting-review-mode').checked = !!settings.reviewMode;
   $('setting-mcp-auto-approve').checked = !!settings.mcpAutoApprove;
+  $('setting-online-auto-approve').checked = !!settings.onlineAutoApprove;
   $('setting-max-agent-steps').value = settings.maxAgentSteps;
   $('setting-loop-iterations').value = settings.defaultLoopIterations;
   $('setting-coder-context').value = settings.coderContextCap;
@@ -2107,6 +2108,7 @@ function settingsFromForm() {
     autoBranch: $('setting-auto-branch').checked,
     reviewMode: $('setting-review-mode').checked,
     mcpAutoApprove: $('setting-mcp-auto-approve').checked,
+    onlineAutoApprove: $('setting-online-auto-approve').checked,
     maxAgentSteps: Number($('setting-max-agent-steps').value),
     defaultLoopIterations: Number($('setting-loop-iterations').value),
     coderContextCap: Number($('setting-coder-context').value),

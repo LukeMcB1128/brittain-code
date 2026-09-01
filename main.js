@@ -1073,6 +1073,9 @@ async function resolveToolCall(name, args, { autoApprove, onlineResearch, prompt
     ...call,
     attended,
     onlineResearch,
+    // Opt-in, off by default, and only ever reaches an online request that
+    // carries no other risk — the policy engine enforces that, not this line.
+    networkAutoApprove: !!runtimeSettings.onlineAutoApprove,
     toolCalls: usage.metrics.toolCalls,
   });
 
