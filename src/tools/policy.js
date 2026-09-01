@@ -64,7 +64,12 @@ const CODER_TOOL_NAMES = new Set([
   'pdf_info', 'pdf_fill_form', 'pdf_stamp', 'pdf_pages', 'pdf_merge',
 ]);
 
-const CHAT_TOOL_NAMES = new Set(['ask_user', 'calculate', 'remember', 'web_search', 'web_fetch']);
+// Chat has no filesystem, and these are the one exception: they act only on
+// files the person attached this turn, enforced in src/tools/attached-files.js.
+const CHAT_TOOL_NAMES = new Set([
+  'ask_user', 'calculate', 'remember', 'web_search', 'web_fetch',
+  'pdf_info', 'pdf_fill_form', 'pdf_stamp', 'pdf_pages', 'pdf_merge',
+]);
 
 const SUBMIT_IMPLEMENTATION_PLAN_TOOL = {
   type: 'function',

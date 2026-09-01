@@ -949,7 +949,7 @@ const DOCUMENT_EXTENSIONS = new Set([
   'log', 'properties',
 ]);
 let pendingImages = []; // { name, type, size, dataUrl }
-let pendingFiles = []; // { name, type, size, dataUrl }
+let pendingFiles = []; // { name, type, size, path, dataUrl }
 let pendingAttachmentReads = 0;
 
 $('attach-btn').addEventListener('click', () => $('attach-file').click());
@@ -1037,6 +1037,10 @@ function addAttachment(file) {
   reader.onload = () => {
     const attachment = {
       name: file.name || (isImage ? 'pasted-image' : 'attachment'),
+      // Where the file actually lives, when it came from disk. Empty for a
+      // paste. This is what lets an edited PDF be written back beside the
+      // original rather than somewhere the user has to go hunting for.
+      path: (window.api.filePathFor && window.api.filePathFor(file)) || '',
       type: imageType || fileType || (fileExtension(file.name) === 'pdf' ? 'application/pdf' : 'text/plain'),
       size: file.size,
       dataUrl: reader.result,
@@ -1160,6 +1164,7 @@ async function send() {
     name: attachment.name,
     type: attachment.type,
     size: attachment.size,
+    path: attachment.path || '',
     data: attachment.dataUrl.split(',')[1],
   }));
   const shownImages = pendingImages.map((attachment) => attachment.dataUrl);

@@ -1,7 +1,12 @@
 // Bridge between the UI (renderer) and main process. Keep this thin.
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  // Electron 43 removed File.path; this is the only way to learn where a
+  // dropped file actually lives, and knowing that is what lets chat write an
+  // edited PDF back beside the original instead of into a temp directory.
+  // A pasted file has no path on disk and returns ''.
+  filePathFor: (file) => { try { return webUtils.getPathForFile(file) || ''; } catch { return ''; } },
   listModels: () => ipcRenderer.invoke('models:list'),
   getModelRecommendations: (mode) => ipcRenderer.invoke('models:recommendations', { mode }),
   installModel: (model) => ipcRenderer.invoke('models:install', { model }),

@@ -17,6 +17,7 @@ const { execFile, exec, spawn } = require('child_process');
 const { createToolPolicy } = require('./src/tools/policy');
 const workspace = require('./src/main/workspace');
 const pdf = require('./src/tools/pdf');
+const attachedFiles = require('./src/tools/attached-files');
 const {
   findReferences,
   findSymbol,
@@ -198,6 +199,18 @@ function canonicalize(target) {
   } catch {
     return target;
   }
+}
+
+// A PDF path may name an attachment as well as a file in the project. In chat
+// the attachment list is the only door — see src/tools/attached-files.js.
+function pdfInput(cwd, requested) {
+  return attachedFiles.resolveInput(requested, (p) => resolveInside(cwd, p));
+}
+
+// Empty means "beside the source, under the suffixed default", which is what a
+// restricted run always gets: no path to point anywhere else.
+function pdfOutput(cwd, requested) {
+  return attachedFiles.resolveOutput(requested, (p) => resolveForWrite(cwd, p));
 }
 
 function resolveInside(cwd, p) {
@@ -1576,31 +1589,31 @@ async function executeTool(name, args, cwd) {
       return truncate(fs.readFileSync(p, 'utf8'));
     }
     case 'pdf_info':
-      return await pdf.info(resolveInside(cwd, args.path));
+      return await pdf.info(pdfInput(cwd, args.path));
 
     case 'pdf_fill_form':
-      return await pdf.fillForm(resolveInside(cwd, args.path), args.values, {
+      return await pdf.fillForm(pdfInput(cwd, args.path), args.values, {
         flatten: !!args.flatten,
-        output: args.output ? resolveForWrite(cwd, args.output) : '',
+        output: pdfOutput(cwd, args.output),
       });
 
     case 'pdf_stamp':
-      return await pdf.stamp(resolveInside(cwd, args.path), {
+      return await pdf.stamp(pdfInput(cwd, args.path), {
         ...args,
-        image: args.image ? resolveInside(cwd, args.image) : '',
-        output: args.output ? resolveForWrite(cwd, args.output) : '',
+        image: args.image ? pdfInput(cwd, args.image) : '',
+        output: pdfOutput(cwd, args.output),
       });
 
     case 'pdf_pages':
-      return await pdf.pages(resolveInside(cwd, args.path), {
+      return await pdf.pages(pdfInput(cwd, args.path), {
         ...args,
-        output: args.output ? resolveForWrite(cwd, args.output) : '',
+        output: pdfOutput(cwd, args.output),
       });
 
     case 'pdf_merge':
       return await pdf.merge(
-        (args.paths || []).map((file) => resolveInside(cwd, file)),
-        args.output ? resolveForWrite(cwd, args.output) : '',
+        (args.paths || []).map((file) => pdfInput(cwd, file)),
+        pdfOutput(cwd, args.output),
       );
 
     case 'write_file': {
@@ -2587,6 +2600,7 @@ module.exports = {
   initTools,
   setCommandSandbox,
   setRootProvider,
+  setAttachedFiles: attachedFiles.setAttachedFiles,
   TOOL_DEFS,
   RISKY_TOOLS,
   SUBAGENT_TOOLS,

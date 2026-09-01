@@ -13,7 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('node:child_process');
 const { McpManager } = require('./mcp');
-const { initTools, setCommandSandbox, setRootProvider, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
+const { initTools, setCommandSandbox, setRootProvider, setAttachedFiles, TOOL_DEFS, RISKY_TOOLS, NETWORK_TOOLS, SENSITIVE_TOOLS, DESTRUCTIVE_TOOLS, SUBAGENT_TOOLS, SUBAGENT_TOOL_NAMES, ORCHESTRATOR_TOOLS, ORCHESTRATOR_TOOL_NAMES, CODER_TOOLS, CODER_TOOL_NAMES, CHAT_TOOLS, executeTool, isDestructiveCommand, gitRun, memoryPath, readMemory, legacyMemoryPath, readLegacyMemory, stopAllManagedProcesses, SELF_TALK } = require('./tools');
 const { MAX_ATTACHMENT_FILES, extractFileAttachments, validateImageAttachments } = require('./attachments');
 const { DEFAULT_SETTINGS, normalizeEndpoint, normalizeSettings, loadSettings, saveSettings } = require('./settings');
 const { isToolCallParseError, withToolCallRetryInstruction, toolCallFailureMessage } = require('./ollama-recovery');
@@ -2259,6 +2259,11 @@ async function executeChatJob(job) {
   const existingTokens = currentConversationTokens(model);
   const availableTokens = Math.max(500, Math.floor(contextLength * 0.82) - existingTokens - 1200);
   const attachmentCharBudget = Math.max(2_000, Math.min(120_000, availableTokens * 3));
+  // What this turn is allowed to open by name. In chat it is the only thing the
+  // PDF tools can reach at all — chat has no filesystem otherwise — so "fill in
+  // my worksheet" works while "read ~/.ssh/id_rsa" has nowhere to resolve.
+  setAttachedFiles(files, { restrict: mode === 'chat' });
+
   let fileAttachments;
   try {
     fileAttachments = await extractFileAttachments(files, { maxTotalChars: attachmentCharBudget });

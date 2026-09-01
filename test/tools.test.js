@@ -155,8 +155,14 @@ test('semantic navigation outlines definitions and finds bounded references', as
 test('folder-free Chat mode receives conversation, memory, calculator, and research tools', () => {
   const names = new Set(CHAT_TOOLS.map((definition) => definition.function.name));
   assert.deepEqual(names, CHAT_TOOL_NAMES);
-  assert.deepEqual([...names].sort(), ['ask_user', 'calculate', 'remember', 'web_fetch', 'web_search']);
+  assert.deepEqual([...names].sort(), [
+    'ask_user', 'calculate', 'pdf_fill_form', 'pdf_info', 'pdf_merge', 'pdf_pages', 'pdf_stamp',
+    'remember', 'web_fetch', 'web_search',
+  ]);
+  // Chat still has no filesystem. The PDF tools are the one exception and they
+  // reach only files the person attached this turn — never a path by name.
   assert.equal(names.has('read_file'), false);
+  assert.equal(names.has('write_file'), false);
   assert.equal(names.has('run_command'), false);
   assert.equal(names.has('remember'), true);
 });
