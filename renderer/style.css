@@ -471,7 +471,11 @@ button:active { background: var(--border); }
   align-items: baseline;
 }
 
-.tool.has-context-actions .tool-head { padding-right: 78px; }
+.tool > .context-actions {
+  z-index: 1;
+  background: var(--bg-panel);
+  padding-left: 6px;
+}
 
 .tool .tool-head .status { margin-left: auto; font-size: 10px; color: var(--text-dim); }
 .tool.ok .tool-head .status { color: var(--green); }

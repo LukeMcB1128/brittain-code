@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const app = fs.readFileSync(path.join(__dirname, '..', '..', 'renderer', 'app.js'), 'utf8');
+const css = fs.readFileSync(path.join(__dirname, '..', '..', 'renderer', 'style.css'), 'utf8');
 
 test('saved tool results reuse the compact live tool cards', () => {
   const render = app.slice(app.indexOf('function renderConversation'), app.indexOf('// ---------- attachments ----------'));
@@ -21,6 +22,14 @@ test('live and saved tools share one completion display', () => {
   assert.match(live, /finishToolCard\(lastToolCard, result, \{ denied \}\);/);
 
   const helper = app.slice(app.indexOf('function finishToolCard'), app.indexOf('function decorateContextControls'));
-  assert.match(helper, /if \(!looksBad\) card\.classList\.add\('collapsed'\);/,
-    'successful saved results should reopen as one compact row');
+  assert.match(helper, /card\.classList\.add\('collapsed'\);/,
+    'all tool details should stay hidden until the user opens the card');
+  assert.doesNotMatch(helper, /looksBad|traceback|not found/,
+    'words inside a tool result must not expand it automatically');
+});
+
+test('tool status stays against the right edge', () => {
+  assert.match(css, /\.tool \.tool-head \.status \{ margin-left: auto;/);
+  assert.doesNotMatch(css, /\.tool\.has-context-actions \.tool-head \{ padding-right:/,
+    'the hidden context action must not reserve a visible gap beside the status');
 });

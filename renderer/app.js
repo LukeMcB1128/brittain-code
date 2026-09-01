@@ -1394,10 +1394,10 @@ function finishToolCard(card, result, { denied = false } = {}) {
   const pre = document.createElement('pre');
   pre.textContent = result;
   card.appendChild(pre);
-  // Match the live display: successful output is one compact row, while a
-  // failure stays open so its useful error is not hidden.
-  const looksBad = denied || /error|traceback|exception|failed|timed out|not found|denied/i.test(String(result).slice(0, 300));
-  if (!looksBad) card.classList.add('collapsed');
+  // Tool output is supporting detail. Keep it available on click, but never
+  // let browser snapshots, command logs, or error text expand the transcript
+  // automatically when a chat is loaded or a tool finishes.
+  card.classList.add('collapsed');
 }
 
 function decorateContextControls(element, message, index) {
