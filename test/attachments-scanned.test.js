@@ -31,11 +31,15 @@ test('the text says what happened, so the model is not guessing', async () => {
 });
 
 test('a PDF with real text is untouched by any of this', async () => {
-  // The rendering path must only ever be a fallback.
+  // The rendering path must only ever be a fallback. The gate used to be
+  // emptiness alone; it is now a judgement about whether the extracted text is
+  // legible, which catches a broken text layer as well as a missing one.
   const source = read('attachments.js');
   const body = source.slice(source.indexOf('async function extractPdfText'));
-  assert.ok(body.indexOf('renderPdfPages') > body.indexOf('if (!text.replace'),
-    'rendering happens only after extraction comes back empty');
+  assert.ok(body.indexOf('renderPdfPages') > body.indexOf('const quality = assessText(text)'),
+    'rendering happens only after the extracted text is judged unusable');
+  const { assessText } = require('../attachments');
+  assert.deepEqual(assessText('Ordinary readable prose about the subject at hand. '.repeat(10)), { usable: true });
 });
 
 test('rendering is capped, because pages are expensive', () => {

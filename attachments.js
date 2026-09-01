@@ -103,6 +103,53 @@ async function renderPdfPages(buffer, limit = MAX_RENDERED_PAGES) {
   return { images, total, rendered: wanted };
 }
 
+// Whether an extracted text layer is worth sending to a model.
+//
+// "Is there any text?" was the wrong question. A PDF with a broken text layer
+// extracts plenty of characters — they are just not language. A subset font
+// with no ToUnicode map yields private-use glyphs, a mis-declared encoding
+// yields replacement characters, and both sail past an emptiness check and
+// reach the model as confident nonsense. The pages themselves are perfectly
+// readable, so the useful question is whether what came out is legible.
+//
+// Every test here is language-agnostic: \p{L} covers Chinese and Arabic as
+// readily as Latin, and the failure modes being caught are not letters in any
+// script. Text that is merely *wrong* — a bad encoding mapping one real letter
+// onto another — is indistinguishable from prose at this level and is not
+// detected. That is the honest limit of a character-class heuristic.
+const GARBLE_TESTS = [
+  // Whatever produced this could not decode the bytes at all.
+  { name: 'replacement characters', limit: 0.03, match: /\uFFFD/gu },
+  // A subset font that shipped no ToUnicode map: the glyphs draw correctly on
+  // screen and carry no meaning outside the file.
+  { name: 'private-use glyphs', limit: 0.02, match: /[\uE000-\uF8FF]|[\u{F0000}-\u{FFFFD}]|[\u{100000}-\u{10FFFD}]/gu },
+  { name: 'control characters', limit: 0.02, match: /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/gu },
+];
+
+function assessText(raw) {
+  const text = String(raw || '').replace(/\[Page \d+\]/g, '').trim();
+  if (!text) return { usable: false, reason: 'no text layer' };
+  // Short extractions are noisy to judge — a cover page of five words can look
+  // like anything — so only a real sample is second-guessed.
+  if (text.length < 200) return { usable: true };
+
+  const total = [...text].length;
+  for (const test of GARBLE_TESTS) {
+    const hits = (text.match(test.match) || []).length;
+    if (hits / total > test.limit) {
+      return { usable: false, reason: `${Math.round((hits / total) * 100)}% ${test.name}` };
+    }
+  }
+
+  // Anything that is a letter, number, mark, punctuation, symbol or space in
+  // any script counts as legible. What is left is the soup.
+  const legible = (text.match(/[\p{L}\p{N}\p{M}\p{P}\p{S}\s]/gu) || []).length;
+  if (legible / total < 0.6) {
+    return { usable: false, reason: `only ${Math.round((legible / total) * 100)}% of characters are readable` };
+  }
+  return { usable: true };
+}
+
 async function extractPdfText(buffer) {
   if (buffer.subarray(0, 5).toString('ascii') !== '%PDF-') throw new Error('does not appear to be a valid PDF');
   const { extractText } = await import('unpdf');
@@ -112,14 +159,33 @@ async function extractPdfText(buffer) {
     .map((pageText, index) => `[Page ${index + 1}]\n${normalizeText(pageText)}`)
     .join('\n\n')
     .trim();
-  if (!text.replace(/\[Page \d+\]/g, '').trim()) {
-    const { images, total, rendered } = await renderPdfPages(buffer);
+  const quality = assessText(text);
+  if (!quality.usable) {
+    let rendering;
+    try {
+      rendering = await renderPdfPages(buffer);
+    } catch (error) {
+      // Unreadable text still beats no attachment at all, so a render failure
+      // is only fatal when there was nothing to fall back to.
+      if (!text.replace(/\[Page \d+\]/g, '').trim()) {
+        throw new Error(`contains no selectable text and no pages could be rendered (${error.message})`);
+      }
+      return {
+        text: `[The text layer looks unreadable (${quality.reason}) and the pages could not be rendered`
+          + ` as images. What follows may be garbled.]\n\n${text}`,
+        pages: Number(result.totalPages) || pages.length,
+      };
+    }
+    const { images, total, rendered } = rendering;
     if (!images.length) throw new Error('contains no selectable text and no pages could be rendered');
+    // Say which of the two it was. "No text layer" about a document that
+    // plainly has one sends someone looking for the wrong problem.
+    const why = quality.reason === 'no text layer' ? 'no text layer' : `unreadable text layer, ${quality.reason}`;
     return {
       scanned: true,
       images,
       pages: total,
-      text: `[Scanned document: no text layer. ${rendered} of ${total} page(s) attached as images.`
+      text: `[Scanned document: ${why}. ${rendered} of ${total} page(s) attached as images.`
         + `${rendered < total ? ` Pages ${rendered + 1}-${total} were not rendered.` : ''}]`,
     };
   }
@@ -217,6 +283,7 @@ function validateImageAttachments(images, imageTypes, metadata = []) {
 }
 
 module.exports = {
+  assessText,
   MAX_ATTACHMENT_FILES,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_TEXT_CHARS,
