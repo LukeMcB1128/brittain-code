@@ -76,10 +76,12 @@ writers are classified risky and go through the same approval gate as
 
 Chat can use them too, which is the one exception to chat having no
 filesystem. It reaches only the files you attached that turn — by the name shown
-in the composer — and writes beside the source under the suffixed default, so
-there is no path for a model to point anywhere else. Attach a form, ask for it
-filled, and the result lands next to the original. A pasted file has no path on
-disk and stays read-only reference material.
+in the composer — and every edit lands in a single `-edited` file beside the
+original, which is never modified. Naming the attachment again reads that
+in-progress file rather than the pristine one, so a seven-page form can be
+filled a page at a time, across as many turns as it takes, and the work builds
+up instead of each pass erasing the last. A pasted file has no path on disk and
+stays read-only reference material.
 
 Two limits worth knowing. Body text cannot be edited: a PDF stores glyphs at
 coordinates rather than paragraphs, so changing a word mid-sentence means

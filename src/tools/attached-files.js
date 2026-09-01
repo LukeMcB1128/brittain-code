@@ -17,10 +17,20 @@
 // Code mode does not restrict: it already has write_file and a project to use
 // it on, so attachments are simply additional names it can refer to.
 
+const fs = require('fs');
 const path = require('path');
 
 let attached = [];
 let restricted = false;
+// Edits accumulate in one file beside the attachment. Without that, every call
+// read the untouched original and wrote the same output, so the second edit
+// silently erased the first: stamping a seven-page form worked page by page and
+// then only the last page survived.
+//
+// The name is derived, not remembered. A conversation spans many turns and the
+// attachment list is rebuilt on each one, so state held here would be lost
+// exactly when someone said "now do page 4" — deriving it means the work
+// continues from whatever is already on disk.
 
 // `files` is [{ name, path }]. A pasted image or a file dragged from another
 // application may have no path — those stay readable-as-context only, since
@@ -59,24 +69,46 @@ function describeAvailable() {
   return `Attached file${attached.length === 1 ? '' : 's'}: ${attached.map((file) => file.name).join(', ')}`;
 }
 
-// Resolve the file a tool was asked to read. In a restricted run this is the
-// only door: `fallback` is never consulted.
+function isWorkingCopy(candidate) {
+  const resolved = path.resolve(String(candidate || ''));
+  return attached.some((file) => path.resolve(workingCopyFor(file.path)) === resolved);
+}
+
+// The file edits are accumulating in for this attachment, created on first
+// write. One name for the whole conversation, whatever the operation: a person
+// filling in a form wants one filled form back, not a chain of -stamped,
+// -filled, -trimmed files they have to reassemble.
+function workingCopyFor(source) {
+  const extension = path.extname(source);
+  return path.join(path.dirname(source), path.basename(source, extension) + '-edited' + (extension || '.pdf'));
+}
+
+// Resolve the file a tool was asked to read. Naming the attachment reads the
+// working copy once one exists, because that is the current state of the
+// document — reading the pristine original would throw away every earlier edit.
 function resolveInput(requested, fallback) {
   const matched = match(requested);
-  if (matched) return matched;
+  if (matched) {
+    // Continue from the edited version when one exists. Reading the pristine
+    // original here is what threw away every earlier edit.
+    const inProgress = workingCopyFor(matched);
+    return fs.existsSync(inProgress) ? inProgress : matched;
+  }
+  // An output produced this turn is a legitimate input: chaining one edit into
+  // the next is the normal way to work through a document.
+  if (isWorkingCopy(requested)) return path.resolve(requested);
   if (restricted) {
     throw new Error(`In chat, files can only be worked on if you attached them. ${describeAvailable()}`);
   }
   return fallback(requested);
 }
 
-// Where a result may be written. Restricted runs cannot choose: the output
-// lands beside the source under the suffixed default, so there is no path for a
-// model to point somewhere else. Passing an empty output makes the caller use
-// that default.
-function resolveOutput(requested, fallback) {
-  if (restricted) return '';
+// Where a result is written. A restricted run cannot choose: everything lands
+// in the working copy beside the source, which is what makes edits accumulate
+// and also means there is no path for a model to aim anywhere else.
+function resolveOutput(requested, fallback, source = '') {
+  if (restricted) return source ? workingCopyFor(source) : '';
   return requested ? fallback(requested) : '';
 }
 
-module.exports = { setAttachedFiles, isRestricted, list, match, describeAvailable, resolveInput, resolveOutput };
+module.exports = { setAttachedFiles, isRestricted, list, match, describeAvailable, resolveInput, resolveOutput, workingCopyFor, isWorkingCopy };

@@ -207,10 +207,23 @@ function pdfInput(cwd, requested) {
   return attachedFiles.resolveInput(requested, (p) => resolveInside(cwd, p));
 }
 
-// Empty means "beside the source, under the suffixed default", which is what a
-// restricted run always gets: no path to point anywhere else.
-function pdfOutput(cwd, requested) {
-  return attachedFiles.resolveOutput(requested, (p) => resolveForWrite(cwd, p));
+// In a restricted run this is the working copy for `source`, so successive
+// edits build up in one file instead of each overwriting the last.
+function pdfOutput(cwd, requested, source) {
+  return attachedFiles.resolveOutput(requested, (p) => resolveForWrite(cwd, p), source);
+}
+
+// A tool that quietly does something other than what it was asked costs the
+// model a round trip to discover it, and it spent six of them working this out
+// by experiment. So when the output location is not the one requested, the
+// result says so and says why.
+function pdfNote(requested, actual) {
+  if (!attachedFiles.isRestricted()) return '';
+  const coerced = requested && path.resolve(requested) !== path.resolve(actual || '');
+  return '\n\nChat edits accumulate in this one file beside the original, and the'
+    + ' attachment itself is never modified. Pass it to the next call by the'
+    + ' attachment\'s name to keep building on it.'
+    + (coerced ? ` The requested output "${requested}" was not used: chat cannot write elsewhere.` : '');
 }
 
 function resolveInside(cwd, p) {
@@ -1591,30 +1604,36 @@ async function executeTool(name, args, cwd) {
     case 'pdf_info':
       return await pdf.info(pdfInput(cwd, args.path));
 
-    case 'pdf_fill_form':
-      return await pdf.fillForm(pdfInput(cwd, args.path), args.values, {
+    case 'pdf_fill_form': {
+      const source = pdfInput(cwd, args.path);
+      const out = pdfOutput(cwd, args.output, source);
+      return (await pdf.fillForm(source, args.values, {
         flatten: !!args.flatten,
-        output: pdfOutput(cwd, args.output),
-      });
+        output: out,
+      })) + pdfNote(args.output, out);
+    }
 
-    case 'pdf_stamp':
-      return await pdf.stamp(pdfInput(cwd, args.path), {
+    case 'pdf_stamp': {
+      const source = pdfInput(cwd, args.path);
+      const out = pdfOutput(cwd, args.output, source);
+      return (await pdf.stamp(source, {
         ...args,
         image: args.image ? pdfInput(cwd, args.image) : '',
-        output: pdfOutput(cwd, args.output),
-      });
+        output: out,
+      })) + pdfNote(args.output, out);
+    }
 
-    case 'pdf_pages':
-      return await pdf.pages(pdfInput(cwd, args.path), {
-        ...args,
-        output: pdfOutput(cwd, args.output),
-      });
+    case 'pdf_pages': {
+      const source = pdfInput(cwd, args.path);
+      const out = pdfOutput(cwd, args.output, source);
+      return (await pdf.pages(source, { ...args, output: out })) + pdfNote(args.output, out);
+    }
 
-    case 'pdf_merge':
-      return await pdf.merge(
-        (args.paths || []).map((file) => pdfInput(cwd, file)),
-        pdfOutput(cwd, args.output),
-      );
+    case 'pdf_merge': {
+      const sources = (args.paths || []).map((file) => pdfInput(cwd, file));
+      const out = pdfOutput(cwd, args.output, sources[0]);
+      return (await pdf.merge(sources, out)) + pdfNote(args.output, out);
+    }
 
     case 'write_file': {
       const p = resolveForWrite(cwd, args.path);

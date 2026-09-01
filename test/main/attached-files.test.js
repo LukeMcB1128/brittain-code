@@ -80,3 +80,70 @@ test('the dropped path comes from webUtils, since Electron 43 dropped File.path'
   // rather than failing the whole attachment.
   assert.match(preload, /catch \{ return ''; \}/);
 });
+
+// --- edits accumulate ---
+
+const fs = require('node:fs');
+const os = require('node:os');
+
+test('the second edit builds on the first instead of erasing it', async (t) => {
+  // The original failure: every call re-read the pristine attachment and wrote
+  // the same output, so stamping a seven-page form left only the last page.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attached-'));
+  t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); attached.setAttachedFiles([]); });
+
+  const source = path.join(dir, 'form.pdf');
+  fs.writeFileSync(source, '%PDF-1.4 original');
+  attached.setAttachedFiles([{ name: 'form.pdf', path: source }], { restrict: true });
+
+  // First write: reads the original, writes the working copy.
+  assert.equal(attached.resolveInput('form.pdf', escaped), source);
+  const out = attached.resolveOutput('', escaped, source);
+  assert.equal(out, path.join(dir, 'form-edited.pdf'));
+  fs.writeFileSync(out, '%PDF-1.4 page 3 stamped');
+
+  // Second write: reads what the first one produced.
+  assert.equal(attached.resolveInput('form.pdf', escaped), out, 'continues from the edited version');
+  assert.equal(attached.resolveOutput('', escaped, source), out, 'and keeps writing to the same file');
+  assert.equal(fs.readFileSync(source, 'utf8'), '%PDF-1.4 original', 'the attachment itself is never modified');
+});
+
+test('accumulation survives the next turn, when the attachment list is rebuilt', async (t) => {
+  // "now do page 4" arrives as a fresh turn. State held in memory would be gone
+  // exactly then, so the working copy is derived from what is on disk.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attached-'));
+  t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); attached.setAttachedFiles([]); });
+
+  const source = path.join(dir, 'form.pdf');
+  fs.writeFileSync(source, '%PDF-1.4 original');
+  fs.writeFileSync(path.join(dir, 'form-edited.pdf'), '%PDF-1.4 three pages done');
+
+  attached.setAttachedFiles([{ name: 'form.pdf', path: source }], { restrict: true });
+  assert.equal(attached.resolveInput('form.pdf', escaped), path.join(dir, 'form-edited.pdf'));
+});
+
+test('one file per document, whatever the operation', () => {
+  // Not a chain of -stamped, -filled, -trimmed files to reassemble by hand.
+  assert.equal(attached.workingCopyFor('/docs/lease.pdf'), path.join('/docs', 'lease-edited.pdf'));
+  assert.equal(attached.workingCopyFor('/docs/lease.PDF'), path.join('/docs', 'lease-edited.PDF'));
+});
+
+test('a working copy can be named directly as the next input', () => {
+  // Chaining one edit into the next is how you work through a document.
+  attached.setAttachedFiles([worksheet], { restrict: true });
+  const copy = attached.workingCopyFor(worksheet.path);
+  assert.ok(attached.isWorkingCopy(copy));
+  assert.equal(attached.resolveInput(copy, escaped), path.resolve(copy));
+  assert.equal(attached.isWorkingCopy('/tmp/somewhere-edited.pdf'), false, 'only for files that were attached');
+});
+
+test('the result explains a coerced output rather than ignoring it silently', () => {
+  // Six probing calls were spent discovering this by experiment.
+  const tools = fs.readFileSync(path.join(__dirname, '..', '..', 'tools.js'), 'utf8');
+  assert.match(tools, /function pdfNote\(requested, actual\)/);
+  assert.match(tools, /was not used: chat cannot write elsewhere/);
+  assert.match(tools, /edits accumulate in this one file/i);
+  for (const tool of ['fillForm', 'stamp', 'pages', 'merge']) {
+    assert.match(tools, new RegExp(`pdf\\.${tool}\\([\\s\\S]{0,200}?pdfNote\\(args\\.output, out\\)`), tool);
+  }
+});
