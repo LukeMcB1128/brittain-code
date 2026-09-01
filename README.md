@@ -45,7 +45,7 @@ If Ollama rejects malformed tool-call JSON, Brittain Code discards that call and
 
 Alongside the transcript, a saved chat records the models it used, the working directory, and whether the session ever ran with **online research enabled** — shown as an `ONLINE` marker in the session list. That provenance flag is a latch over the whole session rather than the state of the switch when the chat happened to be saved: research done an hour ago is still in the transcript after the toggle goes off, so a snapshot would file a session that plainly went online as local. It is stamped in the main process from the runs themselves, not from the sender.
 
-The current ONLINE switch is stored separately. A chat saved with the switch off reopens offline, even when its provenance marker says that it used research earlier. A chat saved with the switch on shows the network warning again before restoring access. Brand-new and older chats always start with the switch off.
+The current ONLINE switch is stored separately. A chat saved with the switch off reopens offline, even when its provenance marker says that it used research earlier. A chat saved with the switch on restores that state without another prompt. Brand-new and older chats always start with the switch off.
 
 ### Cloud models
 
@@ -143,13 +143,13 @@ The status bar shows: current state, context usage (tokens used vs the model's c
 
 The inference endpoint accepts an `http://` or `https://` base URL containing only a host and optional port, such as `http://127.0.0.1:9001`. **TEST** checks the endpoint's `/api/tags` response before saving. This supports servers that implement Ollama's `/api/tags`, `/api/show`, and `/api/chat` shapes; other provider protocols will need a provider adapter. A non-loopback endpoint sends prompts, attachment contents, and tool context to that server, so it is no longer local-only.
 
-Chats are saved automatically as individual JSON files in the application-data directory — `~/Library/Application Support/Brittain Code/` on macOS, `%APPDATA%\Brittain Code\` on Windows — under `chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar puts folder-free conversations under **GENERAL** and groups Code chats by project folder. Loading a chat restores its mode, model, directory, THINK, and AUTO-APPROVE states. It restores ONLINE RESEARCH only after the network warning is approved.
+Chats are saved automatically as individual JSON files in the application-data directory — `~/Library/Application Support/Brittain Code/` on macOS, `%APPDATA%\Brittain Code\` on Windows — under `chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar puts folder-free conversations under **GENERAL** and groups Code chats by project folder. Loading a chat restores its mode, model, directory, THINK, AUTO-APPROVE, and ONLINE RESEARCH states.
 
 The user message is saved before inference starts. You can open another saved chat or start a new chat while the model continues in the background. The sidebar marks each request as **RUNNING** or **QUEUED**. Requests run one at a time, which prevents two Code chats from editing the same project at once. Stream events carry their chat ID, so background output cannot appear in the chat that is currently open. Complete assistant messages and tool results are saved during long runs instead of only at the end.
 
 ## Online research
 
-**ONLINE RESEARCH** is an explicit switch. Turning it on warns that search queries and requested URLs leave your machine. A new or older chat always starts with it off. A chat saved with ONLINE on shows the same warning before it restores the switch. It exposes two additional model tools:
+**ONLINE RESEARCH** is an explicit switch. Turning it on warns that search queries and requested URLs leave your machine. A new or older chat always starts with it off. A chat saved with ONLINE on restores the switch when you return to it. It exposes two additional model tools:
 
 - `web_search` sends a redacted, length-limited query to DuckDuckGo's no-JavaScript HTML search. Optional domain filters and result caps are supported.
 - `web_fetch` retrieves a public HTTPS page as sanitized plain text. It rejects local/private/reserved destinations and URL credentials, validates every redirect, refuses non-text content, strips scripts and styles, and caps both downloads and returned text.

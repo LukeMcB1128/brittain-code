@@ -785,13 +785,10 @@ async function loadChat(chatId) {
   unreadChats.delete(chatId);
   const liveRun = chatRuns.get(chatId);
   if (liveRun) liveRun.unread = false;
-  // Provenance and permission are different facts. An old chat has no explicit
-  // switch snapshot and opens offline. A chat saved while ONLINE was on can
-  // restore it only after the user sees the normal network warning again.
-  onlineResearchToggle.checked = false;
-  if (saved.onlineResearchEnabled === true) {
-    onlineResearchToggle.checked = await confirmOnlineResearch();
-  }
+  // Provenance and permission are different facts. Restore the explicit switch
+  // snapshot without asking again. The warning belongs to the action that first
+  // enables ONLINE, not to routine navigation between already-saved chats.
+  onlineResearchToggle.checked = saved.onlineResearchEnabled === true;
   setAppMode(saved.mode === 'chat' ? 'chat' : 'code');
 
   // Push the stored conversation into the main process so the model continues from it.
@@ -887,6 +884,7 @@ function renderConversation(conversation) {
   currentSubCard = null;
   lastToolCard = null;
   missionCard = null;
+  const pendingToolCalls = [];
   conversation.forEach((msg, index) => {
     // Messages the app wrote to itself — the compaction block, a nudge back to
     // work — are not dialogue. Replaying them with YOU and MODEL labels claims
@@ -897,14 +895,20 @@ function renderConversation(conversation) {
       return;
     }
     if (msg.role === 'user') {
+      pendingToolCalls.length = 0;
       const imgs = (msg.images || []).map((b, i) => `data:${msg.imageTypes?.[i] || 'image/png'};base64,${b}`);
       const shownText = msg.displayContent || (msg.attachments?.length ? '(attached files)' : msg.content) || (imgs.length ? '(image)' : '');
       addMessage('user', shownText, imgs, msg.attachments || [], { message: msg, index });
     } else if (msg.role === 'assistant') {
       if (msg.thinking) addThinkingBlock(msg.thinking, 'THOUGHTS ▸');
       if (msg.content) renderMarkdown(addMessage('assistant', '', null, [], { message: msg, index }), msg.content);
+      for (const call of msg.tool_calls || []) pendingToolCalls.push(toolCallDetails(call));
     } else if (msg.role === 'tool') {
       const text = String(msg.content);
+      const matchedIndex = pendingToolCalls.findIndex((call) => (
+        (msg.tool_call_id && call.id === msg.tool_call_id) || call.name === msg.tool_name
+      ));
+      const call = matchedIndex >= 0 ? pendingToolCalls.splice(matchedIndex, 1)[0] : null;
       if (msg.tool_name === 'run_subagent') {
         // replay saved subagent reports as collapsed cards, like the live view
         const m = text.match(/^Subagent report \(([^,]+), (\d+) tool calls?\):\n?/);
@@ -922,8 +926,8 @@ function renderConversation(conversation) {
         decorateContextControls(card, msg, index);
         chat.appendChild(card);
       } else {
-        const replayDisplay = window.ToolNames ? window.ToolNames.displayToolName(msg.tool_name) : msg.tool_name;
-        addMessage('tool', `[${replayDisplay}] ` + (text.length > 300 ? text.slice(0, 300) + '…' : text), null, [], { message: msg, index });
+        const card = addToolCard(msg.tool_name || call?.name || 'tool', call?.args || {}, { message: msg, index });
+        finishToolCard(card, text, { denied: /denied by user|deferred by policy|parked/i.test(text) });
       }
     }
   });
@@ -1353,11 +1357,55 @@ function addMessage(role, text, images, attachments = [], context = null) {
   return body;
 }
 
+function toolCallDetails(call = {}) {
+  const name = call.function?.name || call.name || '';
+  let args = call.function?.arguments ?? call.arguments ?? {};
+  if (typeof args === 'string') {
+    try { args = JSON.parse(args); } catch { args = {}; }
+  }
+  return { id: call.id || '', name, args: args && typeof args === 'object' ? args : {} };
+}
+
+function addToolCard(name, args = {}, context = null) {
+  const displayName = window.ToolNames ? window.ToolNames.displayToolName(name) : name;
+  const card = document.createElement('div');
+  card.className = 'tool';
+  card.dataset.tool = name;
+  const head = document.createElement('div');
+  head.className = 'tool-head';
+  head.innerHTML = '<span></span><span class="args"></span><span class="status">running…</span>';
+  const nameEl = head.firstElementChild;
+  nameEl.textContent = displayName;
+  nameEl.title = name;
+  head.querySelector('.args').textContent = shortArgs(name, args);
+  head.addEventListener('click', () => {
+    if (card.classList.contains('has-result')) card.classList.toggle('collapsed');
+  });
+  card.appendChild(head);
+  if (context) decorateContextControls(card, context.message, context.index);
+  chat.appendChild(card);
+  return card;
+}
+
+function finishToolCard(card, result, { denied = false } = {}) {
+  if (!card) return;
+  card.classList.add(denied ? 'denied' : 'ok', 'has-result');
+  card.querySelector('.status').textContent = denied ? 'denied' : 'done';
+  const pre = document.createElement('pre');
+  pre.textContent = result;
+  card.appendChild(pre);
+  // Match the live display: successful output is one compact row, while a
+  // failure stays open so its useful error is not hidden.
+  const looksBad = denied || /error|traceback|exception|failed|timed out|not found|denied/i.test(String(result).slice(0, 300));
+  if (!looksBad) card.classList.add('collapsed');
+}
+
 function decorateContextControls(element, message, index) {
   if (!message || !Number.isInteger(index)) return;
   const canPin = message.role === 'user' || message.role === 'assistant';
   const canExclude = message.role === 'tool';
   if (!canPin && !canExclude) return;
+  element.classList.add('has-context-actions');
   element.classList.toggle('context-pinned', !!message.pinned);
   element.classList.toggle('context-excluded', !!message.excludedFromInference);
   const actions = document.createElement('span');
@@ -1643,23 +1691,7 @@ window.api.onToolCall(({ name, args }, route) => {
   $('tool-count').textContent = String(toolCount);
   const displayName = window.ToolNames ? window.ToolNames.displayToolName(name) : name;
   setState('tool: ' + displayName);
-
-  const card = document.createElement('div');
-  card.className = 'tool';
-  card.dataset.tool = name;
-  const head = document.createElement('div');
-  head.className = 'tool-head';
-  head.innerHTML = `<span></span><span class="args"></span><span class="status">running…</span>`;
-  const nameEl = head.firstElementChild;
-  nameEl.textContent = displayName;
-  nameEl.title = name;
-  head.querySelector('.args').textContent = shortArgs(name, args);
-  head.addEventListener('click', () => {
-    if (card.classList.contains('has-result')) card.classList.toggle('collapsed');
-  });
-  card.appendChild(head);
-  chat.appendChild(card);
-  lastToolCard = card;
+  lastToolCard = addToolCard(name, args);
   scrollDown();
 });
 
@@ -1669,14 +1701,7 @@ window.api.onToolResult(({ result, denied }, route) => {
   if (!routeIsVisible(route)) return;
   setState('working');
   if (!lastToolCard) return;
-  lastToolCard.classList.add(denied ? 'denied' : 'ok', 'has-result');
-  lastToolCard.querySelector('.status').textContent = denied ? 'denied' : 'done';
-  const pre = document.createElement('pre');
-  pre.textContent = result;
-  lastToolCard.appendChild(pre);
-  // collapse successful results; leave failures visible
-  const looksBad = denied || /error|traceback|exception|failed|timed out|not found|denied/i.test(String(result).slice(0, 300));
-  if (!looksBad) lastToolCard.classList.add('collapsed');
+  finishToolCard(lastToolCard, result, { denied });
   scrollDown();
 });
 

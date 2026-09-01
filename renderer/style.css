@@ -332,15 +332,6 @@ button:active { background: var(--border); }
 }
 .math-error { color: var(--text-dim); }
 
-/* replayed tool messages when loading an old chat */
-.msg.tool {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text-dim);
-  border-left: 2px solid var(--border);
-  padding: 4px 12px;
-}
-
 .msg.error {
   border-left: 2px solid var(--red);
   background: var(--bg-panel);
@@ -479,6 +470,8 @@ button:active { background: var(--border); }
   gap: 8px;
   align-items: baseline;
 }
+
+.tool.has-context-actions .tool-head { padding-right: 78px; }
 
 .tool .tool-head .status { margin-left: auto; font-size: 10px; color: var(--text-dim); }
 .tool.ok .tool-head .status { color: var(--green); }

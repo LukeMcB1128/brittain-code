@@ -58,9 +58,13 @@ test('both entry points latch it: the window and a headless run', () => {
   assert.match(main, /noteOnlineResearch\(!!payload\.onlineResearch\);/, 'runAgentTask');
 });
 
-test('reopening a chat separates provenance from permission and asks again', () => {
+test('reopening a chat restores its saved permission without asking again', () => {
   const app = read('renderer/app.js');
-  assert.match(app, /if \(saved\.onlineResearchEnabled === true\) \{\s*onlineResearchToggle\.checked = await confirmOnlineResearch\(\);/, 'only an explicit switch snapshot can restore ONLINE');
+  assert.match(app, /onlineResearchToggle\.checked = saved\.onlineResearchEnabled === true;/,
+    'only an explicit switch snapshot can restore ONLINE');
+  const load = app.slice(app.indexOf('async function loadChat'), app.indexOf('async function syncVisibleChatToMain'));
+  assert.doesNotMatch(load, /confirmOnlineResearch\(/,
+    'routine chat navigation must not repeat the enable warning');
   assert.match(app, /onlineResearchEverUsed: !!saved\.onlineResearch,/, 'the provenance flag remains separate');
   assert.match(app, /onlineResearchEnabled: onlineResearchToggle\.checked,/, 'save records the current switch state');
   assert.match(app, /onlineResearchToggle\.checked = false; \/\/ privacy boundary: never restore online access implicitly/, 'new sessions still start offline');
