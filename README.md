@@ -57,6 +57,29 @@ The key is kept in `credentials.json` rather than `settings.json`, encrypted aga
 
 Worth being clear about what changes: on a cloud provider **every message is sent to that endpoint**, including the contents of files the agent reads. With policy `roots` or MCP servers configured, that can reach well beyond the project folder. The sensitive-read invariant still refuses `.env` files and keys, and online research remains a separate switch, but the model itself now sees everything else. Prices come from the provider's own model listing rather than being typed in, so each turn ends with a quiet line showing what it cost and the tokens behind it, and `/cost` reports the running total for the conversation. Both appear only on a cloud provider: a local model has no bill, `/cost` is not offered in the command list, and a cloud model whose provider publishes no rates is reported as unpriced rather than as free — an unknown cost and a zero cost are different claims.
 
+### Editing PDFs
+
+Code mode has five PDF tools. `pdf_info` reports pages, sizes, and the form
+fields with their types and current values — call it first, since filling a
+field that does not exist is an error rather than a silent skip. `pdf_fill_form`
+sets AcroForm values, with an opt-in `flatten` to bake them in. `pdf_stamp`
+draws text or a PNG/JPEG at a position, measured in points from the top-left,
+which is how a signature gets onto a page and the only way to add content to a
+document with no form. `pdf_pages` rotates, deletes, extracts, or reorders using
+ranges like `1-3,7,12-`. `pdf_merge` concatenates.
+
+Every one of them writes to a new file beside the source by default — a PDF is
+usually the only copy of the thing and has no diff to recover from — so
+overwriting the original means naming it as `output` deliberately. All four
+writers are classified risky and go through the same approval gate as
+`write_file`.
+
+Two limits worth knowing. Body text cannot be edited: a PDF stores glyphs at
+coordinates rather than paragraphs, so changing a word mid-sentence means
+covering the old one and drawing new, which shows. And XFA forms (LiveCycle,
+some government documents) are a different format that cannot be filled —
+`pdf_info` says so rather than reporting zero fields and leaving you guessing.
+
 ### Scanned PDFs
 
 A PDF with no text layer — a photographed or scanned worksheet — used to be refused outright. Its pages are now rendered to images and attached the way any other image is, so a vision-capable model (`qwen2.5vl`, `llava`, `gemma3`) can read it. The attachment text says plainly that the document was a scan and how many pages were attached, so the model is never guessing at what it was given.

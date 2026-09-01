@@ -78,6 +78,7 @@
     "electron-updater": "^6.8.9",
     "katex": "^0.18.4",
     "mathjs": "^15.2.0",
+    "pdf-lib": "^1.17.1",
     "systeminformation": "^5.33.1",
     "unpdf": "^1.6.2"
   }

@@ -16,6 +16,7 @@ const dns = require('dns').promises;
 const { execFile, exec, spawn } = require('child_process');
 const { createToolPolicy } = require('./src/tools/policy');
 const workspace = require('./src/main/workspace');
+const pdf = require('./src/tools/pdf');
 const {
   findReferences,
   findSymbol,
@@ -741,6 +742,90 @@ const TOOL_DEFS = [
         type: 'object',
         properties: { path: { type: 'string', description: 'File path relative to the working directory' } },
         required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pdf_info',
+      description: 'Inspect a PDF: page count, page sizes, rotation, metadata, and the list of fillable form fields with their types and current values. Call this before pdf_fill_form so you fill fields that exist.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'Path to the PDF' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pdf_fill_form',
+      description: 'Set values on a PDF form\'s fields. Field names must match pdf_info exactly. Writes to a new "-filled" file beside the source unless output says otherwise. Only works on AcroForm PDFs; XFA forms cannot be filled — use pdf_stamp for those.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path to the PDF' },
+          values: { type: 'object', description: 'Field name to value. Checkboxes take true/false; dropdowns and radio groups take one of their listed options.' },
+          flatten: { type: 'boolean', description: 'Bake the values in so they are no longer editable. Cannot be undone. Default false.' },
+          output: { type: 'string', description: 'Where to write. Defaults to <name>-filled.pdf beside the source.' },
+        },
+        required: ['path', 'values'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pdf_stamp',
+      description: 'Draw text or a PNG/JPEG image at a position on one page — this is how you sign a PDF or annotate one that has no form fields. Coordinates are in points from the TOP-LEFT of the page; pdf_info reports each page size.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path to the PDF' },
+          page: { type: 'number', description: 'Page number, 1-based. Default 1.' },
+          x: { type: 'number', description: 'Points from the left edge' },
+          y: { type: 'number', description: 'Points from the top edge' },
+          text: { type: 'string', description: 'Text to draw. Provide this or image.' },
+          image: { type: 'string', description: 'Path to a PNG or JPEG to draw, e.g. a signature. Provide this or text.' },
+          size: { type: 'number', description: 'Font size in points for text, or drawn width in points for an image. Default 12.' },
+          opacity: { type: 'number', description: '0 to 1. Default 1.' },
+          output: { type: 'string', description: 'Where to write. Defaults to <name>-stamped.pdf beside the source.' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pdf_pages',
+      description: 'Rearrange pages: rotate, delete, extract a subset, or reorder. Pages are given as a 1-based list or ranges like "1-3,7,12-".',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path to the PDF' },
+          operation: { type: 'string', enum: ['rotate', 'delete', 'extract', 'reorder'], description: 'What to do. reorder writes the pages in exactly the order given.' },
+          pages: { type: 'string', description: 'Pages to act on, e.g. "1-3,7" or "all". For reorder this is the new order.' },
+          degrees: { type: 'number', description: 'Rotation in degrees, for operation=rotate. Default 90.' },
+          output: { type: 'string', description: 'Where to write. Defaults to a suffixed name beside the source.' },
+        },
+        required: ['path', 'operation', 'pages'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pdf_merge',
+      description: 'Combine two or more PDFs into one, in the order given.',
+      parameters: {
+        type: 'object',
+        properties: {
+          paths: { type: 'array', items: { type: 'string' }, description: 'PDFs to merge, in order. At least two.' },
+          output: { type: 'string', description: 'Where to write. Defaults to <first>-merged.pdf.' },
+        },
+        required: ['paths'],
       },
     },
   },
@@ -1490,6 +1575,34 @@ async function executeTool(name, args, cwd) {
       if (stat.size > 2_000_000) return `Error: file too large (${stat.size} bytes)`;
       return truncate(fs.readFileSync(p, 'utf8'));
     }
+    case 'pdf_info':
+      return await pdf.info(resolveInside(cwd, args.path));
+
+    case 'pdf_fill_form':
+      return await pdf.fillForm(resolveInside(cwd, args.path), args.values, {
+        flatten: !!args.flatten,
+        output: args.output ? resolveForWrite(cwd, args.output) : '',
+      });
+
+    case 'pdf_stamp':
+      return await pdf.stamp(resolveInside(cwd, args.path), {
+        ...args,
+        image: args.image ? resolveInside(cwd, args.image) : '',
+        output: args.output ? resolveForWrite(cwd, args.output) : '',
+      });
+
+    case 'pdf_pages':
+      return await pdf.pages(resolveInside(cwd, args.path), {
+        ...args,
+        output: args.output ? resolveForWrite(cwd, args.output) : '',
+      });
+
+    case 'pdf_merge':
+      return await pdf.merge(
+        (args.paths || []).map((file) => resolveInside(cwd, file)),
+        args.output ? resolveForWrite(cwd, args.output) : '',
+      );
+
     case 'write_file': {
       const p = resolveForWrite(cwd, args.path);
       fs.mkdirSync(path.dirname(p), { recursive: true });

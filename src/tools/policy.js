@@ -6,6 +6,13 @@ const DESTRUCTIVE_TOOLS = new Set(['revert_to_last_commit']);
 
 const RISKY_TOOLS = new Set([
   'write_file',
+  // Every PDF tool writes a file. They default to a new path beside the
+  // source, but the caller may name the source itself as the output, so they
+  // are gated like any other write.
+  'pdf_fill_form',
+  'pdf_stamp',
+  'pdf_pages',
+  'pdf_merge',
   'run_command',
   'run_project_check',
   'start_process',
@@ -54,6 +61,7 @@ const CODER_TOOL_NAMES = new Set([
   'browser_open', 'browser_snapshot', 'browser_click', 'browser_type',
   'browser_console', 'browser_screenshot', 'browser_close',
   'run_command', 'run_project_check', 'git_status', 'read_git_diff',
+  'pdf_info', 'pdf_fill_form', 'pdf_stamp', 'pdf_pages', 'pdf_merge',
 ]);
 
 const CHAT_TOOL_NAMES = new Set(['ask_user', 'calculate', 'remember', 'web_search', 'web_fetch']);
