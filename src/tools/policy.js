@@ -61,14 +61,14 @@ const CODER_TOOL_NAMES = new Set([
   'browser_open', 'browser_snapshot', 'browser_click', 'browser_type',
   'browser_console', 'browser_screenshot', 'browser_close',
   'run_command', 'run_project_check', 'git_status', 'read_git_diff',
-  'pdf_info', 'pdf_fill_form', 'pdf_stamp', 'pdf_pages', 'pdf_merge',
+  'pdf_info', 'pdf_render', 'pdf_fill_form', 'pdf_stamp', 'pdf_pages', 'pdf_merge',
 ]);
 
 // Chat has no filesystem, and these are the one exception: they act only on
 // files the person attached this turn, enforced in src/tools/attached-files.js.
 const CHAT_TOOL_NAMES = new Set([
   'ask_user', 'calculate', 'remember', 'web_search', 'web_fetch',
-  'pdf_info', 'pdf_fill_form', 'pdf_stamp', 'pdf_pages', 'pdf_merge',
+  'pdf_info', 'pdf_render', 'pdf_fill_form', 'pdf_stamp', 'pdf_pages', 'pdf_merge',
 ]);
 
 const SUBMIT_IMPLEMENTATION_PLAN_TOOL = {

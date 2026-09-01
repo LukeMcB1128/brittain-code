@@ -283,6 +283,8 @@ function validateImageAttachments(images, imageTypes, metadata = []) {
 }
 
 module.exports = {
+  renderPdfPages,
+  MAX_RENDERED_PAGES,
   assessText,
   MAX_ATTACHMENT_FILES,
   MAX_ATTACHMENT_BYTES,

@@ -156,7 +156,7 @@ test('folder-free Chat mode receives conversation, memory, calculator, and resea
   const names = new Set(CHAT_TOOLS.map((definition) => definition.function.name));
   assert.deepEqual(names, CHAT_TOOL_NAMES);
   assert.deepEqual([...names].sort(), [
-    'ask_user', 'calculate', 'pdf_fill_form', 'pdf_info', 'pdf_merge', 'pdf_pages', 'pdf_stamp',
+    'ask_user', 'calculate', 'pdf_fill_form', 'pdf_info', 'pdf_merge', 'pdf_pages', 'pdf_render', 'pdf_stamp',
     'remember', 'web_fetch', 'web_search',
   ]);
   // Chat still has no filesystem. The PDF tools are the one exception and they

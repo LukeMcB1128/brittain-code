@@ -18,6 +18,7 @@ const { createToolPolicy } = require('./src/tools/policy');
 const workspace = require('./src/main/workspace');
 const pdf = require('./src/tools/pdf');
 const attachedFiles = require('./src/tools/attached-files');
+const renderedPages = require('./src/tools/rendered-pages');
 const {
   findReferences,
   findSymbol,
@@ -142,6 +143,14 @@ function registerProjectMemory(cwd) {
 // turns, and a stale copy here would either over- or under-grant; asking each
 // time means there is no lifecycle to get wrong. Absent provider = project only.
 let rootProvider = null;
+// Whether the model running this turn can see images. main.js owns the answer;
+// without it pdf_render would spend a context window rendering pages for a
+// model that will only be told an image was attached.
+let visionCheck = async () => false;
+function setVisionCheck(fn) {
+  visionCheck = typeof fn === 'function' ? fn : async () => false;
+}
+
 function setRootProvider(fn) {
   rootProvider = typeof fn === 'function' ? fn : null;
 }
@@ -779,6 +788,21 @@ const TOOL_DEFS = [
       parameters: {
         type: 'object',
         properties: { path: { type: 'string', description: 'Path to the PDF' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pdf_render',
+      description: 'Render pages of a PDF as images and look at them. Use this when a PDF\'s extracted text is missing, garbled, or does not match what the document plainly contains, and when you need to see layout — where the blank lines and boxes actually are — before stamping onto a page. Requires a model that can see images.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path to the PDF' },
+          pages: { type: 'string', description: 'Pages to render, e.g. "1", "2-4". Defaults to the first page. Each page costs a lot of context, so ask for the fewest you need.' },
+        },
         required: ['path'],
       },
     },
@@ -1603,6 +1627,12 @@ async function executeTool(name, args, cwd) {
     }
     case 'pdf_info':
       return await pdf.info(pdfInput(cwd, args.path));
+
+    case 'pdf_render':
+      return await pdf.render(pdfInput(cwd, args.path), args.pages, {
+        queue: renderedPages.queue,
+        canSee: visionCheck,
+      });
 
     case 'pdf_fill_form': {
       const source = pdfInput(cwd, args.path);
@@ -2619,7 +2649,9 @@ module.exports = {
   initTools,
   setCommandSandbox,
   setRootProvider,
+  setVisionCheck,
   setAttachedFiles: attachedFiles.setAttachedFiles,
+  takeRenderedPages: renderedPages.take,
   TOOL_DEFS,
   RISKY_TOOLS,
   SUBAGENT_TOOLS,

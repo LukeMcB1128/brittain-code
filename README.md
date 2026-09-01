@@ -66,9 +66,14 @@ sets AcroForm values, with an opt-in `flatten` to bake them in. `pdf_stamp`
 draws text or a PNG/JPEG at a position, measured in points from the top-left,
 which is how a signature gets onto a page and the only way to add content to a
 document with no form. `pdf_pages` rotates, deletes, extracts, or reorders using
-ranges like `1-3,7,12-`. `pdf_merge` concatenates.
+ranges like `1-3,7,12-`. `pdf_merge` concatenates. `pdf_render` renders pages as
+images and puts them in front of the model — for a document whose text layer is
+missing or garbled, and for seeing where the blank lines actually are before
+stamping onto them, since coordinates derived from a page size are guesses until
+something looks at the page. It needs a vision-capable model and says so plainly
+when the selected one cannot see, rather than rendering pages nothing will read.
 
-Every one of them writes to a new file beside the source by default — a PDF is
+Every one of them that writes does so to a new file beside the source by default — a PDF is
 usually the only copy of the thing and has no diff to recover from — so
 overwriting the original means naming it as `output` deliberately. All four
 writers are classified risky and go through the same approval gate as
