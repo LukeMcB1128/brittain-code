@@ -60,15 +60,19 @@
   };
 
   function displayToolName(name) {
-    const raw = String(name || '').trim();
-    if (!raw) return '';
-    if (DISPLAY_NAMES[raw]) return DISPLAY_NAMES[raw];
-    // Fallback: snake_case / kebab-case -> Title Case for unmapped tools.
-    return raw
-      .split(/[_\-\s]+/)
-      .filter(Boolean)
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
+  const raw = String(name || '').trim();
+  if (!raw) return '';
+  if (DISPLAY_NAMES[raw]) return DISPLAY_NAMES[raw];
+  // Fallback: snake_case / kebab-case -> Title Case for unmapped tools.
+  const words = raw
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1));
+  // MCP tools: keep the "mcp" prefix fully capitalized (e.g. "MCP Fetch").
+  if (/^mcp/i.test(raw) && words.length) {
+    words[0] = words[0].toUpperCase();
+  }
+    return words.join(' ');
   }
 
   const api = { displayToolName, DISPLAY_NAMES };
