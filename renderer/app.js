@@ -83,6 +83,9 @@ let coderModel = localStorage.getItem('coderModel') || 'qwen3-coder:30b'; // set
 let elapsedTimer = null;
 let toolCount = 0;
 let currentChatId = null;
+const chatRuns = new Map(); // chatId -> { runId, state, startedAt, unread }
+const unreadChats = new Set();
+let chatSubmitPending = false;
 let appSettings = null;
 let settingsDefaults = null;
 let currentModels = [];
@@ -92,6 +95,46 @@ let pendingPlanDraft = null;
 let pendingPlanCard = null;
 let updateState = null;
 let currentModelDetails = [];
+
+const newIdentity = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+const currentChatRun = () => currentChatId ? chatRuns.get(currentChatId) : null;
+const hasChatRuns = () => chatRuns.size > 0;
+const routeIsVisible = (route) => !route?.chatId || route.chatId === currentChatId;
+
+function syncChatRunControls() {
+  if (busy) return;
+  clearInterval(elapsedTimer);
+  elapsedTimer = null;
+  const run = currentChatRun();
+  sendBtn.classList.toggle('hidden', !!run);
+  stopBtn.classList.toggle('hidden', !run);
+  if (!run) {
+    $('elapsed').textContent = '0.0s';
+    setState('idle');
+    return;
+  }
+  setState(run.state === 'queued' ? 'queued' : 'working');
+  const updateElapsed = () => {
+    $('elapsed').textContent = ((Date.now() - run.startedAt) / 1000).toFixed(1) + 's';
+  };
+  updateElapsed();
+  elapsedTimer = setInterval(updateElapsed, 100);
+}
+
+function setChatRun(chatId, runId, state) {
+  chatRuns.set(chatId, { runId, state, startedAt: Date.now(), unread: false });
+  syncChatRunControls();
+  loadChatHistory();
+}
+
+function markChatRunState(route, state) {
+  if (!route?.chatId) return;
+  const run = chatRuns.get(route.chatId);
+  if (!run || (route.runId && run.runId !== route.runId)) return;
+  run.state = state;
+  if (route.chatId !== currentChatId) run.unread = true;
+  if (route.chatId === currentChatId) syncChatRunControls();
+}
 
 const activeModelPicker = window.ModelPicker?.create(modelSelect, {
   emptyLabel: 'No models available',
@@ -205,7 +248,7 @@ function renderUpdateState(state) {
 }
 
 async function installReadyUpdate() {
-  if (busy) return addError('Stop the active run before you restart to update.');
+  if (busy || hasChatRuns()) return addError('Stop active and queued runs before you restart to update.');
   const version = updateState?.version ? ` ${updateState.version}` : '';
   if (!(await confirmDialog(`Restart Brittain Code and install version${version}?`, { okLabel: 'RESTART' }))) return;
   const result = await window.api.installUpdate();
@@ -413,10 +456,10 @@ function setAppMode(mode, persist = true, refreshHistory = true) {
 }
 
 async function chooseAppMode(mode) {
-  if (busy || mode === appMode) return;
-  const conversation = await window.api.getConversation();
+  if (busy || chatSubmitPending || mode === appMode) return;
+  const conversation = hasChatRuns() ? [] : await window.api.getConversation();
   const consequences = [];
-  if (conversation.length) consequences.push('Your current chat is already saved in History.');
+  if (conversation.length || currentChatId) consequences.push('Your current chat is already saved in History.');
   if (pendingPlanDraft) consequences.push('The current plan draft will be cancelled.');
   if (consequences.length && !(await confirmDialog(
     `Switch to ${mode.toUpperCase()} and start a new session?\n\n${consequences.join('\n')}`,
@@ -424,7 +467,7 @@ async function chooseAppMode(mode) {
   ))) return;
   if (pendingPlanDraft) clearPendingPlan();
   setAppMode(mode);
-  if (conversation.length) await newSession();
+  if (conversation.length || currentChatId) await newSession();
   else {
     applySessionDefaults();
     showStartupMessage();
@@ -522,7 +565,7 @@ window.api.onCheckpointState(({ available, cwd: ckptCwd }) => {
 });
 
 undoBtn.addEventListener('click', async () => {
-  if (busy || undoBtn.disabled) return;
+  if (busy || hasChatRuns() || undoBtn.disabled) return;
   if (!(await confirmDialog('Restore all files in this folder to the checkpoint taken before the last run?\n\n(The current state is checkpointed first — press UNDO again to re-apply the run.)', { okLabel: 'RESTORE' }))) return;
   const res = await window.api.undoCheckpoint(cwd);
   if (res.ok) {
@@ -534,7 +577,8 @@ undoBtn.addEventListener('click', async () => {
 });
 
 // ---------- REVIEW mode: keep/discard a run ----------
-window.api.onRunReport(({ cwd: runCwd, mutations }) => {
+window.api.onRunReport(({ cwd: runCwd, mutations }, route) => {
+  if (!routeIsVisible(route)) return;
   if (!reviewToggle.checked || !mutations || runCwd !== cwd) return;
   $('review-detail').textContent = `${mutations} file${mutations === 1 ? '' : 's'} changed — keep this run's changes, or discard to restore the pre-run checkpoint.`;
   $('review-bar').classList.remove('hidden');
@@ -609,6 +653,9 @@ function renderChatItem(c) {
   {
     const item = document.createElement('div');
     item.className = 'chat-item' + (c.id === currentChatId ? ' active' : '');
+    const liveRun = chatRuns.get(c.id);
+    if (liveRun) item.classList.add('running');
+    if (liveRun?.unread || unreadChats.has(c.id)) item.classList.add('unread');
 
     const main = document.createElement('div');
     main.className = 'chat-item-main';
@@ -634,6 +681,15 @@ function renderChatItem(c) {
       online.textContent = 'ONLINE';
       online.title = 'This session ran with online research enabled at some point.';
       main.appendChild(online);
+    }
+    if (liveRun) {
+      const state = document.createElement('span');
+      state.className = 'chat-run-state';
+      state.textContent = liveRun.state === 'queued' ? 'QUEUED' : 'RUNNING';
+      state.title = liveRun.state === 'queued'
+        ? 'This request will start after the active model run finishes.'
+        : 'The model is working in this chat.';
+      main.appendChild(state);
     }
 
     const del = document.createElement('button');
@@ -718,7 +774,7 @@ async function saveChat() {
 }
 
 async function loadChat(chatId) {
-  if (busy) return;
+  if (busy || chatSubmitPending) return;
   const res = await window.api.historyLoad(chatId);
   if (!res.ok) return addError('Could not load chat: ' + res.error);
   clearPendingPlan();
@@ -726,6 +782,9 @@ async function loadChat(chatId) {
   // Set this before any rendering or mode/directory synchronization so a
   // mission card can never be carried over from the previously open chat.
   currentChatId = chatId;
+  unreadChats.delete(chatId);
+  const liveRun = chatRuns.get(chatId);
+  if (liveRun) liveRun.unread = false;
   // Provenance and permission are different facts. An old chat has no explicit
   // switch snapshot and opens offline. A chat saved while ONLINE was on can
   // restore it only after the user sees the normal network warning again.
@@ -774,10 +833,33 @@ async function loadChat(chatId) {
 
 
   loadChatHistory(); // refresh active highlight
+  syncChatRunControls();
   if (!cwdChanged) refreshGit();
 }
 
+async function syncVisibleChatToMain() {
+  if (!currentChatId || hasChatRuns() || busy) return;
+  const res = await window.api.historyLoad(currentChatId);
+  if (!res.ok) return;
+  const saved = res.chat;
+  const lc = await window.api.loadConversation(
+    saved.conversation || [],
+    saved.model || modelSelect.value,
+    saved.runMetrics,
+    saved.contextState,
+    {
+      cwd: saved.cwd || cwd,
+      mode: saved.mode === 'chat' ? 'chat' : 'code',
+      onlineResearch: onlineResearchToggle.checked,
+      onlineResearchEverUsed: !!saved.onlineResearch,
+    },
+  );
+  if (!lc.deferred) updateContextBar(lc.approxTokens, lc.contextLength);
+}
+
 async function deleteChat(chatId) {
+  if (chatSubmitPending) return;
+  if (chatRuns.has(chatId)) return addError('Stop this chat before deleting it.');
   await window.api.historyDelete(chatId);
   loadChatHistory();
 
@@ -799,6 +881,11 @@ async function deleteChat(chatId) {
 
 function renderConversation(conversation) {
   chat.innerHTML = '';
+  currentAssistant = null;
+  currentAssistantRaw = '';
+  currentThinking = null;
+  currentSubCard = null;
+  lastToolCard = null;
   missionCard = null;
   conversation.forEach((msg, index) => {
     // Messages the app wrote to itself — the compaction block, a nudge back to
@@ -1036,14 +1123,18 @@ input.addEventListener('keydown', (e) => {
   }
 });
 sendBtn.addEventListener('click', send);
-stopBtn.addEventListener('click', () => window.api.stop());
+stopBtn.addEventListener('click', () => {
+  const run = currentChatRun();
+  window.api.stop(run ? { chatId: currentChatId, runId: run.runId } : undefined);
+});
 
 async function send() {
   const text = input.value.trim();
   const missionControl = /^\/mission\s+(?:status|stop|resume)\s*$/i.test(text);
   if (pendingAttachmentReads) return addError('Wait for the attachment to finish loading.');
-  if ((!text && !attachmentCount()) || (busy && !missionControl)) return;
+  if ((!text && !attachmentCount()) || chatSubmitPending || currentChatRun() || (busy && !missionControl)) return;
   if (text.startsWith('/')) {
+    if (hasChatRuns()) return addError('Wait for the active or queued chat requests to finish before using commands.');
     input.value = '';
     if (text === '/help' || text.includes('/auto') || text.includes('/commit') || text.includes('/model') || text.includes('/subagent') || text.includes('/coder') || text.includes('/plan') || text.includes('/review') || text.includes('/orchestrate') || text.includes('/mission') || text.includes('/mcp')) {
       hideStartupMessage();
@@ -1072,41 +1163,53 @@ async function send() {
     ...pendingImages.map(({ name, type, size }) => ({ name, type, size, kind: 'image' })),
     ...pendingFiles.map(({ name, type, size }) => ({ name, type, size, kind: type === 'application/pdf' ? 'pdf' : 'text' })),
   ];
+  if (!currentChatId) currentChatId = newIdentity('chat');
+  const runChatId = currentChatId;
+  const runId = newIdentity('run');
+  chatSubmitPending = true;
+  sendBtn.disabled = true;
+  let res;
+  try {
+    res = await window.api.send({
+      chatId: runChatId,
+      runId,
+      model: modelSelect.value,
+      subModel,
+      text,
+      mode: appMode,
+      cwd: appMode === 'code' ? cwd : null,
+      autoApprove: appMode === 'code' && runsUnattended(),
+      autoBranch: appMode === 'code' && autoBranchToggle.checked,
+      onlineResearch: onlineResearchToggle.checked,
+      think: thinkToggle.checked,
+      images,
+      imageTypes,
+      imageAttachments,
+      files,
+      history: {
+        title: text ? (text.length > 30 ? text.slice(0, 30) + '...' : text) : shownAttachments.map((entry) => entry.name).join(', '),
+        think: thinkToggle.checked,
+        autoApprove: runsUnattended(),
+        coderModel,
+        contextState: { projectPath: '', pinnedFiles: [] },
+      },
+    });
+  } catch (error) {
+    res = { ok: false, error: String(error.message || error) };
+  } finally {
+    chatSubmitPending = false;
+    sendBtn.disabled = false;
+  }
+
+  if (!res.ok) return addError(res.error);
   pendingImages = [];
   pendingFiles = [];
   renderAttachmentPreview();
-
   input.value = '';
   hideStartupMessage();
   addMessage('user', text || '(attached files)', shownImages, shownAttachments);
-  startRun();
-
-  const res = await window.api.send({
-    model: modelSelect.value,
-    subModel,
-    text,
-    mode: appMode,
-    cwd: appMode === 'code' ? cwd : null,
-    autoApprove: appMode === 'code' && runsUnattended(),
-    autoBranch: appMode === 'code' && autoBranchToggle.checked,
-    onlineResearch: onlineResearchToggle.checked,
-    think: thinkToggle.checked,
-    images,
-    imageTypes,
-    imageAttachments,
-    files,
-  });
-
-  if (!res.ok) addError(res.error);
-
-  // Save before accepting another send so two first-message saves cannot race.
-  try {
-    await saveChat();
-  } catch (err) {
-    addError('Failed to save chat: ' + (err.message || err));
-  } finally {
-    endRun();
-  }
+  setChatRun(runChatId, res.runId || runId, res.queued ? 'queued' : 'running');
+  if (res.queued) addInfo('Request queued. It will start when the active model run finishes.');
 }
 
 function startRun() {
@@ -1133,6 +1236,7 @@ function endRun() {
   setState('idle');
   clearInterval(elapsedTimer);
   refreshGit(); // the run may have changed files
+  syncChatRunControls();
 }
 
 function setState(s) {
@@ -1265,7 +1369,7 @@ function decorateContextControls(element, message, index) {
     button.title = title;
     button.addEventListener('click', async (event) => {
       event.stopPropagation();
-      if (busy) return addError('Wait for the current run to finish before changing context controls.');
+      if (busy || hasChatRuns()) return addError('Wait for active and queued runs to finish before changing context controls.');
       const nextValue = !currentValue();
       const result = await window.api.contextControl({ action, index, value: nextValue });
       if (!result.ok) return addError(result.error);
@@ -1378,7 +1482,8 @@ $('settings-save-key')?.addEventListener('click', async () => {
 // What the turn cost, as a quiet line under the answer. Only ever sent on a
 // cloud provider, so its presence is the signal — the renderer does not need to
 // know which provider is selected.
-window.api.onTurnCost(({ text, sessionText }) => {
+window.api.onTurnCost(({ text, sessionText }, route) => {
+  if (!routeIsVisible(route)) return;
   const line = document.createElement('div');
   line.className = 'msg info turn-cost';
   line.textContent = text;
@@ -1387,7 +1492,9 @@ window.api.onTurnCost(({ text, sessionText }) => {
   scrollDown();
 });
 
-window.api.onRunDecisions(addDecisionLog);
+window.api.onRunDecisions((decision, route) => {
+  if (routeIsVisible(route)) addDecisionLog(decision);
+});
 
 // A run someone started from Discord or a trigger drives this window's output
 // but not its controls, so without this the app sits at "idle" while text
@@ -1432,7 +1539,8 @@ function finalizeThinking() {
   currentThinking = null;
 }
 
-window.api.onThinking((t) => {
+window.api.onThinking((t, route) => {
+  if (!routeIsVisible(route)) return;
   if (!currentThinking) {
     const block = addThinkingBlock('', 'THINKING… ▸');
     block.wrap.classList.add('live');
@@ -1443,15 +1551,22 @@ window.api.onThinking((t) => {
 });
 
 // info notices pushed from main (loop progress, verifier verdicts, auto-compact)
-window.api.onInfo((text) => addInfo(text));
+window.api.onInfo((text, route) => {
+  if (routeIsVisible(route)) addInfo(text);
+  else if (route?.chatId) markChatRunState(route, 'running');
+});
 
 // status-bar state pushed from main (loop iteration, verifying, compacting)
-window.api.onState((text) => setState(text));
+window.api.onState((text, route) => {
+  if (route?.chatId) markChatRunState(route, 'running');
+  if (routeIsVisible(route)) setState(text);
+});
 
 // ---------- subagent cards ----------
 let currentSubCard = null;
 
-window.api.onSubagent((d) => {
+window.api.onSubagent((d, route) => {
+  if (!routeIsVisible(route)) return;
   if (d.phase === 'start') {
     finalizeThinking();
     finalizeAssistant();
@@ -1498,7 +1613,8 @@ window.api.onSubagent((d) => {
 
 // The fallback tool-call parser recovered calls from raw markup that already
 // streamed into the current bubble — swap in the cleaned text (or drop the bubble).
-window.api.onCleanContent((text) => {
+window.api.onCleanContent((text, route) => {
+  if (!routeIsVisible(route)) return;
   if (!currentAssistant) return;
   if (text) {
     currentAssistantRaw = text;
@@ -1511,14 +1627,16 @@ window.api.onCleanContent((text) => {
 });
 
 // ---------- stream events ----------
-window.api.onToken((t) => {
+window.api.onToken((t, route) => {
+  if (!routeIsVisible(route)) return;
   finalizeThinking();
   if (!currentAssistant) { currentAssistant = addMessage('assistant', ''); currentAssistantRaw = ''; }
   currentAssistantRaw += t;
   scheduleMarkdownRender(); // live markdown, rather than raw text until the run ends
 });
 
-window.api.onToolCall(({ name, args }) => {
+window.api.onToolCall(({ name, args }, route) => {
+  if (!routeIsVisible(route)) return;
   finalizeThinking();
   finalizeAssistant(); // markdown-render the finished bubble; next tokens start a fresh one
   toolCount++;
@@ -1547,7 +1665,8 @@ window.api.onToolCall(({ name, args }) => {
 
 let lastToolCard = null;
 
-window.api.onToolResult(({ result, denied }) => {
+window.api.onToolResult(({ result, denied }, route) => {
+  if (!routeIsVisible(route)) return;
   setState('working');
   if (!lastToolCard) return;
   lastToolCard.classList.add(denied ? 'denied' : 'ok', 'has-result');
@@ -1575,7 +1694,8 @@ function updateContextBar(contextTokens, contextLength) {
   fill.id = 'ctx-fill';
 }
 
-window.api.onStats(({ contextTokens, contextLength, tokPerSec, scope }) => {
+window.api.onStats(({ contextTokens, contextLength, tokPerSec, scope }, route) => {
+  if (!routeIsVisible(route)) return;
   // The bar is the current persisted conversation. Provider and planner
   // samples describe one short-lived inference and can decrease because of
   // cache reuse or missing usage fields.
@@ -1590,8 +1710,34 @@ window.api.onStats(({ contextTokens, contextLength, tokPerSec, scope }) => {
   }
 });
 
-window.api.onDone(() => {
+window.api.onDone(async (result, route) => {
+  if (route?.chatId) {
+    const run = chatRuns.get(route.chatId);
+    if (!run || (route.runId && run.runId !== route.runId)) return;
+    chatRuns.delete(route.chatId);
+    if (route.chatId !== currentChatId) unreadChats.add(route.chatId);
+    await loadChatHistory();
+    if (route.chatId === currentChatId) {
+      const saved = await window.api.historyLoad(route.chatId);
+      if (saved.ok) {
+        renderConversation(saved.chat.conversation || []);
+        const savedContext = saved.chat.runMetrics?.context;
+        if (savedContext?.limit) updateContextBar(savedContext.tokens || 0, savedContext.limit);
+      }
+      if (result && !result.ok) addError(result.error || 'The model run failed.');
+      syncChatRunControls();
+      refreshGit();
+    } else if (!hasChatRuns()) {
+      if (currentChatId) await syncVisibleChatToMain();
+      else await window.api.reset();
+    }
+    return;
+  }
   if (busy) setState('idle');
+  else if (!hasChatRuns()) {
+    if (currentChatId) await syncVisibleChatToMain();
+    else await window.api.reset();
+  }
 });
 
 function missionStatusText(mission) {
@@ -1946,8 +2092,10 @@ document.addEventListener('click', (event) => {
 });
 
 async function newSession() {
-  if (busy) return;
-  await window.api.reset();
+  if (busy || chatSubmitPending) return;
+  // A background chat owns main's live conversation until its run finishes.
+  // Starting another visible chat must not reset that state from underneath it.
+  if (!hasChatRuns()) await window.api.reset();
   clearPendingPlan(false);
   compactWarned = false;
   chat.innerHTML = '';
@@ -1960,6 +2108,7 @@ async function newSession() {
   setState('idle');
   currentChatId = null;
   applySessionDefaults();
+  syncChatRunControls();
   loadChatHistory(); // clear active highlight
   showStartupMessage();
 }
@@ -3203,8 +3352,8 @@ async function showContextInspector() {
   if (!res.ok) return addError(res.error || 'Failed to inspect context.');
 
   const handleControl = async (payload) => {
-    if (busy) {
-      addError('Wait for the current run to finish before changing context controls.');
+    if (busy || hasChatRuns()) {
+      addError('Wait for active and queued runs to finish before changing context controls.');
       return false;
     }
     const ctrlRes = await window.api.contextControl(payload);
@@ -3328,6 +3477,9 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (!$('settings-modal').classList.contains('hidden')) hideSettings();
     else if (!$('overlay').classList.contains('hidden')) hideOverlay();
-    else if (busy) window.api.stop();
+    else if (busy || currentChatRun()) {
+      const run = currentChatRun();
+      window.api.stop(run ? { chatId: currentChatId, runId: run.runId } : undefined);
+    }
   }
 });

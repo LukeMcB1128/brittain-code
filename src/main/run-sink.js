@@ -68,14 +68,14 @@ function summarizeArgs(args) {
   return shown ? `(${shown})` : '';
 }
 
-function createRunSink({ window, targets = ['renderer'], transcriptPath = '', now = () => new Date() } = {}) {
+function createRunSink({ window, targets = ['renderer'], transcriptPath = '', now = () => new Date(), rendererRoute = () => null } = {}) {
   let active = new Set(targets);
   let currentTranscript = transcriptPath;
   const defaults = { targets: [...targets], transcriptPath };
   let written = 0;
   let dropped = 0;
 
-  function toRenderer(channel, payload) {
+  function toRenderer(channel, payload, routeOverride) {
     const win = typeof window === 'function' ? window() : window;
     // A destroyed or absent window is an ordinary condition once runs can start
     // without one, not an error worth throwing from inside a loop.
@@ -83,7 +83,9 @@ function createRunSink({ window, targets = ['renderer'], transcriptPath = '', no
       dropped += 1;
       return;
     }
-    win.webContents.send(channel, payload);
+    // Route metadata is a second argument so existing renderer and test
+    // consumers that read only the payload keep the same contract.
+    win.webContents.send(channel, payload, routeOverride === undefined ? (rendererRoute?.() || null) : routeOverride);
   }
 
   function toTranscript(channel, payload) {
@@ -101,8 +103,8 @@ function createRunSink({ window, targets = ['renderer'], transcriptPath = '', no
     }
   }
 
-  function emit(channel, payload) {
-    if (active.has('renderer')) toRenderer(channel, payload);
+  function emit(channel, payload, routeOverride) {
+    if (active.has('renderer')) toRenderer(channel, payload, routeOverride);
     if (active.has('file')) toTranscript(channel, payload);
   }
 

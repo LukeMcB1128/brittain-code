@@ -88,13 +88,17 @@ test('every window entry point declares its session', () => {
   const main = read('main.js');
   // Without this a Discord run would leave its conversation active and the
   // next thing typed in the app would land in it.
-  for (const handler of ['chat:send', 'chat:loop', 'chat:reset', 'chat:load', 'chat:compact', 'chat:plan', 'chat:orchestrate', 'chat:export']) {
+  for (const handler of ['chat:loop', 'chat:reset', 'chat:load', 'chat:compact', 'chat:plan', 'chat:orchestrate', 'chat:export']) {
     const at = main.indexOf(`ipcMain.handle('${handler}'`);
     assert.ok(at > 0, `${handler} should exist`);
-    // A wider window than you might expect: chat:send now refuses a concurrent
-    // run before it touches session state at all.
+    // Some handlers do validation before they enter the window session.
     assert.match(main.slice(at, at + 900), /enterSession\('window'\)/, `${handler} must declare its session`);
   }
+  // Normal sends are accepted and saved before their serial worker starts.
+  // The worker, not the accepting IPC handler, owns the live session.
+  const chatJob = main.slice(main.indexOf('async function executeChatJob'), main.indexOf('async function executeChatJob') + 900);
+  assert.match(chatJob, /loadChatJob\(job\);/);
+  assert.match(chatJob, /enterSession\('window'\);/);
   // chat:get is the exception: it reads without switching, because it is
   // called while other sessions are mid-run.
   assert.match(main, /ipcMain\.handle\('chat:get', \(\) => \(/);

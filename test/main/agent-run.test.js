@@ -39,7 +39,7 @@ test('a request arriving while busy is queued rather than refused', () => {
   // lives in one predicate, because two places asked it differently and the
   // queue livelocked when they disagreed.
   assert.match(body, /if \(runInFlight\(\)\) \{/);
-  assert.match(read('main.js'), /return !!currentAbort \|\| !!currentRun \|\| !!activeEventRoute \|\| activeMission\?\.status === 'running';/);
+  assert.match(read('main.js'), /return !!activeChatJob \|\| !!currentAbort \|\| !!currentRun \|\| !!activeEventRoute \|\| activeMission\?\.status === 'running';/);
 });
 
 test('/agent always branches, checkpoints, and reports', () => {
@@ -87,7 +87,7 @@ test('the decision log renders inline rather than as a panel', () => {
   const app = read('renderer/app.js');
   assert.match(app, /function addDecisionLog\(/);
   assert.match(app, /document\.createElement\('details'\)/, 'one foldable block per run');
-  assert.match(app, /window\.api\.onRunDecisions\(addDecisionLog\)/);
+  assert.match(app, /window\.api\.onRunDecisions\(\(decision, route\) => \{\s*if \(routeIsVisible\(route\)\) addDecisionLog\(decision\);\s*\}\);/);
   // Decision J chose inline over a panel: no new markup in index.html.
   assert.doesNotMatch(read('renderer/index.html'), /decision-log/);
 });

@@ -55,7 +55,7 @@ test('a compacted record is marked so the next compaction carries it forward', (
   // Both bookkeeping markers are stripped on the way out: compactionRecord so
   // the next compaction can find the prior record, meta so the renderer can
   // tell machine-written messages from dialogue. Neither is the model's business.
-  assert.match(source('main.js'), /excludedFromInference, compactionRecord, meta, \.\.\.message/,
+  assert.match(source('main.js'), /excludedFromInference, compactionRecord, meta, pendingRunId, clientRunId, \.\.\.message/,
     'the markers must be stripped before messages reach the model');
 });
 
@@ -72,7 +72,9 @@ test('session identity resets when the conversation is cleared or replaced', () 
   // not waiting to be restored the next time something switches back to it.
   assert.match(main, /ipcMain\.handle\('chat:reset', \(\) => \{[\s\S]{0,160}?newSessionId\(\);/);
   assert.match(main, /ipcMain\.handle\('chat:reset'[\s\S]{0,160}?sessions\.forget\('window'\);/);
-  assert.match(main, /ipcMain\.handle\('chat:load'[\s\S]{0,120}newSessionId\(\);/);
+  assert.match(main, /ipcMain\.handle\('chat:load'[\s\S]{0,700}newSessionId\(\);/);
+  assert.match(main, /ipcMain\.handle\('chat:load'[\s\S]{0,220}if \(runInFlight\(\)\)/,
+    'loading another chat during a run must not replace the active conversation');
 });
 
 test('/ledger is wired from the renderer through preload to main', () => {

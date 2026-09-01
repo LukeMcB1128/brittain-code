@@ -128,7 +128,7 @@ function stripOldImages(msgs) {
 }
 
 function modelReadyMessages(msgs) {
-  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, pinned, excludedFromInference, compactionRecord, meta, ...message }) => {
+  return stripOldImages(msgs).map(({ displayContent, attachments, imageTypes, pinned, excludedFromInference, compactionRecord, meta, pendingRunId, clientRunId, ...message }) => {
     if (excludedFromInference && message.role === 'tool') {
       return { ...message, content: '[Tool result content excluded from inference by the user.]' };
     }
@@ -161,10 +161,14 @@ function fitToWindow(msgs, maxTokens) {
 
 let win = null;
 let activeMission = null;
+// Ordinary window chats can keep running after the user opens another saved
+// chat. Every renderer event carries this identity so it cannot land in the
+// chat that happens to be visible at that moment.
+let rendererRunRoute = null;
 // Where run output goes. The window is resolved at send time rather than
 // captured, so a window that appears, disappears, or never exists at all is an
 // ordinary condition for a run rather than a crash inside a loop.
-const sink = createRunSink({ window: () => win });
+const sink = createRunSink({ window: () => win, rendererRoute: () => rendererRunRoute });
 
 // Provider credentials, encrypted against the OS keychain where one exists.
 const secrets = createSecretStore({
@@ -234,6 +238,9 @@ function recoverMission() {
 // ---------- conversation state (lives in main so tool messages stay in history) ----------
 let conversation = [];            // ollama-format messages, excluding system
 let conversationView = { model: '', cwd: '', mode: 'code', onlineResearch: false };
+const queuedChatRuns = [];
+const stagingChatRuns = new Set();
+let activeChatJob = null;
 
 function rememberConversationView(view = {}) {
   conversationView = {
@@ -262,7 +269,7 @@ function runInFlight() {
   // currentRun covers checkpoint preparation before the abort controller is
   // installed. activeEventRoute covers final history and delivery work after
   // it is removed. The full lifecycle is one exclusive operation.
-  return !!currentAbort || !!currentRun || !!activeEventRoute || activeMission?.status === 'running';
+  return !!activeChatJob || !!currentAbort || !!currentRun || !!activeEventRoute || activeMission?.status === 'running';
 }
 
 function enterSession(key) {
@@ -495,7 +502,7 @@ let activeEventSequence = 0;
 function tapRunEvents() {
   const originalEmit = sink.emit;
   sink.emit = (channel, payload, routeOverride) => {
-    originalEmit(channel, payload);
+    originalEmit(channel, payload, routeOverride);
     const route = routeOverride === undefined ? activeEventRoute : routeOverride;
     const metadata = route ? { ...route, sequence: ++activeEventSequence } : null;
     for (const listener of runEventListeners) {
@@ -1770,6 +1777,10 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
       if (toolCalls.length) assistantMsg.tool_calls = toolCalls;
       exhaustedWithToolCalls = toolCalls.length > 0;
       conversation.push(assistantMsg);
+      // Save complete messages, not token fragments. A long tool loop can now
+      // survive navigation and an app restart without waiting for the final
+      // answer before its progress reaches disk.
+      await persistActiveChatConversation();
       // One event per completed assistant message, carrying the model's own
       // words and nothing else. The window renders prose from the token stream,
       // which is far too chatty to relay anywhere else; a client with no screen
@@ -1955,6 +1966,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
         const lastParked = currentRun?.parked?.length ? currentRun.parked[currentRun.parked.length - 1] : null;
         if (lastParked && lastParked.messageIndex === -1) lastParked.messageIndex = conversation.length - 1;
       }
+      await persistActiveChatConversation();
       if (failureDirectives.size) {
         conversation.push({
           role: 'user',
@@ -2129,16 +2141,102 @@ function contentWithAttachments(text, attachments) {
   return parts.join('\n\n');
 }
 
-ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, think, images, imageTypes, imageAttachments, files, subModel, onlineResearch, autoBranch }) => {
-  // A run started elsewhere — Discord, a trigger — does not put this window
-  // into its busy state, so nothing stopped someone typing here while one was
-  // already going. Two loops then shared one conversation and one abort
-  // controller, and the window's message landed in whichever session happened
-  // to be active. Refuse instead.
-  if (runInFlight()) {
-    return { ok: false, error: 'Something is already running. Stop it first, or wait for it to finish.' };
+function fallbackChatTitle(text, attachments = []) {
+  const source = String(text || '').trim() || attachments.map((entry) => entry.name).filter(Boolean).join(', ') || 'Chat';
+  return source.length > 30 ? source.slice(0, 30) + '...' : source;
+}
+
+function previewChatMessage(payload) {
+  const message = {
+    role: 'user',
+    content: String(payload.text || '').trim(),
+    displayContent: String(payload.text || '').trim(),
+    pendingRunId: payload.runId,
+  };
+  const imageMetadata = Array.isArray(payload.imageAttachments) ? payload.imageAttachments : [];
+  const fileMetadata = (Array.isArray(payload.files) ? payload.files : [])
+    .map(({ name, type, size }) => ({ name, type, size, kind: type === 'application/pdf' ? 'pdf' : 'text' }));
+  const attachments = [
+    ...imageMetadata.map((entry) => ({ ...entry, kind: 'image' })),
+    ...fileMetadata,
+  ];
+  if (attachments.length) message.attachments = attachments;
+  if (Array.isArray(payload.images) && payload.images.length) message.images = payload.images;
+  if (Array.isArray(payload.imageTypes) && payload.imageTypes.length) message.imageTypes = payload.imageTypes;
+  return message;
+}
+
+async function saveChatJob(job, messages = conversation, { staged = false } = {}) {
+  const loaded = historyStore.load(job.chatId);
+  const existing = loaded.ok ? loaded.chat : {};
+  const history = job.history || {};
+  const attachments = [...(job.imageAttachments || []), ...(job.files || [])];
+  return historyStore.save({
+    ...existing,
+    ...history,
+    id: job.chatId,
+    title: existing.title && existing.title !== 'Chat'
+      ? existing.title
+      : history.title || fallbackChatTitle(job.text, attachments),
+    model: job.model || existing.model || '',
+    mode: job.mode === 'chat' ? 'chat' : 'code',
+    cwd: job.mode === 'chat' ? '' : (job.cwd || ''),
+    onlineResearch: !!existing.onlineResearch || (!staged && sessionOnlineResearch),
+    onlineResearchEnabled: !!job.onlineResearch,
+    runMetrics: staged ? existing.runMetrics : usage,
+    contextState: staged ? (existing.contextState || history.contextState) : contextState,
+    subModel: job.subModel || existing.subModel || '',
+    coderModel: history.coderModel || existing.coderModel || '',
+    timestamp: new Date().toISOString(),
+  }, messages);
+}
+
+async function stageChatJob(job) {
+  const loaded = historyStore.load(job.chatId);
+  const messages = loaded.ok && Array.isArray(loaded.chat.conversation)
+    ? [...loaded.chat.conversation]
+    : [];
+  if (!messages.some((message) => message.pendingRunId === job.runId)) {
+    messages.push(previewChatMessage(job));
   }
+  return saveChatJob(job, messages, { staged: true });
+}
+
+async function clearStagedChatJob(job) {
+  const loaded = historyStore.load(job.chatId);
+  if (!loaded.ok || !Array.isArray(loaded.chat.conversation)) return;
+  const messages = loaded.chat.conversation.map((message) => {
+    if (message.pendingRunId !== job.runId) return message;
+    const { pendingRunId: _pendingRunId, ...clean } = message;
+    return clean;
+  });
+  await saveChatJob(job, messages, { staged: true });
+}
+
+function loadChatJob(job) {
+  const loaded = historyStore.load(job.chatId);
+  newSessionId();
+  conversation = loaded.ok && Array.isArray(loaded.chat.conversation) ? loaded.chat.conversation : [];
+  contextState = normalizeContextState(loaded.ok ? loaded.chat.contextState : job.history?.contextState);
+  usage = loaded.ok && loaded.chat.runMetrics ? restoreUsage(loaded.chat.runMetrics) : freshUsage();
+  sessionOnlineResearch = !!(loaded.ok && loaded.chat.onlineResearch);
+  sessionSpend = emptyCostTotals();
+  rememberConversationView({ model: job.model, cwd: job.cwd, mode: job.mode, onlineResearch: job.onlineResearch });
+  const pendingIndex = conversation.findIndex((message) => message.pendingRunId === job.runId);
+  const stagedMessage = pendingIndex >= 0 ? conversation[pendingIndex] : previewChatMessage(job);
+  if (pendingIndex >= 0) conversation.splice(pendingIndex, 1);
+  return stagedMessage;
+}
+
+async function persistActiveChatConversation() {
+  if (!activeChatJob) return;
+  try { await saveChatJob(activeChatJob); } catch {}
+}
+
+async function executeChatJob(job) {
+  const { model, text, mode, cwd, autoApprove, think, images, imageTypes, imageAttachments, files, subModel, onlineResearch, autoBranch } = job;
   enterSession('window');
+  loadChatJob(job);
   const runMode = mode === 'chat' ? 'chat' : 'code';
   rememberConversationView({ model, cwd, mode: runMode, onlineResearch });
   rememberLastModel(model);
@@ -2189,6 +2287,7 @@ ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, th
     role: 'user',
     content: contentWithAttachments(text, fileAttachments),
     displayContent: String(text || '').trim(),
+    clientRunId: job.runId,
   };
   const allImages = [...validatedImages.images, ...scannedPages];
   if (allImages.length) userMsg.images = allImages;
@@ -2201,6 +2300,7 @@ ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, th
   ];
   if (attachmentMetadata.length) userMsg.attachments = attachmentMetadata;
   conversation.push(userMsg);
+  await persistActiveChatConversation();
   emitPersistedConversationContext(model, contextLength);
   stopRequested = false;
   currentAbort = new AbortController();
@@ -2219,7 +2319,73 @@ ipcMain.handle('chat:send', async (_e, { model, text, mode, cwd, autoApprove, th
     finishRunMetrics(runStartedAt, stopRequested ? 'stopped' : runOutcome);
     try { await publishPersistedConversationContext(model); } catch {}
     currentAbort = null;
-    sink.done();
+    await persistActiveChatConversation();
+  }
+}
+
+async function drainChatRuns() {
+  if (runInFlight() || !queuedChatRuns.length) return;
+  const job = queuedChatRuns.shift();
+  activeChatJob = job;
+  rendererRunRoute = { chatId: job.chatId, runId: job.runId };
+  sink.state('starting');
+  let result;
+  try {
+    result = await executeChatJob(job);
+  } catch (error) {
+    result = { ok: false, error: String(error.message || error) };
+  }
+  if (!result?.ok && !conversation.some((message) => (
+    message.clientRunId === job.runId || message.pendingRunId === job.runId
+  ))) {
+    const preview = previewChatMessage(job);
+    delete preview.pendingRunId;
+    preview.clientRunId = job.runId;
+    conversation.push(preview);
+  }
+  conversation = conversation.map((message) => {
+    if (message.clientRunId !== job.runId && message.pendingRunId !== job.runId) return message;
+    const { clientRunId: _clientRunId, pendingRunId: _pendingRunId, ...clean } = message;
+    return clean;
+  });
+  await persistActiveChatConversation();
+  const completedRoute = { chatId: job.chatId, runId: job.runId };
+  activeChatJob = null;
+  rendererRunRoute = null;
+  sink.emit('stream:done', result, completedRoute);
+  setImmediate(() => {
+    drainChatRuns().catch(() => {});
+    drainRunQueue().catch(() => {});
+  });
+}
+
+ipcMain.handle('chat:send', async (_e, payload = {}) => {
+  const chatId = payload.chatId ? safeChatId(payload.chatId) : '';
+  const runId = (payload.runId ? safeChatId(payload.runId) : '') || `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const runMode = payload.mode === 'chat' ? 'chat' : 'code';
+  if (!chatId) return { ok: false, error: 'The chat does not have an ID.' };
+  if (!payload.model) return { ok: false, error: 'Select a model first.' };
+  if (runMode === 'code' && !payload.cwd) return { ok: false, error: 'Pick a working directory first.' };
+  if ((payload.images?.length || 0) + (payload.files?.length || 0) > MAX_ATTACHMENT_FILES) {
+    return { ok: false, error: `Attach at most ${MAX_ATTACHMENT_FILES} files at once.` };
+  }
+  if (stagingChatRuns.has(chatId)
+    || activeChatJob?.chatId === chatId
+    || queuedChatRuns.some((job) => job.chatId === chatId)) {
+    return { ok: false, error: 'This chat already has a running or queued request.' };
+  }
+
+  const job = { ...payload, chatId, runId, mode: runMode };
+  stagingChatRuns.add(chatId);
+  try {
+    const staged = await stageChatJob(job);
+    if (!staged.ok) return staged;
+    const queued = runInFlight() || queuedChatRuns.length > 0;
+    queuedChatRuns.push(job);
+    setImmediate(() => drainChatRuns().catch(() => {}));
+    return { ok: true, accepted: true, queued, chatId, runId };
+  } finally {
+    stagingChatRuns.delete(chatId);
   }
 });
 
@@ -3822,9 +3988,12 @@ async function runAgentTask(payload = {}) {
     // Do not make a person wait for the minute scheduler after the active run
     // finishes. setImmediate lets the current caller receive its final result
     // before the next queued run starts emitting events.
-    setImmediate(() => drainRunQueue().catch((err) => {
-      sink.emit('stream:info', `Queued run failed: ${String(err.message || err)}`);
-    }));
+    setImmediate(() => {
+      drainChatRuns().catch(() => {});
+      drainRunQueue().catch((err) => {
+        sink.emit('stream:info', `Queued run failed: ${String(err.message || err)}`);
+      });
+    });
   }
   return { ok: true, runId: run.id, status, content: finalContent, ...summary };
 }
@@ -4443,7 +4612,22 @@ function preview(s) {
 }
 
 // ---------- misc ipc ----------
-ipcMain.on('chat:stop', () => {
+ipcMain.on('chat:stop', async (_event, target = {}) => {
+  const wantedChat = target?.chatId ? safeChatId(target.chatId) : '';
+  const wantedRun = target?.runId ? safeChatId(target.runId) : '';
+  const hasTarget = !!(wantedChat || wantedRun);
+  const queuedIndex = hasTarget
+    ? queuedChatRuns.findIndex((job) => (
+      (!wantedChat || job.chatId === wantedChat) && (!wantedRun || job.runId === wantedRun)
+    ))
+    : -1;
+  if (queuedIndex >= 0) {
+    const [cancelled] = queuedChatRuns.splice(queuedIndex, 1);
+    await clearStagedChatJob(cancelled);
+    sink.emit('stream:done', { ok: true, stopped: true, queued: true }, { chatId: cancelled.chatId, runId: cancelled.runId });
+    return;
+  }
+  if (hasTarget && ((wantedChat && activeChatJob?.chatId !== wantedChat) || (wantedRun && activeChatJob?.runId !== wantedRun))) return;
   if (activeMission?.status === 'running') updateMission({ currentPhase: 'stopping', lastEvent: 'Stopping after the current operation.' });
   stopRequested = true;
   if (currentAbort) currentAbort.abort();
@@ -4778,6 +4962,13 @@ ipcMain.handle('context:control', (_e, payload = {}) => {
 });
 
 ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextState, view = {}) => {
+  if (runInFlight()) {
+    const loadedConversation = Array.isArray(msgs) ? msgs : [];
+    const approxTokens = estimateContextTokens(modelReadyMessages(loadedConversation), { model })
+      + fixedOverheadTokens(view.cwd, model, view.mode, !!view.onlineResearch);
+    const contextLength = model ? await effectiveContext(model) : 0;
+    return { ok: true, deferred: true, approxTokens, contextLength };
+  }
   enterSession('window');
   newSessionId();
   // Loading a transcript starts a new live session, but its provenance must

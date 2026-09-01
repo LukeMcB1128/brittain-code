@@ -145,6 +145,8 @@ The inference endpoint accepts an `http://` or `https://` base URL containing on
 
 Chats are saved automatically as individual JSON files in the application-data directory — `~/Library/Application Support/Brittain Code/` on macOS, `%APPDATA%\Brittain Code\` on Windows — under `chats/` (with an `index.json` for the sidebar). They survive app updates and rebuilds, and are never included in the built app. The sidebar puts folder-free conversations under **GENERAL** and groups Code chats by project folder. Loading a chat restores its mode, model, directory, THINK, and AUTO-APPROVE states. It restores ONLINE RESEARCH only after the network warning is approved.
 
+The user message is saved before inference starts. You can open another saved chat or start a new chat while the model continues in the background. The sidebar marks each request as **RUNNING** or **QUEUED**. Requests run one at a time, which prevents two Code chats from editing the same project at once. Stream events carry their chat ID, so background output cannot appear in the chat that is currently open. Complete assistant messages and tool results are saved during long runs instead of only at the end.
+
 ## Online research
 
 **ONLINE RESEARCH** is an explicit switch. Turning it on warns that search queries and requested URLs leave your machine. A new or older chat always starts with it off. A chat saved with ONLINE on shows the same warning before it restores the switch. It exposes two additional model tools:

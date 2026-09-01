@@ -12,9 +12,21 @@ function fakeWindow() {
     sent,
     destroyed: false,
     isDestroyed() { return this.destroyed; },
-    webContents: { send: (channel, payload) => sent.push({ channel, payload }) },
+    webContents: { send: (channel, payload, route) => sent.push({ channel, payload, route }) },
   };
 }
+
+test('renderer events carry chat identity without changing their payload', () => {
+  const win = fakeWindow();
+  const route = { chatId: 'chat-a', runId: 'run-a' };
+  const sink = createRunSink({ window: win, rendererRoute: () => route });
+  sink.token('hello');
+  assert.equal(win.sent[0].payload, 'hello');
+  assert.deepEqual(win.sent[0].route, route);
+
+  sink.emit('stream:done', { ok: true }, { chatId: 'chat-b', runId: 'run-b' });
+  assert.deepEqual(win.sent[1].route, { chatId: 'chat-b', runId: 'run-b' });
+});
 
 test('a windowed run still sends the same channels and payloads', () => {
   const win = fakeWindow();

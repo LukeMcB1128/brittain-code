@@ -16,7 +16,7 @@ test('messages the app wrote to itself are marked as such', () => {
 });
 
 test('the marker never reaches the model', () => {
-  assert.match(read('main.js'), /compactionRecord, meta, \.\.\.message/);
+  assert.match(read('main.js'), /compactionRecord, meta, pendingRunId, clientRunId, \.\.\.message/);
 });
 
 test('a marked message renders as a folded context block, not as a person talking', () => {

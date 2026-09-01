@@ -173,7 +173,7 @@ test('general attachments are wired from the picker through local extraction and
   assert.match(renderer, /AttachmentDrop\.filesFromTransfer\(e\.dataTransfer\)/);
   assert.match(renderer, /attachmentSlotsUsed\(\) >= MAX_ATTACHMENTS/);
   assert.match(renderer, /if \(pendingAttachmentReads\) return addError/);
-  assert.match(renderer, /files,\n\s+\}\);/);
+  assert.match(renderer, /imageAttachments,\s*files,\s*history: \{/);
   assert.match(renderer, /msg\.attachments \|\| \[\]/);
   assert.match(main, /extractFileAttachments\(files/);
   assert.match(main, /contentWithAttachments\(text, fileAttachments\)/);

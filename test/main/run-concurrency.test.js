@@ -9,7 +9,7 @@ test('one predicate decides whether the agent is busy', () => {
   // The drain asked a narrower question than the thing it was handing work to,
   // which is what let the two disagree.
   const main = read('main.js');
-  assert.match(main, /function runInFlight\(\) \{[\s\S]{0,300}return !!currentAbort \|\| !!currentRun \|\| !!activeEventRoute \|\| activeMission\?\.status === 'running';/);
+  assert.match(main, /function runInFlight\(\) \{[\s\S]{0,300}return !!activeChatJob \|\| !!currentAbort \|\| !!currentRun \|\| !!activeEventRoute \|\| activeMission\?\.status === 'running';/);
 });
 
 test('the queue does not dequeue work it cannot start', () => {
@@ -27,27 +27,41 @@ test('the queue does not dequeue work it cannot start', () => {
 test('a finished run starts the next queued request without waiting a minute', () => {
   const main = read('main.js');
   const task = main.slice(main.indexOf('async function runAgentTask'), main.indexOf("ipcMain.handle('agent:run'"));
-  assert.match(task, /setImmediate\(\(\) => drainRunQueue\(\)/);
-  assert.ok(task.indexOf('activeEventRoute = null') < task.indexOf('setImmediate(() => drainRunQueue()'),
+  assert.match(task, /setImmediate\(\(\) => \{\s*drainChatRuns\(\)/);
+  assert.match(task, /drainRunQueue\(\)/);
+  assert.ok(task.indexOf('activeEventRoute = null') < task.indexOf('setImmediate(() => {'),
     'the finished run must release its event route before the next run starts');
 });
 
 test('run ownership lasts through final history and delivery work', () => {
   const main = read('main.js');
-  assert.match(main, /return !!currentAbort \|\| !!currentRun \|\| !!activeEventRoute/);
+  assert.match(main, /return !!activeChatJob \|\| !!currentAbort \|\| !!currentRun \|\| !!activeEventRoute/);
   assert.match(main, /status: 'finishing'/);
 });
 
-test('the window cannot start a second run on top of one already going', () => {
-  // A run started elsewhere does not set this window's busy state, so nothing
-  // stopped a send landing mid-run. Two loops then shared one conversation and
-  // one abort controller.
+test('window chats are saved first and then execute through one serial queue', () => {
   const main = read('main.js');
-  const send = main.slice(main.indexOf("ipcMain.handle('chat:send'"), main.indexOf("ipcMain.handle('chat:send'") + 900);
-  assert.match(send, /if \(runInFlight\(\)\) \{/);
-  assert.match(send, /Something is already running\./);
-  // Refused before it touches session state.
-  assert.ok(send.indexOf('runInFlight()') < send.indexOf("enterSession('window')"));
+  const send = main.slice(main.indexOf("ipcMain.handle('chat:send'"), main.indexOf("ipcMain.handle('chat:send'") + 1800);
+  assert.match(send, /const staged = await stageChatJob\(job\);/);
+  assert.match(send, /queuedChatRuns\.push\(job\);/);
+  assert.ok(send.indexOf('stageChatJob(job)') < send.indexOf('queuedChatRuns.push(job)'), 'the user message must be durable before the request is queued');
+  assert.match(send, /stagingChatRuns\.has\(chatId\)/, 'a second click cannot enter while the first durable save is pending');
+  assert.match(send, /runInFlight\(\) \|\| queuedChatRuns\.length > 0/, 'a request behind an admitted job must report itself as queued');
+  const drain = main.slice(main.indexOf('async function drainChatRuns'), main.indexOf('async function drainChatRuns') + 1200);
+  assert.match(drain, /if \(runInFlight\(\) \|\| !queuedChatRuns\.length\) return;/);
+  assert.match(drain, /activeChatJob = job;/);
+  assert.match(drain, /message\.clientRunId === job\.runId \|\| message\.pendingRunId === job\.runId/,
+    'a preparation failure must keep one saved user message, not add a duplicate');
+});
+
+test('stop targets one queued chat without changing the global stop action', () => {
+  const main = read('main.js');
+  const stop = main.slice(main.indexOf("ipcMain.on('chat:stop'"), main.indexOf("ipcMain.handle('chat:reset'"));
+  assert.match(stop, /const hasTarget = !!\(wantedChat \|\| wantedRun\);/);
+  assert.match(stop, /const queuedIndex = hasTarget/,
+    'only a targeted stop can remove a queued chat');
+  assert.match(stop, /if \(hasTarget && \(\(wantedChat/,
+    'a targeted stop must not abort a different active run');
 });
 
 test('the window is told when something else is driving it', () => {
