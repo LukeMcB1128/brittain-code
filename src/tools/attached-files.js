@@ -1,7 +1,7 @@
 'use strict';
 
-// The files a person attached to this turn, and whether the run may touch
-// anything else.
+// The files a person attached to this conversation, and whether the run may
+// touch anything else.
 //
 // Chat mode has no filesystem. Its whole tool list is ask_user, calculate,
 // remember, web_search and web_fetch — it cannot read a file, let alone write
@@ -11,8 +11,12 @@
 // So chat is widened by exactly one step: it may act on the files the person
 // themselves dropped into the composer, and nowhere else. Not the working
 // directory, not a granted root, not a path the model invented — the specific
-// documents a human handed it this turn. A model that asks for anything else
-// gets an error listing what it actually has.
+// documents a human handed it. A model that asks for anything else gets an
+// error listing what it actually has.
+//
+// "Handed it" means anywhere in the conversation, not only the newest message:
+// main.js accumulates them per session. Scoping to the current turn meant a
+// follow-up without a re-attach made the document disappear mid-task.
 //
 // Code mode does not restrict: it already has write_file and a project to use
 // it on, so attachments are simply additional names it can refer to.
@@ -27,10 +31,8 @@ let restricted = false;
 // silently erased the first: stamping a seven-page form worked page by page and
 // then only the last page survived.
 //
-// The name is derived, not remembered. A conversation spans many turns and the
-// attachment list is rebuilt on each one, so state held here would be lost
-// exactly when someone said "now do page 4" — deriving it means the work
-// continues from whatever is already on disk.
+// The name is derived rather than remembered, so the work continues from
+// whatever is already on disk — across turns, and across a restart.
 
 // `files` is [{ name, path }]. A pasted image or a file dragged from another
 // application may have no path — those stay readable-as-context only, since
@@ -69,9 +71,14 @@ function describeAvailable() {
   return `Attached file${attached.length === 1 ? '' : 's'}: ${attached.map((file) => file.name).join(', ')}`;
 }
 
+function deriveWorkingName(source) {
+  const extension = path.extname(source);
+  return path.join(path.dirname(source), path.basename(source, extension) + '-edited' + (extension || '.pdf'));
+}
+
 function isWorkingCopy(candidate) {
   const resolved = path.resolve(String(candidate || ''));
-  return attached.some((file) => path.resolve(workingCopyFor(file.path)) === resolved);
+  return attached.some((file) => path.resolve(deriveWorkingName(file.path)) === resolved);
 }
 
 // The file edits are accumulating in for this attachment, created on first
@@ -79,8 +86,12 @@ function isWorkingCopy(candidate) {
 // filling in a form wants one filled form back, not a chain of -stamped,
 // -filled, -trimmed files they have to reassemble.
 function workingCopyFor(source) {
-  const extension = path.extname(source);
-  return path.join(path.dirname(source), path.basename(source, extension) + '-edited' + (extension || '.pdf'));
+  // Already the working copy, so keep writing to it. The caller passes the
+  // *resolved* input, which is the working copy on every call after the first;
+  // deriving again from that produced -edited-edited-edited, one suffix per
+  // call, with the finished work stranded under whichever name came last.
+  if (isWorkingCopy(source)) return path.resolve(source);
+  return deriveWorkingName(source);
 }
 
 // Resolve the file a tool was asked to read. Naming the attachment reads the
@@ -94,7 +105,7 @@ function resolveInput(requested, fallback) {
     const inProgress = workingCopyFor(matched);
     return fs.existsSync(inProgress) ? inProgress : matched;
   }
-  // An output produced this turn is a legitimate input: chaining one edit into
+  // An output produced earlier is a legitimate input: chaining one edit into
   // the next is the normal way to work through a document.
   if (isWorkingCopy(requested)) return path.resolve(requested);
   if (restricted) {

@@ -195,6 +195,25 @@ let sessionOnlineResearch = false;
 // you are looking at.
 let sessionSpend = emptyCostTotals();
 
+// Files attached anywhere in this conversation, not just the newest message.
+// Registering only the current turn's attachments meant that the moment someone
+// sent a follow-up without re-attaching, the document they were working on
+// stopped existing — "No files are attached to this conversation" about a file
+// they had handed over one message earlier.
+let sessionAttachments = [];
+
+function rememberAttachments(files) {
+  for (const file of Array.isArray(files) ? files : []) {
+    if (!file?.path) continue;
+    const already = sessionAttachments.findIndex((known) => known.path === file.path);
+    const entry = { name: file.name || '', path: file.path };
+    if (already >= 0) sessionAttachments[already] = entry;
+    // Newest last, so a re-attached file is the freshest name for that path.
+    else sessionAttachments.push(entry);
+  }
+  return sessionAttachments;
+}
+
 // Rates for the model about to run, from the provider's own listing. Local
 // models are free and cloud models with no published price are unknown, which
 // costOf keeps distinct.
@@ -210,6 +229,7 @@ function newSessionId() {
   sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   sessionOnlineResearch = false;
   sessionSpend = emptyCostTotals();
+  sessionAttachments = [];
   return sessionId;
 }
 let updateService = null;
@@ -285,7 +305,7 @@ function enterSession(key) {
     console.log(`Ignored a session switch to "${target}" while a run is in progress.`);
     return activeSessionKey;
   }
-  const current = { conversation, sessionId, contextState, onlineResearch: sessionOnlineResearch, usage, spend: sessionSpend };
+  const current = { conversation, sessionId, contextState, onlineResearch: sessionOnlineResearch, usage, spend: sessionSpend, attachments: sessionAttachments };
   const { changed, state } = sessions.switchTo(key, current);
   if (!changed) return activeSessionKey;
   const restored = state || (target !== 'window' ? loadSessionState(historyStore, target) : null);
@@ -300,6 +320,7 @@ function enterSession(key) {
   // Spend belongs to the conversation too, so /cost answers for the one you are
   // looking at rather than for whatever ran most recently.
   sessionSpend = restored?.spend || emptyCostTotals();
+  sessionAttachments = restored?.attachments || [];
   // Last, and deliberately: newSessionId clears the latch, so a fresh session
   // starts clean while a restored one keeps the claim set above.
   sessionId = restored?.sessionId || newSessionId();
@@ -2262,7 +2283,7 @@ async function executeChatJob(job) {
   // What this turn is allowed to open by name. In chat it is the only thing the
   // PDF tools can reach at all — chat has no filesystem otherwise — so "fill in
   // my worksheet" works while "read ~/.ssh/id_rsa" has nowhere to resolve.
-  setAttachedFiles(files, { restrict: mode === 'chat' });
+  setAttachedFiles(rememberAttachments(files), { restrict: mode === 'chat' });
 
   let fileAttachments;
   try {

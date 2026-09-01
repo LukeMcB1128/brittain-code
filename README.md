@@ -75,8 +75,9 @@ writers are classified risky and go through the same approval gate as
 `write_file`.
 
 Chat can use them too, which is the one exception to chat having no
-filesystem. It reaches only the files you attached that turn — by the name shown
-in the composer — and every edit lands in a single `-edited` file beside the
+filesystem. It reaches only the files you attached to the conversation — by the
+name shown in the composer, and they stay reachable on later turns without
+re-attaching — and every edit lands in a single `-edited` file beside the
 original, which is never modified. Naming the attachment again reads that
 in-progress file rather than the pristine one, so a seven-page form can be
 filled a page at a time, across as many turns as it takes, and the work builds

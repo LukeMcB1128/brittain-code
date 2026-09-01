@@ -804,7 +804,7 @@ const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'pdf_stamp',
-      description: 'Draw text or a PNG/JPEG image at a position on one page — this is how you sign a PDF or annotate one that has no form fields. Coordinates are in points from the TOP-LEFT of the page; pdf_info reports each page size.',
+      description: 'Draw text or a PNG/JPEG image at a position on one page. Text may contain newlines and renders as multiple lines — this is how you sign a PDF or annotate one that has no form fields. Coordinates are in points from the TOP-LEFT of the page; pdf_info reports each page size.',
       parameters: {
         type: 'object',
         properties: {

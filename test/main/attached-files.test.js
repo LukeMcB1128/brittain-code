@@ -68,7 +68,7 @@ test('each turn replaces the list rather than accumulating it', () => {
 test('the restriction is bound to chat mode at the call site', () => {
   const fs = require('node:fs');
   const main = fs.readFileSync(path.join(__dirname, '..', '..', 'main.js'), 'utf8');
-  assert.match(main, /setAttachedFiles\(files, \{ restrict: mode === 'chat' \}\)/);
+  assert.match(main, /setAttachedFiles\(rememberAttachments\(files\), \{ restrict: mode === 'chat' \}\)/);
 });
 
 test('the dropped path comes from webUtils, since Electron 43 dropped File.path', () => {
@@ -146,4 +146,51 @@ test('the result explains a coerced output rather than ignoring it silently', ()
   for (const tool of ['fillForm', 'stamp', 'pages', 'merge']) {
     assert.match(tools, new RegExp(`pdf\\.${tool}\\([\\s\\S]{0,200}?pdfNote\\(args\\.output, out\\)`), tool);
   }
+});
+
+test('the suffix does not chain on every call', () => {
+  // The dispatch passes the *resolved* input, which is the working copy on
+  // every call after the first. Deriving again from that produced
+  // -edited-edited-edited, one suffix per call, with the finished work
+  // stranded under whichever name came last.
+  attached.setAttachedFiles([worksheet], { restrict: true });
+  const first = attached.workingCopyFor(worksheet.path);
+  assert.equal(first, path.join('/Users/luke/Downloads', 'worksheet-edited.pdf'));
+  assert.equal(attached.workingCopyFor(first), first, 'a second pass writes to the same file');
+  assert.equal(attached.workingCopyFor(attached.workingCopyFor(first)), first, 'and a third');
+});
+
+test('output is stable however many times the dispatch loops', () => {
+  // Walks the real path the tools take: resolve the input, then derive the
+  // output from that resolved input. The earlier test passed the original both
+  // times, which asserted the intent rather than the code path.
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chain-'));
+  const source = path.join(dir, 'form.pdf');
+  fs.writeFileSync(source, '%PDF-1.4');
+  attached.setAttachedFiles([{ name: 'form.pdf', path: source }], { restrict: true });
+
+  const outputs = new Set();
+  for (let call = 0; call < 4; call += 1) {
+    const input = attached.resolveInput('form.pdf', escaped);
+    const output = attached.resolveOutput('', escaped, input);
+    outputs.add(output);
+    fs.writeFileSync(output, `%PDF-1.4 pass ${call}`);
+  }
+  assert.equal(outputs.size, 1, `every call writes one file, got ${[...outputs].join(', ')}`);
+  assert.equal([...outputs][0], path.join(dir, 'form-edited.pdf'));
+  fs.rmSync(dir, { recursive: true, force: true });
+  attached.setAttachedFiles([]);
+});
+
+test('a file attached earlier is still there on a later turn', () => {
+  // "No files are attached to this conversation" about a document handed over
+  // one message ago is what forced re-attaching before every single step.
+  const fs = require('node:fs');
+  const main = fs.readFileSync(path.join(__dirname, '..', '..', 'main.js'), 'utf8');
+  assert.match(main, /function rememberAttachments\(files\)/);
+  assert.match(main, /let sessionAttachments = \[\];/);
+  assert.match(main, /attachments: sessionAttachments/, 'travels with the session');
+  assert.match(main, /sessionAttachments = restored\?\.attachments \|\| \[\]/, 'and is restored with it');
 });
