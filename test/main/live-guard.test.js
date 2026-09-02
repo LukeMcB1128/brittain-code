@@ -16,6 +16,7 @@ const fires = (text) => CONTEXT_RESET_RE.test(withoutQuotedSpans(text));
 
 const thinkingGuard = new Function(
   'provider',
+  'model',
   'thinking',
   `var runtimeSettings = { provider };
    const RAW_CHANNEL_MARKER_RE = /$a/;
@@ -24,7 +25,7 @@ const thinkingGuard = new Function(
    const GLITCH_FULLWIDTH_RE = /$a/;
    const withoutQuotedSpans = (value) => value;
    ${main.slice(main.indexOf('const DELIBERATION_RESTART_RE'), main.indexOf('// ---------- agent loop ----------'))}
-   return scanThinkingForPsychosis(thinking);`,
+   return scanThinkingForPsychosis(thinking, { value: 0 }, model);`,
 );
 
 test('explaining the guard does not trip the guard', () => {
@@ -77,11 +78,18 @@ test('a conversation with no context cannot have lost the task from it', () => {
 
 test('cloud reasoning is not stopped by local restart heuristics', () => {
   const loops = 'Actually, let me reconsider. '.repeat(20);
-  assert.match(thinkingGuard('ollama', loops).reason, /deliberation loop/);
-  assert.equal(thinkingGuard('openai', loops), null);
+  assert.match(thinkingGuard('ollama', 'qwen3:8b', loops).reason, /deliberation loop/);
+  assert.equal(thinkingGuard('openai', 'gpt-5', loops), null);
 });
 
 test('cloud reasoning keeps a large runaway ceiling', () => {
-  assert.equal(thinkingGuard('openai', 'x'.repeat(99_999)), null);
-  assert.match(thinkingGuard('openai', 'x'.repeat(100_000)).reason, /100,000/);
+  assert.equal(thinkingGuard('openai', 'gpt-5', 'x'.repeat(99_999)), null);
+  assert.match(thinkingGuard('openai', 'gpt-5', 'x'.repeat(100_000)).reason, /100,000/);
+});
+
+test('large local reasoning models keep the extended reasoning ceiling', () => {
+  const loops = 'Actually, let me reconsider. '.repeat(20);
+  assert.equal(thinkingGuard('ollama', 'qwen3.6:35b-a3b', loops), null);
+  assert.equal(thinkingGuard('ollama', 'qwen3.6:35b-a3b', 'x'.repeat(99_999)), null);
+  assert.match(thinkingGuard('ollama', 'qwen3.6:35b-a3b', 'x'.repeat(100_000)).reason, /100,000/);
 });

@@ -1115,8 +1115,9 @@ button.mini:disabled {
 }
 
 .chat-run-state {
-  display: inline-block;
-  margin: 3px 0 0 5px;
+  display: block;
+  width: max-content;
+  margin: 3px 0 0;
   padding: 0 3px;
   border: 1px solid var(--accent);
   border-radius: 2px;

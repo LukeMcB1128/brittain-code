@@ -932,6 +932,7 @@ function renderConversation(conversation) {
     }
   });
   if (latestMission) upsertMissionCard(latestMission);
+  settleAtChatBottom();
 }
 
 // ---------- attachments ----------
@@ -1564,6 +1565,14 @@ window.api.onExternalRun(({ active, origin, goal }) => {
 
 function scrollDown() {
   chat.scrollTop = chat.scrollHeight;
+}
+
+// Rebuilding a saved transcript adds Markdown height after each message is
+// inserted. Scroll once now and once after browser layout so completed and
+// resumed chats stay on their newest content.
+function settleAtChatBottom() {
+  scrollDown();
+  requestAnimationFrame(scrollDown);
 }
 
 // ---------- thinking display ----------

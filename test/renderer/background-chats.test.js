@@ -39,3 +39,17 @@ test('chat navigation remains available while normal chat runs are active', () =
   assert.match(load, /busy \|\| chatSubmitPending/,
     'navigation waits only for the immediate durable save, not for inference');
 });
+
+test('saved chats settle at the bottom after transcript layout', () => {
+  const app = read('renderer/app.js');
+  const render = app.slice(app.indexOf('function renderConversation'), app.indexOf('// ---------- attachments ----------'));
+  assert.match(render, /settleAtChatBottom\(\);/);
+  assert.match(app, /function settleAtChatBottom\(\) \{\s*scrollDown\(\);\s*requestAnimationFrame\(scrollDown\);/);
+});
+
+test('the running badge starts at the left edge of chat metadata', () => {
+  const css = read('renderer/style.css');
+  const badge = css.slice(css.indexOf('.chat-run-state {'), css.indexOf('}', css.indexOf('.chat-run-state {')) + 1);
+  assert.match(badge, /display: block;/);
+  assert.match(badge, /margin: 3px 0 0;/);
+});
