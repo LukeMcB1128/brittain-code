@@ -24,7 +24,7 @@ function protectWindow(window, appUrl, openExternal) {
   });
   contents.on('will-redirect', (event) => event.preventDefault());
   contents.on('will-frame-navigate', (event) => {
-    if (!isAppUrl(event.url, appUrl)) event.preventDefault();
+    if (!event.isMainFrame && !isAppUrl(event.url, appUrl)) event.preventDefault();
   });
   contents.on('will-attach-webview', (event) => event.preventDefault());
   contents.setWindowOpenHandler(({ url }) => {
