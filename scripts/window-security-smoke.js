@@ -11,6 +11,7 @@ const { pathToFileURL } = require('node:url');
 const { protectWindow, trustedIpc } = require('../src/main/window-security');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-security-'));
 app.setPath('userData', profile);
+const deadline = setTimeout(() => { console.error('Window security test timed out.'); app.exit(1); }, 60000);
 
 app.whenReady().then(async () => {
   const root = path.join(__dirname, '..');
@@ -52,4 +53,8 @@ app.whenReady().then(async () => {
   }
 }).then(() => app.exit(0), (error) => { console.error(error); app.exit(1); });
 
-process.on('exit', () => fs.rmSync(profile, { recursive: true, force: true }));
+process.on('exit', () => {
+  clearTimeout(deadline);
+  try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); }
+  catch (error) { console.warn('Could not remove test profile:', error.message); }
+});

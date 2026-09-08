@@ -26,6 +26,7 @@ jobs:
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
           test "${GITHUB_REF_NAME}" = "v${PACKAGE_VERSION}"
           test "${PACKAGE_VERSION#*-}" = "${PACKAGE_VERSION}"
+          test -s "RELEASE_NOTES-${PACKAGE_VERSION}.md"
 
   mac:
     needs: test
@@ -54,6 +55,8 @@ jobs:
       - run: npm ci
       - name: Build and publish macOS release
         run: npx electron-builder --config scripts/release-config.js --mac dmg zip --${{ matrix.arch }} --publish always
+      - name: Verify Electron window security
+        run: npx electron scripts/window-security-smoke.js
 
   windows:
     needs: test
@@ -71,6 +74,8 @@ jobs:
       - run: npm ci
       - name: Build and publish Windows release
         run: npx electron-builder --config scripts/release-config.js --win --x64 --publish always
+      - name: Verify Electron window security
+        run: npx electron scripts/window-security-smoke.js
 
   publish:
     needs: [mac, windows]
@@ -78,6 +83,6 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # No checkout here, so gh cannot infer the repository from a git remote.
+      - uses: actions/checkout@v4
       - name: Publish complete release
-        run: gh release edit "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" --draft=false --latest
+        run: gh release edit "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" --notes-file "RELEASE_NOTES-${GITHUB_REF_NAME#v}.md" --draft=false --latest
