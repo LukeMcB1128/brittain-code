@@ -21,6 +21,7 @@ const { readActiveMission, writeActiveMission, interruptRunningMission } = requi
 const { isLocalEndpoint } = require('./recommendations');
 const { createHardwareProfile } = require('./src/main/hardware-profile');
 const { createHistoryStore, safeChatId } = require('./src/main/history-store');
+const { generateChatTitle } = require('./src/main/chat-title');
 const { createSessions, sessionKeyFor, loadSessionState } = require('./src/main/sessions');
 const { transportFor, providerPath, safeProviderError } = require('./src/main/inference');
 const { ratesFor, costOf, emptyTotals: emptyCostTotals, addTurn: addCostTurn, describeTurn: describeTurnCost, describeTotals: describeCostTotals } = require('./src/main/cost');
@@ -2193,6 +2194,27 @@ function fallbackChatTitle(text, attachments = []) {
   return source.length > 30 ? source.slice(0, 30) + '...' : source;
 }
 
+function hasLegacyFallbackTitle(chat) {
+  if (!chat || Object.prototype.hasOwnProperty.call(chat, 'autoTitlePending')) return false;
+  // The background-chat change introduced this ID format and the title fault
+  // together. Do not apply the fallback test to older saved chats.
+  if (!String(chat.id || '').startsWith('chat-')) return false;
+  const firstUser = Array.isArray(chat.conversation)
+    ? chat.conversation.find((message) => message.role === 'user')
+    : null;
+  if (!firstUser) return false;
+  const names = Array.isArray(firstUser.attachments)
+    ? firstUser.attachments.map((attachment) => attachment?.name).filter(Boolean)
+    : [];
+  const text = String(firstUser.displayContent || '').trim();
+  const candidates = new Set([
+    fallbackChatTitle(text || firstUser.content, firstUser.attachments || []),
+    names.join(', '),
+    fallbackChatTitle('', firstUser.attachments || []),
+  ]);
+  return candidates.has(String(chat.title || ''));
+}
+
 function previewChatMessage(payload) {
   const message = {
     role: 'user',
@@ -2213,7 +2235,7 @@ function previewChatMessage(payload) {
   return message;
 }
 
-async function saveChatJob(job, messages = conversation, { staged = false } = {}) {
+async function saveChatJob(job, messages = conversation, { staged = false, autoTitlePending } = {}) {
   const loaded = historyStore.load(job.chatId);
   const existing = loaded.ok ? loaded.chat : {};
   const history = job.history || {};
@@ -2222,8 +2244,10 @@ async function saveChatJob(job, messages = conversation, { staged = false } = {}
     ...existing,
     ...history,
     id: job.chatId,
-    title: existing.title && existing.title !== 'Chat'
-      ? existing.title
+    // A stored title is final or is marked for the title resolver. Never infer
+    // that the literal title "Chat" is temporary and rename it on a later turn.
+    title: loaded.ok
+      ? existing.title || 'Chat'
       : history.title || fallbackChatTitle(job.text, attachments),
     model: job.model || existing.model || '',
     mode: job.mode === 'chat' ? 'chat' : 'code',
@@ -2234,19 +2258,25 @@ async function saveChatJob(job, messages = conversation, { staged = false } = {}
     contextState: staged ? (existing.contextState || history.contextState) : contextState,
     subModel: job.subModel || existing.subModel || '',
     coderModel: history.coderModel || existing.coderModel || '',
+    autoTitlePending: typeof autoTitlePending === 'boolean'
+      ? autoTitlePending
+      : !!existing.autoTitlePending,
     timestamp: new Date().toISOString(),
   }, messages);
 }
 
 async function stageChatJob(job) {
   const loaded = historyStore.load(job.chatId);
+  const autoTitlePending = loaded.ok
+    ? !!loaded.chat.autoTitlePending || hasLegacyFallbackTitle(loaded.chat)
+    : true;
   const messages = loaded.ok && Array.isArray(loaded.chat.conversation)
     ? [...loaded.chat.conversation]
     : [];
   if (!messages.some((message) => message.pendingRunId === job.runId)) {
     messages.push(previewChatMessage(job));
   }
-  return saveChatJob(job, messages, { staged: true });
+  return saveChatJob(job, messages, { staged: true, autoTitlePending });
 }
 
 async function clearStagedChatJob(job) {
@@ -2278,6 +2308,75 @@ function loadChatJob(job) {
 async function persistActiveChatConversation() {
   if (!activeChatJob) return;
   try { await saveChatJob(activeChatJob); } catch {}
+}
+
+function recordTitleUsage(model, stats) {
+  if (!stats) return;
+  recordUsage('main', stats);
+  const promptTokens = stats.promptTokens || 0;
+  const evalTokens = stats.evalTokens || 0;
+  if (runtimeSettings.provider !== 'openai' || (!promptTokens && !evalTokens)) return;
+  const cost = costOf({ promptTokens, evalTokens }, ratesForModel(model));
+  sessionSpend = {
+    ...sessionSpend,
+    cost: sessionSpend.cost + (cost || 0),
+    promptTokens: sessionSpend.promptTokens + promptTokens,
+    evalTokens: sessionSpend.evalTokens + evalTokens,
+    turns: Math.max(1, sessionSpend.turns),
+    priced: sessionSpend.priced && cost !== null,
+  };
+  sink.emit('stream:cost', {
+    text: `Title: ${describeTurnCost({ cost, promptTokens, evalTokens })}`,
+    cost,
+    promptTokens,
+    evalTokens,
+    sessionText: describeCostTotals(sessionSpend),
+  });
+}
+
+async function resolvePendingChatTitle(job) {
+  const loaded = historyStore.load(job.chatId);
+  if (!loaded.ok || !loaded.chat.autoTitlePending) return { ok: true, changed: false };
+  const attempts = Math.max(0, Number(loaded.chat.autoTitleAttempts) || 0);
+  if (attempts >= 3) return { ok: false, error: 'Automatic title generation reached its retry limit.' };
+  // The Stop button controls the title request while the chat still shows as
+  // running. The separate timeout keeps a title fault from holding the queue.
+  const titleAbort = new AbortController();
+  currentAbort = titleAbort;
+  let generated;
+  try {
+    generated = await generateChatTitle({
+      conversation: loaded.chat.conversation,
+      model: job.model,
+      streamChat,
+      supportsThinking,
+      effectiveContext,
+      signal: titleAbort.signal,
+    });
+  } finally {
+    if (currentAbort === titleAbort) currentAbort = null;
+  }
+  recordTitleUsage(job.model, generated.stats);
+  if (!generated.ok) {
+    if (!generated.aborted) {
+      const nextAttempts = attempts + 1;
+      await historyStore.save({
+        ...loaded.chat,
+        autoTitlePending: nextAttempts < 3,
+        autoTitleAttempts: nextAttempts,
+        runMetrics: usage,
+      }, loaded.chat.conversation);
+    }
+    return generated;
+  }
+  const saved = await historyStore.save({
+    ...loaded.chat,
+    title: generated.title,
+    autoTitlePending: false,
+    autoTitleAttempts: attempts + 1,
+    runMetrics: usage,
+  }, loaded.chat.conversation);
+  return saved.ok ? { ok: true, changed: true, title: generated.title } : saved;
 }
 
 async function executeChatJob(job) {
@@ -2404,6 +2503,10 @@ async function drainChatRuns() {
     return clean;
   });
   await persistActiveChatConversation();
+  // Resolve the temporary name while this job still owns the main process.
+  // This also covers a chat that finished while it was not visible. A stopped
+  // or failed answer must not start another model request that Stop cannot end.
+  if (result?.ok && !result.stopped) await resolvePendingChatTitle(job);
   const completedRoute = { chatId: job.chatId, runId: job.runId };
   activeChatJob = null;
   rendererRunRoute = null;
@@ -5062,11 +5165,22 @@ ipcMain.handle('history:list', () => historyStore.list());
 // The renderer sends the toggle as it stands; main knows whether the session
 // actually went online. The latch wins — a chat saved after the switch was
 // flipped off still went online, and the record should say so.
-ipcMain.handle('history:save', (_e, meta, convo) => historyStore.save({
-  ...meta,
-  onlineResearch: !!meta?.onlineResearch || sessionOnlineResearch,
-  onlineResearchEnabled: !!meta?.onlineResearchEnabled,
-}, convo));
+ipcMain.handle('history:save', (_e, meta, convo) => {
+  const existing = historyStore.load(meta?.id);
+  return historyStore.save({
+    ...meta,
+    // A renderer save can occur after title generation failed. Keep the retry
+    // marker until the main chat lifecycle clears it with the generated title.
+    autoTitlePending: typeof meta?.autoTitlePending === 'boolean'
+      ? meta.autoTitlePending
+      : existing.ok && !!existing.chat.autoTitlePending,
+    autoTitleAttempts: Number.isFinite(Number(meta?.autoTitleAttempts))
+      ? Math.max(0, Number(meta.autoTitleAttempts))
+      : Math.max(0, Number(existing.ok && existing.chat.autoTitleAttempts) || 0),
+    onlineResearch: !!meta?.onlineResearch || sessionOnlineResearch,
+    onlineResearchEnabled: !!meta?.onlineResearchEnabled,
+  }, convo);
+});
 ipcMain.handle('history:load', (_e, id) => historyStore.load(id));
 ipcMain.handle('history:delete', (_e, id) => historyStore.remove(id));
 
@@ -5683,39 +5797,21 @@ ipcMain.handle('cwd:pick', async () => {
 
 // ---------- generate chat title ----------
 ipcMain.handle('chat:generateTitle', async (_e, conversationContent, model) => {
+  if (currentAbort) return { ok: false, error: 'Another model request is still running.' };
+  const titleAbort = new AbortController();
+  currentAbort = titleAbort;
   try {
-    // If conversation is empty or invalid, return a default title
-    if (!conversationContent || !Array.isArray(conversationContent) || !model) {
-      return { ok: false, error: 'Invalid conversation content' };
-    }
-    
-    // Create a system prompt that strictly asks for a descriptive, concise title
-    const systemPrompt = "You are a helpful chat summarizer. Given the following transcript, generate a single, descriptive, and concise title (maximum 7 words). Do not include any pre-text, explanation, or markdown formatting. Only output the title. Do not output any hashtags, markdown, or formatting. Just the plain text title. This is for generating a chat title only - do not output anything to the chat stream or UI. The only output should be the plain text title string.";
-    
-    // Get the last few messages to provide context for title generation
-    // last 5 messages, minus image payloads — base64 would otherwise be
-    // JSON.stringify'd straight into the title model's tiny context
-    const lastMessages = conversationContent.slice(-5).map(({ images, imageTypes, attachments, displayContent, ...message }) => ({
-      ...message,
-      content: displayContent || (attachments?.length ? '(attached files)' : message.content),
-      ...(attachments?.length ? { attachmentNames: attachments.map((attachment) => attachment.name) } : {}),
-    }));
-    const titleThink = (await supportsThinking(model)) ? false : undefined;
-    
-    // Generate the title using the LLM
-    const response = await streamChat(model, [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: JSON.stringify(lastMessages) }
-    ], AbortSignal.timeout(60_000), titleThink, true, Math.min(await effectiveContext(model), 8192), null);
-    
-    // Return only the title without any extra formatting
-    let title = response.content.trim();
-    
-    // Clean up any markdown or formatting that might have slipped through
-    title = title.replace(/[#*`]/g, '').trim();
-    
-    return { ok: true, title };
-  } catch (err) {
-    return { ok: false, error: err.message };
+    const result = await generateChatTitle({
+      conversation: conversationContent,
+      model,
+      streamChat,
+      supportsThinking,
+      effectiveContext,
+      signal: titleAbort.signal,
+    });
+    recordTitleUsage(model, result.stats);
+    return result;
+  } finally {
+    if (currentAbort === titleAbort) currentAbort = null;
   }
 });

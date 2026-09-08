@@ -51,6 +51,10 @@ function createHistoryStore({ userDataDir, runtimeMetadata }) {
       const detailed = {
         subModel: meta.subModel || '',
         coderModel: meta.coderModel || '',
+        // A temporary title must survive navigation and an app restart.
+        // The main chat lifecycle clears this after it saves a generated title.
+        autoTitlePending: !!meta.autoTitlePending,
+        autoTitleAttempts: Math.max(0, Number(meta.autoTitleAttempts) || 0),
         // This is the switch snapshot, not the permanent provenance flag in
         // `onlineResearch`. Older chats do not have it and therefore reopen
         // offline.

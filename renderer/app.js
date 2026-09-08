@@ -712,48 +712,60 @@ async function saveChat() {
   // The live conversation lives in the main process — pull it over IPC.
   const conversation = await window.api.getConversation();
   if (!conversation.length) return;
-  const runMetrics = await window.api.usageGet();
-  const contextRes = await window.api.contextState();
 
-  // Only generate a new title if this is a new chat (no existing title or title is generic)
+  // A saved marker, not the presence of an ID, says whether this chat needs a
+  // title. Some workflows allocate the ID before their first save.
   let title = 'Chat';
+  let autoTitlePending = false;
+  let autoTitleAttempts = 0;
   const firstUser = conversation.find((m) => m.role === 'user');
   const firstUserText = firstUser
     ? firstUser.displayContent || firstUser.attachments?.map((attachment) => attachment.name).join(', ') || firstUser.content || 'Chat'
     : 'Chat';
   const fallbackTitle = firstUserText.substring(0, 30) + (firstUserText.length > 30 ? '...' : '');
   
-  // Check if we should generate a title using the LLM
-  if (!currentChatId || !firstUser) {
-    // Use the new LLM-based title generation
+  const existingRes = currentChatId
+    ? await window.api.historyLoad(currentChatId)
+    : { ok: false };
+  const existingChat = existingRes.ok ? existingRes.chat : null;
+  autoTitleAttempts = Math.max(0, Number(existingChat?.autoTitleAttempts) || 0);
+  const needsTitle = !!firstUser && (!existingChat || existingChat.autoTitlePending);
+
+  if (needsTitle && autoTitleAttempts < 3) {
     try {
       const titleRes = await window.api.generateChatTitle(conversation, modelSelect.value);
       if (titleRes.ok && titleRes.title) {
         title = titleRes.title;
+        autoTitleAttempts += 1;
       } else {
-        // Fallback to old behavior if LLM fails
         title = firstUser ? fallbackTitle : 'Chat';
+        if (!titleRes.aborted) autoTitleAttempts += 1;
+        autoTitlePending = titleRes.aborted || autoTitleAttempts < 3;
       }
     } catch (err) {
-      // Fallback to old behavior if API call fails
       title = firstUser ? fallbackTitle : 'Chat';
+      autoTitleAttempts += 1;
+      autoTitlePending = autoTitleAttempts < 3;
     }
   } else {
-    // For existing chats, keep the existing title
-    const existingChat = await window.api.historyList();
-    const chatEntry = existingChat.find(c => c.id === currentChatId);
-    if (chatEntry && chatEntry.title) {
-      title = chatEntry.title;
+    if (existingChat?.title) {
+      title = existingChat.title;
+      autoTitlePending = !!existingChat.autoTitlePending && autoTitleAttempts < 3;
     } else if (firstUser) {
       title = fallbackTitle;
     }
   }
 
+  // Title inference is part of this saved chat's usage.
+  const runMetrics = await window.api.usageGet();
+  const contextRes = await window.api.contextState();
   if (!currentChatId) currentChatId = Date.now().toString();
   const res = await window.api.historySave(
     {
       id: currentChatId,
       title,
+      autoTitlePending,
+      autoTitleAttempts,
       model: modelSelect.value,
       mode: appMode,
       cwd: appMode === 'code' ? cwd || '' : '',
