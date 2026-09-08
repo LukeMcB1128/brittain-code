@@ -2,13 +2,17 @@
 // Owns the agent loop: talks to a local or OpenAI-compatible endpoint, executes
 // tools, streams results to the UI.
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Notification, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain: electronIpcMain, dialog, shell, Notification, safeStorage } = require('electron');
 
 // --headless runs the agent runtime — scheduler, queue, triggers, unattended
 // runs — with no window at all. The renderer becomes an optional client; the
 // run sink already treats an absent window as an ordinary condition.
 const HEADLESS = process.argv.includes('--headless');
 const path = require('path');
+const { pathToFileURL } = require('node:url');
+const { protectWindow, trustedIpc } = require('./src/main/window-security');
+const appUrl = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
+const ipcMain = trustedIpc(electronIpcMain, () => win, appUrl);
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('node:child_process');
@@ -481,6 +485,7 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  protectWindow(win, appUrl, (url) => shell.openExternal(url));
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.webContents.once('did-finish-load', () => updateService?.start());
 }
