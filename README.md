@@ -19,7 +19,7 @@ Ollama must be running (`ollama serve`, or the menu bar app).
 |---|---|
 | `npm run dist` | Local macOS `.dmg` and `.zip` without production updates |
 | `npm run dist:win` | Windows x64 NSIS installer |
-| `npm run dist:all` | both |
+| Release workflow | macOS ARM64, macOS Intel, and Windows x64 on separate matching runners |
 | `npm run deploy` | macOS: build and copy straight into /Applications |
 
 On macOS the standalone app lands in `dist/mac-arm64/Brittain Code.app`; drag it into Applications or the Dock to launch it without a terminal. Local builds use an ad-hoc signature, so the first launch can need the usual right-click → Open. Local Windows builds can show the SmartScreen "More info" → "Run anyway" action.

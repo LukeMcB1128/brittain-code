@@ -12,11 +12,12 @@
   "scripts": {
     "start": "node scripts/start.js",
     "test": "node scripts/run-tests.js",
+    "vendor:sync": "node scripts/sync-vendor.js",
     "discord": "node scripts/discord-bridge.js",
     "dist": "electron-builder --mac dmg zip",
     "deploy": "electron-builder --mac dir && rm -rf '/Applications/Brittain Code.app' && cp -R 'dist/mac-arm64/Brittain Code.app' /Applications/ && echo 'Deployed to /Applications'",
     "dist:win": "electron-builder --win --x64",
-    "dist:all": "electron-builder --mac dmg zip --arm64 --x64 && electron-builder --win --x64"
+    "dist:all": "node -e \"throw new Error('Use the release workflow to build each platform and architecture on a matching runner.')\""
   },
   "build": {
     "appId": "com.brittain.code",
@@ -50,6 +51,7 @@
       ],
       "icon": "build/icon.icns"
     },
+    "afterPack": "scripts/verify-native-package.js",
     "afterSign": "scripts/afterSign.js",
     "win": {
       "target": [
@@ -68,9 +70,9 @@
     }
   },
   "devDependencies": {
-    "dompurify": "^3.4.11",
-    "electron": "^43.4.0",
-    "electron-builder": "^24.13.3",
+    "dompurify": "^3.4.15",
+    "electron": "^43.6.0",
+    "electron-builder": "^26.15.3",
     "marked": "^18.0.5"
   },
   "dependencies": {

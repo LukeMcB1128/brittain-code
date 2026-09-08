@@ -19,6 +19,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: node scripts/sync-vendor.js --check
       - name: Validate stable release tag
         shell: bash
         run: |
@@ -28,7 +29,15 @@ jobs:
 
   mac:
     needs: test
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # No Developer ID. afterSign.js does the deep ad-hoc re-sign that keeps
@@ -44,7 +53,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Build and publish macOS release
-        run: npx electron-builder --config scripts/release-config.js --mac dmg zip --arm64 --x64 --publish always
+        run: npx electron-builder --config scripts/release-config.js --mac dmg zip --${{ matrix.arch }} --publish always
 
   windows:
     needs: test
