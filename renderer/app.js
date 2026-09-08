@@ -758,6 +758,7 @@ async function saveChat() {
 
   // Title inference is part of this saved chat's usage.
   const runMetrics = await window.api.usageGet();
+  const billing = await window.api.costGet();
   const contextRes = await window.api.contextState();
   if (!currentChatId) currentChatId = Date.now().toString();
   const res = await window.api.historySave(
@@ -766,6 +767,7 @@ async function saveChat() {
       title,
       autoTitlePending,
       autoTitleAttempts,
+      spend: billing.totals,
       model: modelSelect.value,
       mode: appMode,
       cwd: appMode === 'code' ? cwd || '' : '',
@@ -810,6 +812,7 @@ async function loadChat(chatId) {
       mode: saved.mode === 'chat' ? 'chat' : 'code',
       onlineResearch: onlineResearchToggle.checked,
       onlineResearchEverUsed: !!saved.onlineResearch,
+      spend: saved.spend,
     });
   renderConversation(saved.conversation);
   updateContextBar(lc.approxTokens, lc.contextLength);
@@ -861,6 +864,7 @@ async function syncVisibleChatToMain() {
       mode: saved.mode === 'chat' ? 'chat' : 'code',
       onlineResearch: onlineResearchToggle.checked,
       onlineResearchEverUsed: !!saved.onlineResearch,
+      spend: saved.spend,
     },
   );
   if (!lc.deferred) updateContextBar(lc.approxTokens, lc.contextLength);

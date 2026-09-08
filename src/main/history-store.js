@@ -61,6 +61,7 @@ function createHistoryStore({ userDataDir, runtimeMetadata }) {
         onlineResearchEnabled: !!meta.onlineResearchEnabled,
         onlineResearch: !!meta.onlineResearch,
         runMetrics: meta.runMetrics || null,
+        spend: meta.spend || null,
         contextState: meta.contextState || { projectPath: '', pinnedFiles: [] },
         runtime: { ...mainRuntime, roles: Object.fromEntries(roleEntries) },
       };

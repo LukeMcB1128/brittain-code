@@ -40,6 +40,7 @@ function loadSessionState(historyStore, key) {
     contextState: loaded.chat.contextState || null,
     onlineResearch: !!loaded.chat.onlineResearch,
     usage: loaded.chat.runMetrics || null,
+    spend: loaded.chat.spend || null,
   };
 }
 

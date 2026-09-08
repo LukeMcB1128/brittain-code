@@ -2260,6 +2260,7 @@ async function saveChatJob(job, messages = conversation, { staged = false, autoT
     onlineResearch: !!existing.onlineResearch || (!staged && sessionOnlineResearch),
     onlineResearchEnabled: !!job.onlineResearch,
     runMetrics: staged ? existing.runMetrics : usage,
+    spend: staged ? existing.spend : sessionSpend,
     contextState: staged ? (existing.contextState || history.contextState) : contextState,
     subModel: job.subModel || existing.subModel || '',
     coderModel: history.coderModel || existing.coderModel || '',
@@ -2302,7 +2303,7 @@ function loadChatJob(job) {
   contextState = normalizeContextState(loaded.ok ? loaded.chat.contextState : job.history?.contextState);
   usage = loaded.ok && loaded.chat.runMetrics ? restoreUsage(loaded.chat.runMetrics) : freshUsage();
   sessionOnlineResearch = !!(loaded.ok && loaded.chat.onlineResearch);
-  sessionSpend = emptyCostTotals();
+  sessionSpend = loaded.ok && loaded.chat.spend || emptyCostTotals();
   rememberConversationView({ model: job.model, cwd: job.cwd, mode: job.mode, onlineResearch: job.onlineResearch });
   const pendingIndex = conversation.findIndex((message) => message.pendingRunId === job.runId);
   const stagedMessage = pendingIndex >= 0 ? conversation[pendingIndex] : previewChatMessage(job);
@@ -2370,6 +2371,7 @@ async function resolvePendingChatTitle(job) {
         autoTitlePending: nextAttempts < 3,
         autoTitleAttempts: nextAttempts,
         runMetrics: usage,
+        spend: sessionSpend,
       }, loaded.chat.conversation);
     }
     return generated;
@@ -2380,6 +2382,7 @@ async function resolvePendingChatTitle(job) {
     autoTitlePending: false,
     autoTitleAttempts: attempts + 1,
     runMetrics: usage,
+    spend: sessionSpend,
   }, loaded.chat.conversation);
   return saved.ok ? { ok: true, changed: true, title: generated.title } : saved;
 }
@@ -3888,6 +3891,7 @@ async function persistRunHistory(chatId, { goal, cwd, model, onlineResearch }) {
       cwd: cwd || '',
       onlineResearch: !!onlineResearch,
       runMetrics: usage,
+      spend: sessionSpend,
       timestamp: new Date().toISOString(),
     }, conversation);
   } catch {
@@ -5141,6 +5145,7 @@ ipcMain.handle('chat:load', async (_e, msgs, model, savedUsage, savedContextStat
   conversation = Array.isArray(msgs) ? msgs : [];
   contextState = normalizeContextState(savedContextState);
   usage = restoreUsage(savedUsage);
+  sessionSpend = view.spend || emptyCostTotals();
   rememberConversationView({ ...view, model });
   // Estimate the loaded context immediately. This uses the same complete next-
   // request calculation as the inspector, including system and tool overhead.
