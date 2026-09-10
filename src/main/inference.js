@@ -186,7 +186,7 @@ const openAITransport = {
   id: 'openai',
   needsKey: true,
 
-  request({ endpoint, apiKey, model, messages, tools, temperature, maxTokens }) {
+  request({ endpoint, apiKey, model, messages, tools, think, temperature, maxTokens }) {
     return {
       // The endpoint setting holds the base URL — https://openrouter.ai/api/v1
       // or https://api.z.ai/api/paas/v4 — exactly as the provider documents it.
@@ -202,6 +202,20 @@ const openAITransport = {
         stream: true,
         temperature,
         ...(maxTokens ? { max_tokens: maxTokens } : {}),
+        // `think` had no route through this transport at all, so callers that
+        // asked for it off — the summarizers do — still got a thinking model.
+        // The trace is charged to the same max_tokens as the answer, so a
+        // summarizer could spend its entire budget inside an unterminated
+        // <think> block and return empty content with finish_reason "length".
+        // Measured against a local vLLM Qwen at the summarizer's real budget:
+        // thinking on returned 0 characters, thinking off returned a complete
+        // five-section record.
+        //
+        // Only sent when a caller explicitly asks for thinking off, so ordinary
+        // requests keep the exact body they had. A provider that rejects
+        // unknown fields would reject this one; if that shows up, gate it on
+        // the endpoint rather than dropping it.
+        ...(think === false ? { chat_template_kwargs: { enable_thinking: false } } : {}),
         // Providers only report token usage on a stream when asked to, and
         // usage is the whole basis of knowing what a run cost.
         stream_options: { include_usage: true },

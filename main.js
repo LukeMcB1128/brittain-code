@@ -870,6 +870,22 @@ async function getCapabilities(model) {
 const supportsThinking = async (model) => (await getCapabilities(model)).includes('thinking');
 const supportsVision = async (model) => (await getCapabilities(model)).includes('vision');
 
+// What to pass as `think` when the model is being asked to summarize rather
+// than to work. Summarizers want it off: the trace is charged to the same
+// max_tokens as the record, and a model that thinks past the budget returns
+// empty content with finish_reason "length", which validateSummary can only
+// read as a failed summary.
+//
+// The capability gate is right for Ollama, where sending `think` to a model
+// without the capability is an error. It is wrong for the OpenAI transport,
+// where getCapabilities() reports only vision — so supportsThinking() is false
+// for every API model and the gate would silently leave thinking on, which is
+// the state that made /compact fail against a local vLLM Qwen.
+const summarizerThink = async (model) =>
+  (runtimeSettings.provider === 'openai' || (await supportsThinking(model)))
+    ? false
+    : undefined;
+
 const runtimeMetadataCache = new Map();
 async function runtimeMetadata(model) {
   if (runtimeMetadataCache.has(model)) return runtimeMetadataCache.get(model);
@@ -2720,7 +2736,7 @@ async function compactScopedMessages(model, msgs, numCtx, role, usageBucket, con
         ].join('\n\n'),
       },
     ];
-    const useThink = (await supportsThinking(model)) ? false : undefined;
+    const useThink = await summarizerThink(model);
 
     let summary = '';
     let check = { ok: false, reason: 'empty', tokens: 0, required: 0, missing: [] };
@@ -5449,6 +5465,19 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     const minimumTokens = minimumSummaryTokens(sourceTokens);
     const priorReady = priorRecord ? [{ role: 'user', content: priorRecordPreamble(priorRecord) }] : [];
 
+    // Summarizing is extraction, not deliberation, and the trace competes with
+    // the record for the same max_tokens. Left on, a summarizer can spend the
+    // whole budget inside an unterminated <think> block and return nothing —
+    // validateSummary then rejects an empty summary, the one retry does the
+    // same, and the compaction degrades to the tail.
+    //
+    // The capability gate cannot be used on the OpenAI transport:
+    // getCapabilities() only ever reports vision there, so supportsThinking()
+    // is false for every API model and the request would go out with thinking
+    // still on. Asked directly instead. The gate stays for Ollama, where
+    // sending `think` to a model that lacks the capability is an error.
+    const useThink = await summarizerThink(model);
+
     // A transcript too large for one pass is split chronologically and folded
     // back together, rather than having its oldest half deleted to make it fit.
     const chunks = planChunks(summarizerInput, { budget: chunkBudget, estimateTokens });
@@ -5469,6 +5498,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
             { role: 'user', content: chunkInstruction(index, chunks.length) },
           ],
           signal,
+          think: useThink,
           numCtx: contextLength,
           temperature: 0.2,
           maxTokens: Math.max(512, Math.floor(summaryRoom / 2)),
@@ -5508,6 +5538,7 @@ async function compactConversation(model, signal = currentAbort?.signal) {
         model,
         messages: msgs,
         signal,
+        think: useThink,
         numCtx: contextLength,
         temperature: 0.2,
         maxTokens: Math.max(512, summaryRoom),
