@@ -39,3 +39,30 @@ test('Ollama model details include size and build information', () => {
   assert.equal(models[0].parameterSize, '8.2B');
   assert.equal(models[0].quantization, 'Q4_K_M');
 });
+
+test('a self-hosted vLLM model states its window under max_model_len', () => {
+  // Verbatim shape of a vLLM /v1/models entry. Reading only context_length
+  // left this null, so getContextLength() fell back to the configured cap and
+  // a 32k server was budgeted as a million-token one.
+  const models = normalizeOpenAIModels({ data: [{
+    id: 'brittain4',
+    object: 'model',
+    owned_by: 'vllm',
+    root: '/home/lukeb/brittain4/models/brittain4-base-w4a16',
+    max_model_len: 32_768,
+  }] });
+
+  assert.equal(models[0].contextLength, 32_768);
+  assert.equal(models[0].group, 'vllm');
+});
+
+test('context_length still wins where a provider sends both', () => {
+  const models = normalizeOpenAIModels({ data: [
+    { id: 'a', context_length: 200_000, max_model_len: 32_768 },
+    { id: 'b', context_window: 128_000 },
+    { id: 'c' },
+  ] });
+  assert.equal(models[0].contextLength, 200_000);
+  assert.equal(models[1].contextLength, 128_000);
+  assert.equal(models[2].contextLength, null, 'a provider that states nothing must still fall back');
+});

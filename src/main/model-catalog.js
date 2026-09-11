@@ -13,6 +13,20 @@ function openAIGroup(id, owner) {
   return groupFromId(id, fallback);
 }
 
+// Providers do not agree on what to call the context window on /v1/models.
+// OpenRouter says context_length; vLLM says max_model_len; others say
+// context_window or max_context_length. Reading only the first name meant a
+// self-hosted vLLM looked like it stated nothing, so getContextLength() fell
+// back to the configured cap — a 32k server was budgeted as 1,048,576 tokens
+// and every request built against that overran the real window.
+function statedContextLength(entry) {
+  for (const key of ['context_length', 'max_model_len', 'context_window', 'max_context_length']) {
+    const value = finiteNumber(entry?.[key]);
+    if (value) return value;
+  }
+  return null;
+}
+
 function normalizeOpenAIModels(payload) {
   const entries = Array.isArray(payload?.data) ? payload.data : [];
   return entries
@@ -26,7 +40,7 @@ function normalizeOpenAIModels(payload) {
         id,
         name: String(entry?.name || id).trim() || id,
         group: openAIGroup(id, owner),
-        contextLength: finiteNumber(entry?.context_length),
+        contextLength: statedContextLength(entry),
         inputPricePerMillion: inputPrice === null ? null : inputPrice * 1_000_000,
         outputPricePerMillion: outputPrice === null ? null : outputPrice * 1_000_000,
         modalities: Array.isArray(entry?.architecture?.input_modalities)
