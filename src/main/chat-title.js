@@ -55,7 +55,7 @@ async function generateChatTitle({
   conversation,
   model,
   streamChat,
-  supportsThinking,
+  thinkValue,
   effectiveContext,
   signal,
   timeoutMs = 20_000,
@@ -67,7 +67,10 @@ async function generateChatTitle({
   try {
     const messages = titleMessages(conversation);
     if (!messages.length) return { ok: false, error: 'The conversation has no messages to name.' };
-    const titleThink = (await supportsThinking(model)) ? false : undefined;
+    // Naming a chat is extraction, not deliberation. The <think> stripping below
+    // only catches a tagged trace; a server with no reasoning parser returns the
+    // reasoning as ordinary prose, which would be indistinguishable from a title.
+    const titleThink = await thinkValue(model, false);
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     const response = await streamChat(

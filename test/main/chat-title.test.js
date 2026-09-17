@@ -73,7 +73,7 @@ test('title generation uses silent inference with no tools', async () => {
       call = args;
       return { content: 'Automatic Chat Naming Repair', stats };
     },
-    supportsThinking: async () => true,
+    thinkValue: async (_model, want) => !!want,
     effectiveContext: async () => 32_768,
     timeoutMs: 500,
   });
@@ -111,7 +111,7 @@ test('title inference has a 20 second limit and accepts cancellation', async () 
         else requestSignal.addEventListener('abort', stop, { once: true });
       });
     },
-    supportsThinking: async () => false,
+    thinkValue: async () => undefined,
     effectiveContext: async () => 4096,
   });
 
@@ -129,7 +129,7 @@ test('empty model output cannot replace the temporary title', async () => {
     conversation: [{ role: 'user', content: 'Fix automatic chat naming.' }],
     model: 'title-model',
     streamChat: async () => ({ content: '<think>No visible answer.</think>\n  ' }),
-    supportsThinking: async () => false,
+    thinkValue: async () => undefined,
     effectiveContext: async () => 4096,
   });
 

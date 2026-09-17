@@ -322,3 +322,29 @@ test('a new catalog invalidates both cached guesses', () => {
   assert.match(remember, /contextCache\.clear\(\);/);
   assert.match(remember, /capsCache\.clear\(\);/);
 });
+
+test('no thinking gate is left on the capability probe alone', () => {
+  // getCapabilities() reports only vision on the OpenAI transport, so
+  // supportsThinking() is false for every API model. A site that gates on it
+  // sends nothing about thinking and leaves the server on its own default —
+  // which, on a build with no reasoning parser, returns the trace inside
+  // `content` where it cannot be stripped back out.
+  const main = read('main.js');
+  // thinkValue() is where the probe legitimately still appears — it is the
+  // Ollama half of the decision. Everywhere else must defer to it.
+  const callers = main.slice(0, main.indexOf('async function thinkValue'))
+    + main.slice(main.indexOf('const summarizerThink'));
+  const sites = callers.match(/\(await supportsThinking\([^)]*\)\)\s*\?/g) || [];
+  assert.deepEqual(sites, [], 'every think decision must go through thinkValue()');
+  assert.match(read('src/main/chat-title.js'), /await thinkValue\(model, false\)/);
+});
+
+test('chat_template_kwargs only goes to servers that read it', () => {
+  // OpenAI itself 400s on an unrecognized body param, so the kwarg cannot be
+  // sent to every OpenAI-compatible endpoint. max_model_len is vLLM's own
+  // spelling of the context window and stands in for "this is vLLM".
+  const main = read('main.js');
+  const gate = main.slice(main.indexOf('async function thinkValue'), main.indexOf('const summarizerThink'));
+  assert.match(gate, /acceptsTemplateKwargs \? !!want : undefined/);
+  assert.match(gate, /await supportsThinking\(model\)\) \? !!want : undefined/);
+});

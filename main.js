@@ -876,21 +876,34 @@ async function getCapabilities(model) {
 const supportsThinking = async (model) => (await getCapabilities(model)).includes('thinking');
 const supportsVision = async (model) => (await getCapabilities(model)).includes('vision');
 
-// What to pass as `think` when the model is being asked to summarize rather
-// than to work. Summarizers want it off: the trace is charged to the same
-// max_tokens as the record, and a model that thinks past the budget returns
-// empty content with finish_reason "length", which validateSummary can only
-// read as a failed summary.
+// What to pass as `think`, given what a caller wants. Returning undefined means
+// "say nothing about thinking" and leaves the model on its own default.
 //
 // The capability gate is right for Ollama, where sending `think` to a model
 // without the capability is an error. It is wrong for the OpenAI transport,
 // where getCapabilities() reports only vision — so supportsThinking() is false
-// for every API model and the gate would silently leave thinking on, which is
-// the state that made /compact fail against a local vLLM Qwen.
-const summarizerThink = async (model) =>
-  (runtimeSettings.provider === 'openai' || (await supportsThinking(model)))
-    ? false
-    : undefined;
+// for every API model and the gate silently leaves thinking on. That is the
+// state that made /compact fail against a local vLLM Qwen, and on a server with
+// no reasoning parser it is worse than wasteful: the trace comes back inside
+// `content` rather than in a field of its own, so it cannot be stripped after
+// the fact. It lands in the answer, at roughly five times the output tokens.
+//
+// Only the servers that read the kwarg are told about it. This was previously
+// sent to every OpenAI-compatible provider, which would draw a 400 from OpenAI
+// itself for an unrecognized param — a risk that only stayed quiet because the
+// send was limited to summarizer calls.
+async function thinkValue(model, want) {
+  if (runtimeSettings.provider === 'openai') {
+    return catalogDetails.get(model)?.acceptsTemplateKwargs ? !!want : undefined;
+  }
+  return (await supportsThinking(model)) ? !!want : undefined;
+}
+
+// Summarizers want thinking off: the trace is charged to the same max_tokens as
+// the record, and a model that thinks past the budget returns empty content with
+// finish_reason "length", which validateSummary can only read as a failed
+// summary.
+const summarizerThink = (model) => thinkValue(model, false);
 
 const runtimeMetadataCache = new Map();
 async function runtimeMetadata(model) {
@@ -1739,7 +1752,7 @@ async function runAgentTurn(model, cwd, autoApprove, think, subModel, onlineRese
   const contextLength = await effectiveContext(model);
   // For models that support thinking, always send an explicit true/false —
   // omitting the param makes Ollama think by default, ignoring the toggle.
-  const useThink = (await supportsThinking(model)) ? !!think : undefined;
+  const useThink = await thinkValue(model, think);
   let lastContent = '';
   let emptyNudges = 0;
   const runLog = { mutations: new Set(), commands: [], verified: false };
@@ -2371,7 +2384,7 @@ async function resolvePendingChatTitle(job) {
       conversation: loaded.chat.conversation,
       model: job.model,
       streamChat,
-      supportsThinking,
+      thinkValue,
       effectiveContext,
       signal: titleAbort.signal,
     });
@@ -2615,7 +2628,7 @@ async function runSubagent(task, subModel, cwd) {
   ];
   const numCtx = await effectiveContext(subModel, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
   // scouts should be fast: disable thinking where the model supports the flag
-  const useThink = (await supportsThinking(subModel)) ? false : undefined;
+  const useThink = await thinkValue(subModel, false);
   let finalContent = '';
   let steps = 0;
   // deadline for the whole subagent: aborts on user STOP or on timeout
@@ -2734,7 +2747,7 @@ async function runStructuredReview(model, cwd, requestedBase) {
     return normalizeCodeReview({ summary: `No changes were found relative to ${evidence.base}.`, findings: [] }, evidence.base);
   }
   const numCtx = await effectiveContext(model, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
-  const useThink = (await supportsThinking(model)) ? false : undefined;
+  const useThink = await thinkValue(model, false);
   const tools = [...SUBAGENT_TOOLS, SUBMIT_CODE_REVIEW_TOOL];
   const msgs = [
     { role: 'system', content: reviewerSystemPrompt(cwd, evidence.base) },
@@ -2947,7 +2960,7 @@ async function runOrchestratorPlan(model, goal, cwd, subModel, onlineResearch, t
     ? ORCHESTRATOR_TOOLS
     : ORCHESTRATOR_TOOLS.filter((definition) => !NETWORK_TOOLS.has(definition.function.name));
   const numCtx = await effectiveContext(model);
-  const useThink = (await supportsThinking(model)) ? !!think : undefined;
+  const useThink = await thinkValue(model, think);
   const msgs = [
     { role: 'system', content: orchestratorSystemPrompt(cwd, onlineResearch, taskBudget) },
     {
@@ -3103,7 +3116,7 @@ async function forceCoderWrapUp(coderModel, msgs, signal, think, numCtx) {
 
 async function runCoderTask(task, coderModel, cwd, autoApprove, think, repairFeedback = '', priorAttempt = null) {
   const numCtx = await effectiveContext(coderModel, runtimeSettings.coderContextCap || CODER_CTX_CAP);
-  const useThink = (await supportsThinking(coderModel)) ? !!think : undefined;
+  const useThink = await thinkValue(coderModel, think);
   const taskPacket = {
     ...task,
     ...(repairFeedback ? { verifier_feedback: repairFeedback } : {}),
@@ -3307,7 +3320,7 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
     })
     .join('\n\n'), 9000);
   try {
-    const useThink = (await supportsThinking(verifierModel)) ? false : undefined;
+    const useThink = await thinkValue(verifierModel, false);
     const numCtx = await effectiveContext(verifierModel, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
     const verdict = await completeText({
       model: verifierModel,
@@ -3336,7 +3349,7 @@ async function runOrchestrationVerifier(verifierModel, goal, task, coderResult, 
 // ---------- goal loop (/loop) ----------
 async function runVerifier(subModel, goal, summary, gitEvidence, signal) {
   try {
-    const think = (await supportsThinking(subModel)) ? false : undefined;
+    const think = await thinkValue(subModel, false);
     const numCtx = await effectiveContext(subModel, runtimeSettings.scoutContextCap || SUBAGENT_CTX_CAP);
     const verdict = await completeText({
       model: subModel,
@@ -5595,11 +5608,8 @@ async function compactConversation(model, signal = currentAbort?.signal) {
     // validateSummary then rejects an empty summary, the one retry does the
     // same, and the compaction degrades to the tail.
     //
-    // The capability gate cannot be used on the OpenAI transport:
-    // getCapabilities() only ever reports vision there, so supportsThinking()
-    // is false for every API model and the request would go out with thinking
-    // still on. Asked directly instead. The gate stays for Ollama, where
-    // sending `think` to a model that lacks the capability is an error.
+    // See thinkValue(): the capability gate cannot be used on the OpenAI
+    // transport, where getCapabilities() only ever reports vision.
     const useThink = await summarizerThink(model);
 
     // A transcript too large for one pass is split chronologically and folded
@@ -5846,7 +5856,7 @@ ipcMain.handle('chat:generateTitle', async (_e, conversationContent, model) => {
       conversation: conversationContent,
       model,
       streamChat,
-      supportsThinking,
+      thinkValue,
       effectiveContext,
       signal: titleAbort.signal,
     });

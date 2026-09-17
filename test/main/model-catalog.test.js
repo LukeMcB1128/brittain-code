@@ -19,7 +19,14 @@ test('OpenAI-compatible model metadata is kept for a large model picker', () => 
     inputPricePerMillion: 3,
     outputPricePerMillion: 15,
     modalities: ['text', 'image'],
+    acceptsTemplateKwargs: false,
   });
+});
+
+test('a vLLM server is recognised as accepting chat_template_kwargs', () => {
+  const [served] = normalizeOpenAIModels({ data: [{ id: 'brittain4', max_model_len: 32_768 }] });
+  assert.equal(served.acceptsTemplateKwargs, true);
+  assert.equal(served.contextLength, 32_768);
 });
 
 test('official OpenAI models do not appear under an internal system group', () => {

@@ -27,6 +27,18 @@ function statedContextLength(entry) {
   return null;
 }
 
+// `chat_template_kwargs` is how a caller turns a reasoning model's thinking off,
+// and it is a vLLM extension rather than part of the OpenAI API: OpenAI itself
+// rejects unrecognized body params outright, so sending it blindly to every
+// OpenAI-compatible endpoint trades one broken provider for another. Nothing in
+// /v1/models announces the field, but `max_model_len` is vLLM's own spelling of
+// the context window — a server that uses that name is the same server that
+// reads the kwarg. Detecting it here keeps the guess in one place instead of
+// spread across the call sites that need the answer.
+function acceptsTemplateKwargs(entry) {
+  return finiteNumber(entry?.max_model_len) !== null;
+}
+
 function normalizeOpenAIModels(payload) {
   const entries = Array.isArray(payload?.data) ? payload.data : [];
   return entries
@@ -46,6 +58,7 @@ function normalizeOpenAIModels(payload) {
         modalities: Array.isArray(entry?.architecture?.input_modalities)
           ? entry.architecture.input_modalities.map(String)
           : [],
+        acceptsTemplateKwargs: acceptsTemplateKwargs(entry),
       };
     })
     .filter(Boolean)
